@@ -106,6 +106,89 @@ class Database:
         await self.conn.execute("""CREATE TABLE IF NOT EXISTS gem_shop (id TEXT PRIMARY KEY, name TEXT, description TEXT, price_gems INTEGER, emoji TEXT DEFAULT '💎', category TEXT DEFAULT 'upgrade', max_level INTEGER DEFAULT 1)""")
         await self.conn.execute("""CREATE TABLE IF NOT EXISTS player_upgrades (user_id INTEGER, upgrade_id TEXT, level INTEGER DEFAULT 1, purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, upgrade_id))""")
         await self.conn.execute("""CREATE TABLE IF NOT EXISTS grid_shop (id TEXT PRIMARY KEY, name TEXT, description TEXT, price_coins INTEGER, size INTEGER, emoji TEXT DEFAULT '📐')""")
+                # --- PVP И РЕЙДЫ ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS raid_parties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                leader_id INTEGER,
+                member2_id INTEGER DEFAULT NULL,
+                member3_id INTEGER DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS raid_cooldowns (
+                user_id INTEGER PRIMARY KEY,
+                last_raid_time TIMESTAMP,
+                last_attacked_time TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS duel_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                winner_id INTEGER, loser_id INTEGER, bet INTEGER, type TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # --- КЛАНЫ ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE, leader_id INTEGER, treasury INTEGER DEFAULT 0, bonus REAL DEFAULT 0.0
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clan_members (
+                user_id INTEGER PRIMARY KEY, clan_id INTEGER
+            )
+        """)
+
+        # --- ЭКОНОМИКА ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS bank_deposits (
+                user_id INTEGER PRIMARY KEY, amount INTEGER, interest_rate REAL, end_time TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS market_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, item_id TEXT, stars INTEGER, price INTEGER, expires_at TIMESTAMP
+            )
+        """)
+
+        # --- ПРОГРЕССИЯ И КОСМЕТИКА ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS user_pets (
+                user_id INTEGER PRIMARY KEY, pet_id TEXT, level INTEGER DEFAULT 1, last_fed TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS user_cosmetics (
+                user_id INTEGER PRIMARY KEY, embed_color INTEGER DEFAULT 0x00ff00, bg_url TEXT, castle_icon TEXT
+            )
+        """)
+        
+        # Колонки в players
+        for column, definition in [
+            ("streak_days", "INTEGER DEFAULT 0"),
+            ("last_daily", "TIMESTAMP DEFAULT NULL"),
+            ("title", "TEXT DEFAULT 'Новичок'"),
+            ("auto_collect", "INTEGER DEFAULT 0"),
+            ("advent_claimed", "INTEGER DEFAULT 0"),
+        ]:
+            try: await self.db.execute(f"ALTER TABLE players ADD COLUMN {column} {definition}")
+            except: pass
+
+        # Эксклюзивные генераторы для Daily (30 дней)
+        daily_gens = [
+            ("daily_common", "Ежедневный лист", "🍃", "common", 0),
+            ("daily_uncommon", "Ежедневный камень", "🪨", "uncommon", 0),
+            ("daily_rare", "Ежедневный кристалл", "💠", "rare", 0),
+            ("daily_epic", "Ежедневная сфера", "🔮", "epic", 0),
+            ("daily_legendary", "Ежедневная корона", "👑", "legendary", 0),
+            ("daily_mythic", "Ежедневный феникс", "🔥", "mythic", 0),
+        ]
+        for g in daily_gens:
+            await self.db.execute("INSERT OR IGNORE INTO items (id, name, emoji, rarity, price, buyable, income_per_hour) VALUES (?, ?, ?, ?, 0, 0, 1.5)", g)
 
         gen_names = [("basic_gen", "Базовый генератор", "⚙️", "common", False), ("copper_gen", "Медный генератор", "🔩", "common", False), ("bronze_gen", "Бронзовый генератор", "🥉", "common", False), ("iron_gen", "Железный генератор", "⛓️", "uncommon", False), ("steel_gen", "Стальной генератор", "🔗", "uncommon", False), ("silver_gen", "Серебряный генератор", "🥈", "uncommon", False), ("gold_gen", "Золотой генератор", "🥇", "rare", False), ("platinum_gen", "Платиновый генератор", "💠", "rare", False), ("emerald_gen", "Изумрудный генератор", "💚", "rare", False), ("ruby_gen", "Рубиновый генератор", "❤️", "epic", False), ("sapphire_gen", "Сапфировый генератор", "💙", "epic", False), ("diamond_gen", "Алмазный генератор", "💎", "epic", False), ("crystal_gen", "Кристальный генератор", "🔮", "legendary", False), ("mithril_gen", "Мифриловый генератор", "🪄", "legendary", False), ("adamantite_gen", "Адамантитовый генератор", "🛡️", "legendary", False), ("obsidian_gen", "Обсидиановый генератор", "🖤", "legendary", False), ("dragon_gen", "Дракониевый генератор", "🐉", "mythic", False), ("sky_gen", "Небесный генератор", "☁️", "mythic", False), ("star_gen", "Звёздный генератор", "⭐", "mythic", False), ("cosmic_gen", "Космический генератор", "🌌", "mythic", False), ("galaxy_gen", "Галактический генератор", "🌠", "mythic", False), ("nebula_gen", "Туманный генератор", "🌫️", "mythic", False), ("quantum_gen", "Квантовый генератор", "⚛️", "mythic", False), ("plasma_gen", "Плазменный генератор", "🔥", "mythic", False), ("dark_gen", "Тёмный генератор", "🕳️", "mythic", False), ("light_gen", "Световой генератор", "💡", "mythic", False), ("time_gen", "Временной генератор", "⏳", "mythic", False), ("space_gen", "Пространственный генератор", "🌍", "mythic", True), ("divine_gen", "Божественный генератор", "✨", "mythic", True), ("legendary_gen", "Легендарный генератор", "👑", "mythic", True)]
         GEM_INCOME = {"space_gen": 0.02, "divine_gen": 0.05, "legendary_gen": 0.10}
@@ -158,6 +241,17 @@ async def get_player_stats(user_id: int) -> dict:
         await db.commit()
         return {"coins": 3, "gems": 0, "grid": 9, "bonus": 0.0}
     return {"coins": row[0], "gems": row[1], "grid": row[2], "bonus": row[3]}
+    
+async def get_combat_power(user_id: int) -> int:
+    """Считает боевую мощь на основе цены и звезд генераторов в замке."""
+    async with bot.db.execute("""
+        SELECT SUM(i.price * (1 + inv.stars * 0.5)) 
+        FROM inventory inv 
+        JOIN items i ON inv.item_id = i.id 
+        WHERE inv.user_id = ? AND inv.location = 'profile'
+    """, (user_id,)) as c:
+        power = (await c.fetchone())[0] or 0
+    return int(power)
 
 async def get_income_data(user_id: int):
     rows = await db.fetchall("SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour FROM inventory inv JOIN items i ON inv.item_id = i.id WHERE inv.user_id = ? AND inv.location = 'profile'", (user_id,))
@@ -246,6 +340,43 @@ class MainMenuView(discord.ui.View):
         embed = discord.Embed(title="💱 Обмен валют", description=f"🪙 {COINS_PER_GEM} монет → 💎 1 гем\n💎 1 гем → 🪙 {GEMS_PER_COIN_RATE} монет\n\nВыбери направление:", color=0x2ecc71)
         await interaction.edit_original_response(embed=embed, view=ExchangeView(self.author_id))
 
+    @discord.ui.button(label="Социум", emoji="⚔️", style=discord.ButtonStyle.danger, row=2)
+    async def tab_social(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+class SocialView(BaseView):
+    @discord.ui.button(label="Рейд", emoji="🏰", style=discord.ButtonStyle.primary)
+    async def btn_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Подготовка к рейду", description="Выбери режим:", color=0xe74c3c)
+        view = discord.ui.View()
+        
+        solo = discord.ui.Button(label="В одиночку", emoji="1️⃣", style=discord.ButtonStyle.secondary)
+        solo.callback = lambda i: open_raid_targets(i, self.author_id, 1)
+        view.add_item(solo)
+        
+        duo = discord.ui.Button(label="Группа (2 чел)", emoji="2️⃣", style=discord.ButtonStyle.secondary)
+        duo.callback = lambda i: open_raid_targets(i, self.author_id, 2)
+        view.add_item(duo)
+        
+        trio = discord.ui.Button(label="Группа (3 чел)", emoji="3️⃣", style=discord.ButtonStyle.secondary)
+        trio.callback = lambda i: open_raid_targets(i, self.author_id, 3)
+        view.add_item(trio)
+        
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    @discord.ui.button(label="Дуэль", emoji="🤺", style=discord.ButtonStyle.success)
+    async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DuelModal(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
 class ProfileView(discord.ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=120)
@@ -316,6 +447,152 @@ class ExchangeView(discord.ui.View):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+async def open_raid_targets(interaction: discord.Interaction, author_id: int, group_size: int):
+    await interaction.response.send_modal(RaidTargetModal(author_id, group_size))
+
+class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
+    target_id = discord.ui.TextInput(label="ID игрока для атаки", required=True)
+
+    def __init__(self, author_id: int, group_size: int):
+        super().__init__()
+        self.author_id = author_id
+        self.group_size = group_size
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            target = int(self.target_id.value)
+        except ValueError:
+            return await interaction.followup.send("❌ Неверный ID.", ephemeral=True)
+        
+        if target == self.author_id:
+            return await interaction.followup.send("❌ Нельзя атаковать себя.", ephemeral=True)
+
+        # 1. Кулдауны
+        async with bot.db.execute("SELECT last_raid_time, last_attacked_time FROM raid_cooldowns WHERE user_id = ?", (self.author_id,)) as c:
+            row = await c.fetchone()
+        
+        now = datetime.datetime.now()
+        if row:
+            if row[0]:
+                last_raid = datetime.datetime.fromisoformat(row[0])
+                if (now - last_raid).total_seconds() < 3600: # 1 час
+                    return await interaction.followup.send("❌ Кулдаун на рейд: 1 час.", ephemeral=True)
+            if row[1]:
+                last_attacked = datetime.datetime.fromisoformat(row[1])
+                if (now - last_attacked).total_seconds() < 21600: # 6 часов
+                    return await interaction.followup.send("❌ Этого игрока уже атаковали недавно (кулдаун 6 ч).", ephemeral=True)
+
+        # 2. Мощь атакующих
+        power_atk = await get_combat_power(self.author_id)
+        # (Для простоты в этой итерации считаем группу как +50% мощи за каждого)
+        if self.group_size > 1:
+            power_atk = int(power_atk * (1 + 0.5 * (self.group_size - 1)))
+
+        # 3. Мощь защиты
+        power_def = await get_combat_power(target)
+        if power_def == 0:
+            power_def = 10 # Защита новичка
+
+        # 4. Расчёт (рандом с учётом мощи)
+        import random
+        roll_atk = random.randint(1, power_atk)
+        roll_def = random.randint(1, power_def)
+        
+        success = roll_atk > roll_def
+
+        # Запись кулдаунов
+        await bot.db.execute("""
+            INSERT INTO raid_cooldowns (user_id, last_raid_time, last_attacked_time) VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET last_raid_time = ?, last_attacked_time = ?
+        """, (self.author_id, now.isoformat(), now.isoformat(), now.isoformat(), now.isoformat()))
+        
+        # Ставим кулдаун на жертву
+        await bot.db.execute("""
+            INSERT INTO raid_cooldowns (user_id, last_attacked_time) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET last_attacked_time = ?
+        """, (target, now.isoformat(), now.isoformat()))
+        await bot.db.commit()
+
+        if success:
+            # Забираем 15% баланса
+            async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (target,)) as c:
+                victim_coins = (await c.fetchone())[0]
+            
+            loot = int(victim_coins * 0.15)
+            if loot > 0:
+                await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (loot, target))
+                await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id = ?", (loot, self.author_id))
+                await bot.db.commit()
+                msg = f"🏆 **Успешный рейд!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nВы украли 🪙 **{loot}** монет!"
+            else:
+                msg = "🏆 Победа, но у врага пустой кошелёк."
+        else:
+            msg = f"💥 **Провал!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nТы ничего не украл."
+
+        embed = discord.Embed(title="Результат рейда", description=msg, color=0x2ecc71 if success else 0xe74c3c)
+        await interaction.followup.send(embed=embed)
+
+class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
+    opponent_id = discord.ui.TextInput(label="ID противника", required=True)
+    bet = discord.ui.TextInput(label="Ставка (монеты)", default="100", required=True)
+    mode = discord.ui.TextInput(label="Режим (dice/power)", default="dice", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            target = int(self.opponent_id.value)
+            bet = int(self.bet.value)
+            if bet <= 0 or target == self.author_id: raise ValueError
+        except ValueError:
+            return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
+
+        mode = self.mode.value.strip().lower()
+        if mode not in ("dice", "power"):
+            return await interaction.followup.send("❌ Режим: dice или power.", ephemeral=True)
+
+        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (self.author_id,)) as c:
+            c1 = (await c.fetchone())[0]
+        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (target,)) as c:
+            row = await c.fetchone()
+            c2 = row[0] if row else 0
+        
+        if c1 < bet or c2 < bet:
+            return await interaction.followup.send("❌ У кого-то не хватает монет на ставку.", ephemeral=True)
+
+        if mode == "dice":
+            import random
+            r1, r2 = random.randint(1, 100), random.randint(1, 100)
+            winner = self.author_id if r1 > r2 else target
+            text = f"🎲 Выпало: {r1} против {r2}"
+        else:
+            p1 = await get_combat_power(self.author_id)
+            p2 = await get_combat_power(target)
+            winner = self.author_id if p1 > p2 else target
+            text = f"⚔️ Мощь: {p1} против {p2}"
+
+        # Перевод монет
+        await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (bet, self.author_id))
+        await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (bet, target))
+        await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id = ?", (bet * 2, winner))
+        
+        # История
+        loser = target if winner == self.author_id else self.author_id
+        await bot.db.execute("INSERT INTO duel_history (winner_id, loser_id, bet, type) VALUES (?, ?, ?, ?)", (winner, loser, bet, mode))
+        await bot.db.commit()
+
+        if winner == self.author_id:
+            msg = f"🏆 Ты победил в дуэли!\n{text}\nЗабрал банк: 🪙 {bet * 2}."
+        else:
+            msg = f"💥 Ты проиграл.\n{text}\nПотерял: 🪙 {bet}."
+
+        embed = discord.Embed(title="Результат дуэли", description=msg, color=0x2ecc71 if winner == self.author_id else 0xe74c3c)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============================================================
 #  🚀 ЗАПУСК
