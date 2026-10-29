@@ -11,6 +11,7 @@ import datetime
 import random
 import json
 import os
+import re
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -521,12 +522,49 @@ def make_select(placeholder: str, options: list[discord.SelectOption], callback,
     return select
 
 
+def _visual_len(text: str) -> int:
+    """Считает визуальную длину строки: кастомные эмодзи = 1 символ."""
+    length = 0
+    i = 0
+    while i < len(text):
+        if text[i] == "<" and i + 1 < len(text) and text[i + 1] in (":", "a"):
+            end = text.find(">", i)
+            if end == -1:
+                length += 1
+                i += 1
+                continue
+            length += 1
+            i = end + 1
+        else:
+            length += 1
+            i += 1
+    return length
+
+CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:\d+>$")
+
 def format_slot(emoji: str, stars: int) -> str:
+    """Фиксированная визуальная ширина ячейки. Кастомные эмодзи считаются как 1."""
     if stars > 0:
         text = f"{emoji}({stars}⭐)"
     else:
         text = emoji
-    return text.ljust(SLOT_WIDTH)
+
+    visual = _visual_len(text)
+    padding = max(1, SLOT_WIDTH - visual)
+    return text + " " * padding
+
+
+def is_valid_emoji(s: str) -> bool:
+    """Проверяет, что строка — юникод-эмодзи или кастомный эмодзи Discord."""
+    s = s.strip()
+    if not s:
+        return False
+    if CUSTOM_EMOJI_RE.match(s):
+        return True
+    # Юникод-эмодзи: короткая не-ASCII строка
+    if len(s) <= 8 and not s.isascii():
+        return True
+    return False
 
 
 async def get_player_stats(user_id: int, guild_id: int = None):
@@ -3421,23 +3459,24 @@ class SettingsGeneralModal(discord.ui.Modal, title="Общие настройк�
         guild_id = interaction.guild_id
         settings = await get_settings(guild_id)
         changes = []
-        if self.bot_name.value:
-            await save_setting(guild_id, "bot_name", self.bot_name.value.strip())
-            changes.append(f"📛 Название: **{self.bot_name.value}**")
         if self.item_id.value and self.emoji.value:
             item_id = self.item_id.value.strip()
+            emoji_val = self.emoji.value.strip()
+            if not is_valid_emoji(emoji_val):
+                await interaction.followup.send(
+                    "❌ Эмодзи должен быть юникод-символом (👑) или кастомным (`<:name:id>`).",
+                    ephemeral=True
+                )
+                return
             async with bot.db.execute("SELECT name FROM items WHERE id = ?", (item_id,)) as c:
                 item = await c.fetchone()
             if not item:
                 await interaction.followup.send(f"❌ Предмет `{item_id}` не найден.", ephemeral=True)
                 return
             custom = settings["custom_emojis"]
-            custom[item_id] = self.emoji.value.strip()
+            custom[item_id] = emoji_val
             await save_setting(guild_id, "custom_emojis", custom)
-            changes.append(f"🎨 {item[0]}: {self.emoji.value}")
-        await interaction.followup.send(
-            "✅ Обновлено:\n" + "\n".join(changes) if changes else "ℹ️ Ничего не изменено.", ephemeral=True
-        )
+            changes.append(f"🎨 {item[0]}: {emoji_val}")
 
 
 class SettingsEconomyView(discord.ui.View):
@@ -3867,13 +3906,20 @@ class EditEmojiModal(discord.ui.Modal, title="Изменить эмодзи"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        emoji_val = self.emoji.value.strip()
+        if not is_valid_emoji(emoji_val):
+            await interaction.followup.send(
+                "❌ Эмодзи должен быть юникод-символом (👑) или кастомным (`<:name:id>`).",
+                ephemeral=True
+            )
+            return
         guild_id = interaction.guild_id
         settings = await get_settings(guild_id)
         custom = settings["custom_emojis"]
-        custom[self.key] = self.emoji.value.strip()
+        custom[self.key] = emoji_val
         await save_setting(guild_id, "custom_emojis", custom)
         name, _ = EMOJI_KEYS.get(self.key, (self.key, ""))
-        await interaction.followup.send(f"✅ {name}: {self.emoji.value}", ephemeral=True)
+        await interaction.followup.send(f"✅ {name}: {emoji_val}", ephemeral=True)
 
 
 # ============================================================
