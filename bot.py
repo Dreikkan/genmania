@@ -498,6 +498,14 @@ class CastleBot(commands.Bot):
                 user_id INTEGER PRIMARY KEY, clan_id INTEGER
             )
         """)
+        try:
+            await self.db.execute("ALTER TABLE clan_members ADD COLUMN role TEXT DEFAULT 'member'")
+        except Exception:
+            pass
+        try:
+            await self.db.execute("ALTER TABLE clan_members ADD COLUMN joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        except Exception:
+            pass
 
         # --- ЭКОНОМИКА ---
         await self.db.execute("""
