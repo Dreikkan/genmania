@@ -1532,24 +1532,18 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
                 if (now - last_attacked).total_seconds() < 21600: # 6 часов
                     return await interaction.followup.send("❌ Этого игрока уже атаковали недавно (кулдаун 6 ч).", ephemeral=True)
 
-        # 2. Мощь атакующих
-        power_atk = await get_combat_power(self.author_id)
-        # (Для простоты в этой итерации считаем группу как +50% мощи за каждого)
-        if self.group_size > 1:
-            power_atk = int(power_atk * (1 + 0.5 * (self.group_size - 1)))
-
-        # 3. Мощь защиты
-        power_def = await get_combat_power(target)
-        if power_def == 0:
-            power_def = 10 # Защита новичка
-
+                # 2. Мощь атакующих
         power_atk = await get_combat_power(self.author_id)
         if power_atk <= 0:
             return await interaction.followup.send(
                 "❌ У тебя нет генераторов в замке. Мощь = 0. Купи генераторы в магазине.",
                 ephemeral=True
             )
+        # Групповой бонус: +50% за каждого дополнительного члена группы
+        if self.group_size > 1:
+            power_atk = int(power_atk * (1 + 0.5 * (self.group_size - 1)))
 
+        # 3. Мощь защиты
         power_def = await get_combat_power(target)
         if power_def <= 0:
             return await interaction.followup.send(
@@ -1627,7 +1621,7 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
         if c1 < bet or c2 < bet:
             return await interaction.followup.send("❌ У кого-то не хватает монет на ставку.", ephemeral=True)
 
-        if mode == "dice":
+                if mode == "dice":
             import random
             r1, r2 = random.randint(1, 100), random.randint(1, 100)
             winner = self.author_id if r1 > r2 else target
@@ -1635,6 +1629,11 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
         else:
             p1 = await get_combat_power(self.author_id)
             p2 = await get_combat_power(target)
+            if p1 <= 0 or p2 <= 0:
+                return await interaction.followup.send(
+                    "❌ У одного из игроков нет генераторов для дуэли.",
+                    ephemeral=True
+                )
             winner = self.author_id if p1 > p2 else target
             text = f"⚔️ Мощь: {p1} против {p2}"
 
