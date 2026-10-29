@@ -297,20 +297,20 @@ async def get_income_bonus(user_id: int) -> float:
     return bonus
 
 
-async def get_item_emoji(guild_id: int, item_id: str, default: str) -> str:
+async def get_guild_emojis(guild_id: int) -> dict:
+    """Один запрос — все кастомные эмодзи сервера."""
     if not guild_id:
-        return default
+        return {}
     async with bot.db.execute(
         "SELECT custom_emojis FROM guild_settings WHERE guild_id = ?", (guild_id,)
     ) as c:
         row = await c.fetchone()
     if row and row[0]:
         try:
-            custom = json.loads(row[0])
-            return custom.get(item_id, default)
+            return json.loads(row[0])
         except Exception:
-            return default
-    return default
+            return {}
+    return {}
 
 
 async def calculate_passive_income(user_id: int):
@@ -356,6 +356,7 @@ async def calculate_passive_income(user_id: int):
 
 
 async def collect_income(user_id: int, channel: discord.abc.Messageable):
+    """Начисляет пассивный доход. Вызывается ОДИН РАЗ при открытии /меню."""
     coins_earned, gems_earned = await calculate_passive_income(user_id)
     if coins_earned <= 0 and gems_earned <= 0:
         return
@@ -377,7 +378,10 @@ async def collect_income(user_id: int, channel: discord.abc.Messageable):
         f"🪙 +{coins_earned}" if coins_earned else "",
         f"💎 +{gems_earned}" if gems_earned else "",
     ]))
-    await channel.send(msg, delete_after=10)
+    try:
+        await channel.send(msg, delete_after=10)
+    except Exception:
+        pass
 
     await update_quest_progress(user_id, "collect_income")
 
@@ -500,17 +504,39 @@ async def update_quest_progress(user_id: int, quest_id: str, amount: int = 1):
 
 
 # ============================================================
-#  🖼️ ГЕНЕРАТОРЫ EMBED'ОВ ДЛЯ МЕНЮ
+#  🖼️ ГЕНЕРАТОРЫ EMBED'ОВ (ОПТИМИЗИРОВАННЫЕ)
 # ============================================================
 
 async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
     guild_id = interaction.guild_id
 
-    await collect_income(user_id, interaction.channel)
+    # Один запрос: статистика + суммарный доход
+    async with bot.db.execute("""
+        SELECT
+            p.grid_size, p.income_bonus, p.gems, p.coins,
+            COALESCE(SUM(CASE WHEN inv.location = 'profile' THEN i.income_per_hour ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN inv.location = 'profile' THEN i.income_gems_per_hour ELSE 0 END), 0)
+        FROM players p
+        LEFT JOIN inventory inv ON inv.user_id = p.user_id
+        LEFT JOIN items i ON inv.item_id = i.id
+        WHERE p.user_id = ?
+        GROUP BY p.user_id
+    """, (user_id,)) as c:
+        row = await c.fetchone()
 
-    grid_size, bonus, gems, coins = await get_player_stats(user_id)
+    if not row:
+        await bot.db.execute(
+            "INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, ?)",
+            (user_id, START_COINS)
+        )
+        await bot.db.commit()
+        grid_size, bonus, gems, coins = START_GRID, 0.0, 0, START_COINS
+        hourly_coins_raw, hourly_gems_raw = 0, 0
+    else:
+        grid_size, bonus, gems, coins, hourly_coins_raw, hourly_gems_raw = row
 
+    # Инвентарь профиля
     async with bot.db.execute("""
         SELECT inv.slot, i.id, i.emoji FROM inventory inv
         JOIN items i ON inv.item_id = i.id
@@ -518,20 +544,11 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     """, (user_id,)) as c:
         rows = await c.fetchall()
 
+    # Кэш эмодзи — ОДИН запрос
+    custom_emojis = await get_guild_emojis(guild_id)
     items = {}
     for slot, item_id, default_emoji in rows:
-        emoji = await get_item_emoji(guild_id, item_id, default_emoji) if guild_id else default_emoji
-        items[slot] = emoji
-
-    async with bot.db.execute("""
-        SELECT
-            COALESCE(SUM(CASE WHEN inv.location = 'profile' THEN i.income_per_hour ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN inv.location = 'profile' THEN i.income_gems_per_hour ELSE 0 END), 0)
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ?
-    """, (user_id,)) as c:
-        hourly_coins_raw, hourly_gems_raw = await c.fetchone()
+        items[slot] = custom_emojis.get(item_id, default_emoji)
 
     multiplier = 1 + bonus
     hourly_coins = hourly_coins_raw * multiplier
@@ -553,7 +570,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     embed.add_field(name="Кошелёк", value=f"🪙 {coins} | 💎 {gems}", inline=False)
     embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонус дохода", value=f"+{int(bonus * 100)}%", inline=True)
-    #embed.add_field(name="Сетка", value=f"{width}x{width} ({grid_size} слотов)", inline=True)
+    embed.add_field(name="Сетка", value=f"{width}x{width} ({grid_size} слотов)", inline=True)
 
     grid_str = ""
     for slot in range(grid_size):
@@ -572,7 +589,12 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
 async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
     guild_id = interaction.guild_id
-    grid_size = await get_grid_size(user_id)
+
+    async with bot.db.execute(
+        "SELECT grid_size FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    grid_size = (row[0] if row else START_GRID) or START_GRID
 
     async with bot.db.execute("""
         SELECT inv.slot, i.id, i.emoji FROM inventory inv
@@ -581,10 +603,10 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     """, (user_id,)) as c:
         rows = await c.fetchall()
 
+    custom_emojis = await get_guild_emojis(guild_id)
     items = {}
     for slot, item_id, default_emoji in rows:
-        emoji = await get_item_emoji(guild_id, item_id, default_emoji) if guild_id else default_emoji
-        items[slot] = emoji
+        items[slot] = custom_emojis.get(item_id, default_emoji)
 
     width = int(grid_size ** 0.5)
     embed = discord.Embed(title=f"🎒 Хранилище {interaction.user.name}", color=0x808080)
@@ -605,6 +627,7 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
 
 async def build_shop_embeds(interaction: discord.Interaction) -> list[discord.Embed]:
     guild_id = interaction.guild_id
+    custom_emojis = await get_guild_emojis(guild_id)
 
     async with bot.db.execute(
         "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour "
@@ -626,7 +649,7 @@ async def build_shop_embeds(interaction: discord.Interaction) -> list[discord.Em
             color=RARITY_COLORS[rarity]
         )
         for item_id, name, price, income_coins, default_emoji, _, income_gems in grouped[rarity]:
-            emoji = await get_item_emoji(guild_id, item_id, default_emoji) if guild_id else default_emoji
+            emoji = custom_emojis.get(item_id, default_emoji)
 
             income_str = ""
             if income_coins > 0:
@@ -772,13 +795,13 @@ async def build_stats_embed(interaction: discord.Interaction) -> discord.Embed:
 
 
 # ============================================================
-#  🎛️ ИНТЕРАКТИВНОЕ МЕНЮ С ВКЛАДКАМИ
+#  🎛️ ГЛАВНОЕ МЕНЮ С ВКЛАДКАМИ (ОПТИМИЗИРОВАННОЕ)
 # ============================================================
 
 class MainMenuView(discord.ui.View):
     """Единое меню с вкладками. Доступно только автору команды."""
 
-    def __init__(self, author_id: int, timeout: int = 300):
+    def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(timeout=timeout)
         self.author_id = author_id
         self.current_tab = "profile"
@@ -793,28 +816,30 @@ class MainMenuView(discord.ui.View):
 
     async def _render(self, interaction: discord.Interaction, tab: str):
         self.current_tab = tab
+        # Сразу подтверждаем — даёт 15 минут вместо 3 секунд
+        await interaction.response.defer()
 
         if tab == "profile":
             embed = await build_profile_embed(interaction)
-            await interaction.response.edit_message(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
         elif tab == "storage":
             embed = await build_storage_embed(interaction)
-            await interaction.response.edit_message(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
         elif tab == "shop":
             embeds = await build_shop_embeds(interaction)
-            await interaction.response.edit_message(embed=None, embeds=embeds, view=self)
+            await interaction.edit_original_response(embed=None, embeds=embeds, view=self)
         elif tab == "gem_shop":
             embed = await build_gem_shop_embed(interaction)
-            await interaction.response.edit_message(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
         elif tab == "achievements":
             embed = await build_achievements_embed(interaction)
-            await interaction.response.edit_message(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
         elif tab == "quests":
             embed = await build_quests_embed(interaction)
-            await interaction.response.edit_message(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
         elif tab == "stats":
             embed = await build_stats_embed(interaction)
-            await interaction.response.edit_message(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
 
     @discord.ui.button(label="Профиль", emoji="👤", style=discord.ButtonStyle.primary, row=0)
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -858,7 +883,7 @@ class MainMenuView(discord.ui.View):
 
 
 async def send_menu(interaction: discord.Interaction, *, embed=None, embeds=None):
-    """Совместимость: отправляет меню с вкладками."""
+    """Быстрый доступ: открывает полное меню с вкладками."""
     view = MainMenuView(interaction.user.id)
     kwargs = {"view": view}
     if embed is not None:
@@ -869,11 +894,14 @@ async def send_menu(interaction: discord.Interaction, *, embed=None, embeds=None
 
 
 # ============================================================
-#  🚪 ГЛАВНАЯ КОМАНДА /МЕНЮ
+#  🚪 ГЛАВНОЕ МЕНЮ
 # ============================================================
 
 @bot.tree.command(name="меню", description="Открыть главное меню замка")
 async def main_menu(interaction: discord.Interaction):
+    # Доход начисляется ОДИН раз при открытии
+    await collect_income(interaction.user.id, interaction.channel)
+
     view = MainMenuView(interaction.user.id)
     embed = await build_profile_embed(interaction)
     await interaction.response.send_message(embed=embed, view=view)
@@ -1500,7 +1528,7 @@ async def settings(
         embed.add_field(name="Название", value=name, inline=False)
         embed.add_field(name="Кастомные эмодзи", value=emojis or "нет", inline=False)
         embed.set_footer(text="Использование: /настройки название:<...> предмет:<id> эмодзи:<emoji>")
-        return await send_menu(interaction, embed=embed)
+        return await interaction.response.send_message(embed=embed)
 
     await interaction.response.send_message(
         "✅ Настройки обновлены:\n" + "\n".join(changes),
