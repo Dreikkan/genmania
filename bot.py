@@ -1,5 +1,5 @@
 # ============================================================
-#  🏰 Gen Mania — Discord Bot (финальная версия со звёздами)
+#  🏰 Gen Mania — Discord Bot (финальная версия)
 #  Python 3.10+ | discord.py 2.x | aiosqlite
 # ============================================================
 
@@ -41,7 +41,6 @@ RARITY_NAMES = {
     "mythic":    "Мифический",
 }
 
-# Цепочка синтеза (30 генераторов, до space_gen)
 CRAFT_CHAIN = {
     "basic_gen":      "copper_gen",
     "copper_gen":     "bronze_gen",
@@ -70,7 +69,6 @@ CRAFT_CHAIN = {
     "dark_gen":       "light_gen",
     "light_gen":      "time_gen",
     "time_gen":       "space_gen",
-    # space_gen, divine_gen, legendary_gen — гемовые, не крафтятся
 }
 
 CRAFT_COST = 5
@@ -105,7 +103,6 @@ CRAFT_SETTINGS = {
     "time_gen":       {"chance": 0.08, "gems": 1000},
 }
 
-# Звёзды: сколько копий нужно, шанс успеха, стоимость в гемах
 STAR_UPGRADE = {
     1: {"copies": 2, "chance": 1.00, "gems": 0},
     2: {"copies": 3, "chance": 0.90, "gems": 0},
@@ -114,14 +111,14 @@ STAR_UPGRADE = {
     5: {"copies": 6, "chance": 0.45, "gems": 40},
 }
 
-STAR_BONUS_PER_STAR = 0.05  # +5% за звезду
+STAR_BONUS_PER_STAR = 0.05
 
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
 SELL_RATE = 0.15
 START_GRID = 36
-PAGE_SIZE = 5
-SELECT_PAGE_SIZE = 25
+PAGE_SIZE = 10
+SHOP_SELECT_PAGE_SIZE = 10
 
 QUEST_POOL = {
     "craft_3":        ("Сделай 3 синтеза", 3, 5),
@@ -323,7 +320,6 @@ class CastleBot(commands.Bot):
             )
         """)
 
-        # --- 30 генераторов, прогрессия 1.6, последние 3 — гемовые ---
         gen_names = [
             ("basic_gen",     "Базовый генератор",        "⚙️", "common",    False),
             ("copper_gen",    "Медный генератор",         "🔩", "common",    False),
@@ -354,7 +350,7 @@ class CastleBot(commands.Bot):
             ("time_gen",      "Временной генератор",      "⏳", "mythic",    False),
             ("space_gen",     "Пространственный генератор","🌍", "mythic",   True),
             ("divine_gen",    "Божественный генератор",   "✨", "mythic",    True),
-            ("mythical_gen", "Мифический генератор",    "👑", "mythic",    True),
+            ("legendary_gen", "Легендарный генератор",    "👑", "mythic",    True),
         ]
 
         GEM_INCOME = {
@@ -854,7 +850,7 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
 
     async with bot.db.execute(
         "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour "
-        "FROM items WHERE buyable = 1"
+        "FROM items WHERE buyable = 1 ORDER BY price ASC"
     ) as c:
         rows = await c.fetchall()
 
@@ -1410,9 +1406,9 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
         await interaction.followup.send("❌ В этой локации нет предметов.", ephemeral=True)
         return
 
-    total_pages = max(1, (len(rows) + SELECT_PAGE_SIZE - 1) // SELECT_PAGE_SIZE)
+    total_pages = max(1, (len(rows) + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * SELECT_PAGE_SIZE: page * SELECT_PAGE_SIZE + SELECT_PAGE_SIZE]
+    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
 
     options = []
     for slot, item_id, name, default_emoji, stars in chunk:
@@ -1956,14 +1952,14 @@ class ShopView(BaseView):
 
     async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with bot.db.execute("SELECT id, name, price, emoji FROM items WHERE buyable = 1") as c:
+        async with bot.db.execute(
+            "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
+        ) as c:
             rows = await c.fetchall()
-        options = [discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=emoji) for item_id, name, price, emoji in rows]
-        if not options:
+        if not rows:
             await interaction.followup.send("❌ Магазин пуст.", ephemeral=True)
             return
-        embed = discord.Embed(title="🛒 Выбери предмет", description="Выбери предмет:", color=0xf1c40f)
-        await interaction.edit_original_response(embed=embed, view=ShopBuySelectView(self.author_id, options))
+        await open_shop_buy_select(interaction, self.author_id, rows, 0)
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -1978,12 +1974,44 @@ class ShopView(BaseView):
         await interaction.edit_original_response(embed=embed, view=self)
 
 
+async def open_shop_buy_select(interaction: discord.Interaction, author_id: int, rows: list, page: int):
+    total = len(rows)
+    total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+
+    options = [
+        discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=emoji)
+        for item_id, name, price, emoji in chunk
+    ]
+    embed = discord.Embed(
+        title="🛒 Выбери предмет",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из списка:",
+        color=0xf1c40f
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=ShopBuySelectView(author_id, options, page, total_pages)
+    )
+
+
 class ShopBuySelectView(discord.ui.View):
-    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
         self.add_item(make_select("Выбери предмет...", options, self.item_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -2004,6 +2032,22 @@ class ShopBuySelectView(discord.ui.View):
             color=0xf1c40f
         )
         await interaction.edit_original_response(embed=embed, view=BuyItemQuantityView(self.author_id, item_id))
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        async with bot.db.execute(
+            "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
+        ) as c:
+            rows = await c.fetchall()
+        await open_shop_buy_select(interaction, self.author_id, rows, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        async with bot.db.execute(
+            "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
+        ) as c:
+            rows = await c.fetchall()
+        await open_shop_buy_select(interaction, self.author_id, rows, self.page + 1)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -2116,24 +2160,18 @@ class UpgradesView(BaseView):
 
     async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with bot.db.execute("SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems") as c:
+        async with bot.db.execute(
+            "SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
+        ) as c:
             rows = await c.fetchall()
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
             owned = {r[0] for r in await c.fetchall()}
-        options = [
-            discord.SelectOption(
-                label=f"{name} — 💎 {price}" + (" ✅" if gid in owned else ""),
-                value=gid, emoji=emoji
-            )
-            for gid, name, price, emoji in rows
-        ]
-        if not options:
+        if not rows:
             await interaction.followup.send("❌ Улучшений нет.", ephemeral=True)
             return
-        embed = discord.Embed(title="💎 Выбери улучшение", description="Выбери улучшение:", color=0x9b59b6)
-        await interaction.edit_original_response(embed=embed, view=UpgradesBuySelectView(self.author_id, options))
+        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0)
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -2148,12 +2186,47 @@ class UpgradesView(BaseView):
         await interaction.edit_original_response(embed=embed, view=self)
 
 
+async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: int, rows: list, owned: set, page: int):
+    total = len(rows)
+    total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+
+    options = [
+        discord.SelectOption(
+            label=f"{name} — 💎 {price}" + (" ✅" if gid in owned else ""),
+            value=gid, emoji=emoji
+        )
+        for gid, name, price, emoji in chunk
+    ]
+    embed = discord.Embed(
+        title="💎 Выбери улучшение",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери улучшение:",
+        color=0x9b59b6
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=UpgradesBuySelectView(author_id, options, page, total_pages)
+    )
+
+
 class UpgradesBuySelectView(discord.ui.View):
-    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
         self.add_item(make_select("Выбери улучшение...", options, self.upgrade_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -2175,27 +2248,22 @@ class UpgradesBuySelectView(discord.ui.View):
         if not item:
             await interaction.followup.send("❌ Не найдено.", ephemeral=True)
             return
-
         name, price, emoji, category = item
-
         async with bot.db.execute(
             "SELECT 1 FROM player_upgrades WHERE user_id = ? AND upgrade_id = ?", (user_id, upgrade_id)
         ) as c:
             if await c.fetchone():
                 await interaction.followup.send(f"❌ **{name}** уже куплено.", ephemeral=True)
                 return
-
         async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (user_id,)) as c:
             gems = (await c.fetchone())[0]
         if gems < price:
             await interaction.followup.send(f"❌ Нужно 💎 {price}.", ephemeral=True)
             return
-
         await bot.db.execute("UPDATE players SET gems = gems - ? WHERE user_id = ?", (price, user_id))
         await bot.db.execute(
             "INSERT INTO player_upgrades (user_id, upgrade_id) VALUES (?, ?)", (user_id, upgrade_id)
         )
-
         if upgrade_id.startswith("grid_"):
             size = int(upgrade_id.split("_")[1].split("x")[0])
             await bot.db.execute(
@@ -2212,7 +2280,6 @@ class UpgradesBuySelectView(discord.ui.View):
             await bot.db.execute(
                 "UPDATE players SET income_bonus = ? WHERE user_id = ?", (max_bonus, user_id)
             )
-
             if guild_id:
                 settings = await get_settings(guild_id)
                 role_id = settings["status_roles"].get(upgrade_id)
@@ -2225,9 +2292,32 @@ class UpgradesBuySelectView(discord.ui.View):
                             await member.add_roles(role, reason=f"Покупка {name}")
                         except discord.HTTPException:
                             pass
-
         await bot.db.commit()
         await interaction.followup.send(f"✅ Куплено **{emoji} {name}** за 💎 {price}!", ephemeral=True)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        async with bot.db.execute(
+            "SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
+        ) as c:
+            rows = await c.fetchall()
+        async with bot.db.execute(
+            "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
+        ) as c:
+            owned = {r[0] for r in await c.fetchall()}
+        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        async with bot.db.execute(
+            "SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
+        ) as c:
+            rows = await c.fetchall()
+        async with bot.db.execute(
+            "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
+        ) as c:
+            owned = {r[0] for r in await c.fetchall()}
+        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, self.page + 1)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
