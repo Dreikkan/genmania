@@ -882,7 +882,6 @@ class MainMenuView(discord.ui.View):
 
 
 async def send_menu(interaction: discord.Interaction, *, embed=None, embeds=None):
-    """Быстрый доступ: открывает полное меню с вкладками."""
     view = MainMenuView(interaction.user.id)
     kwargs = {"view": view}
     if embed is not None:
