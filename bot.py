@@ -1659,19 +1659,19 @@ class SocialView(BaseView):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Подготовка к рейду", description="Выбери режим:", color=0xe74c3c)
         view = discord.ui.View()
-        
+
         solo = discord.ui.Button(label="В одиночку", emoji="1️⃣", style=discord.ButtonStyle.secondary)
         solo.callback = lambda i: open_raid_targets(i, self.author_id, 1)
         view.add_item(solo)
-        
+
         duo = discord.ui.Button(label="Группа (2 чел)", emoji="2️⃣", style=discord.ButtonStyle.secondary)
         duo.callback = lambda i: open_raid_targets(i, self.author_id, 2)
         view.add_item(duo)
-        
+
         trio = discord.ui.Button(label="Группа (3 чел)", emoji="3️⃣", style=discord.ButtonStyle.secondary)
         trio.callback = lambda i: open_raid_targets(i, self.author_id, 3)
         view.add_item(trio)
-        
+
         await interaction.edit_original_response(embed=embed, view=view)
 
     @discord.ui.button(label="Дуэль", emoji="🤺", style=discord.ButtonStyle.success)
@@ -1684,7 +1684,7 @@ class SocialView(BaseView):
         clan = await get_clan(self.author_id)
         if clan:
             embed = await build_clan_embed(interaction, clan)
-            view = ClanMenuView(self.author_id, clan[0])   # <-- clan[0] = ID клана
+            view = ClanMenuView(self.author_id, clan[0])
         else:
             embed = discord.Embed(
                 title="🏰 Кланы",
@@ -1694,65 +1694,11 @@ class SocialView(BaseView):
             view = NoClanView(self.author_id)
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Война", emoji="🔥", style=discord.ButtonStyle.danger, row=1)
-    async def btn_war(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        clan = await get_clan(self.author_id)
-        if not clan or clan[2] != self.author_id:
-            return await interaction.followup.send("❌ Только лидер клана может объявить войну.", ephemeral=True)
-
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
-
-        # Найти случайный клан
-        async with bot.db.execute("SELECT id, name FROM clans WHERE id != ? ORDER BY RANDOM() LIMIT 1", (clan[0],)) as c:
-            enemy = await c.fetchone()
-
-        if not enemy:
-            return await interaction.followup.send("❌ Нет других кланов для войны.", ephemeral=True)
-
-        # Проверка, что не было войны недавно
-        async with bot.db.execute("""
-            SELECT id FROM clan_wars WHERE status = 'active' AND (clan1_id = ? OR clan2_id = ? OR clan1_id = ? OR clan2_id = ?)
-        """, (clan[0], clan[0], enemy[0], enemy[0])) as c:
-            if await c.fetchone():
-                return await interaction.followup.send("❌ Война уже идёт.", ephemeral=True)
-
-        await bot.db.execute(
-            "INSERT INTO clan_wars (clan1_id, clan2_id, start_time, status) VALUES (?, ?, ?, 'active')",
-            (clan[0], enemy[0], datetime.datetime.now().isoformat())
-        )
-        await bot.db.commit()
-
-        embed = discord.Embed(
-            title="🔥 Война объявлена!",
-            description=f"Клан **{clan[1]}** против клана **{enemy[1]}**.\nПобедитель определяется по мощи через 24 часа.",
-            color=0xe74c3c
-        )
-        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
-
-    @discord.ui.button(label="Итоги войны", emoji="🏆", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_war_results(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        async with bot.db.execute("SELECT id, clan1_id, clan2_id FROM clan_wars WHERE status = 'active'") as c:
-            wars = await c.fetchall()
-
-        if not wars:
-            return await interaction.followup.send("❌ Нет активных войн.", ephemeral=True)
-
-        for war_id, c1, c2 in wars:
-            p1 = await get_clan_power(c1)
-            p2 = await get_clan_power(c2)
-            winner = c1 if p1 > p2 else c2
-            await bot.db.execute("UPDATE clan_wars SET winner_id = ?, status = 'finished', end_time = ? WHERE id = ?",
-                                 (winner, datetime.datetime.now().isoformat(), war_id))
-            # Бонус победителю
-            await bot.db.execute("UPDATE clans SET bonus = bonus + 0.05 WHERE id = ?", (winner,))
-        await bot.db.commit()
-        await interaction.followup.send("✅ Войны завершены, победители получили +5% к доходу.", ephemeral=True)
 
 async def build_clan_embed(interaction, clan):
     # clan = (id, name, leader_id, treasury, bonus)  — 5 колонок
