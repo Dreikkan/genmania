@@ -549,6 +549,46 @@ class CastleBot(commands.Bot):
                 g
             )
 
+        # --- КЛАНЫ ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                leader_id INTEGER,
+                treasury INTEGER DEFAULT 0,
+                bonus REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clan_members (
+                user_id INTEGER PRIMARY KEY,
+                clan_id INTEGER,
+                role TEXT DEFAULT 'member',
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clan_inventory (
+                clan_id INTEGER,
+                slot INTEGER,
+                item_id TEXT,
+                stars INTEGER DEFAULT 0,
+                PRIMARY KEY (clan_id, slot)
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clan_wars (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clan1_id INTEGER,
+                clan2_id INTEGER,
+                winner_id INTEGER,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                status TEXT DEFAULT 'active'
+            )
+        """)
+
 bot = CastleBot()
 
 
@@ -679,6 +719,35 @@ async def get_combat_power(user_id: int) -> int:
     """, (user_id,)) as c:
         power = (await c.fetchone())[0] or 0
     return int(power)
+
+async def get_clan(user_id: int):
+    async with bot.db.execute(
+        "SELECT c.* FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE cm.user_id = ?",
+        (user_id,)
+    ) as c:
+        return await c.fetchone()
+
+async def get_clan_members(clan_id: int):
+    async with bot.db.execute(
+        "SELECT user_id, role FROM clan_members WHERE clan_id = ?", (clan_id,)
+    ) as c:
+        return await c.fetchall()
+
+async def get_clan_power(clan_id: int):
+    # Мощь клана = суммарная мощь всех участников + мощь клановых генераторов
+    async with bot.db.execute(
+        "SELECT SUM(power) FROM (SELECT SUM(i.price * (1 + inv.stars * 0.5)) as power FROM inventory inv JOIN items i ON inv.item_id = i.id JOIN clan_members cm ON cm.user_id = inv.user_id WHERE cm.clan_id = ? AND inv.location = 'profile' GROUP BY inv.user_id)",
+        (clan_id,)
+    ) as c:
+        members_power = (await c.fetchone())[0] or 0
+
+    async with bot.db.execute(
+        "SELECT SUM(i.price * (1 + ci.stars * 0.5)) FROM clan_inventory ci JOIN items i ON ci.item_id = i.id WHERE ci.clan_id = ?",
+        (clan_id,)
+    ) as c:
+        clan_power = (await c.fetchone())[0] or 0
+
+    return int(members_power + clan_power)
 
 
 async def get_grid_size(user_id: int) -> int:
@@ -1495,6 +1564,192 @@ class SocialView(BaseView):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+    @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success)
+    async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if clan:
+            embed = await build_clan_embed(interaction, clan)
+            view = ClanMenuView(self.author_id)
+        else:
+            embed = discord.Embed(
+                title="🏰 Кланы",
+                description="Ты не состоишь в клане.\nСоздай свой за **500 монет** или вступи в существующий.",
+                color=0x3498db
+            )
+            view = NoClanView(self.author_id)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    @discord.ui.button(label="Война", emoji="🔥", style=discord.ButtonStyle.danger, row=1)
+    async def btn_war(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan or clan[2] != self.author_id:
+            return await interaction.followup.send("❌ Только лидер клана может объявить войну.", ephemeral=True)
+
+        # Найти случайный клан
+        async with bot.db.execute("SELECT id, name FROM clans WHERE id != ? ORDER BY RANDOM() LIMIT 1", (clan[0],)) as c:
+            enemy = await c.fetchone()
+
+        if not enemy:
+            return await interaction.followup.send("❌ Нет других кланов для войны.", ephemeral=True)
+
+        # Проверка, что не было войны недавно
+        async with bot.db.execute("""
+            SELECT id FROM clan_wars WHERE status = 'active' AND (clan1_id = ? OR clan2_id = ? OR clan1_id = ? OR clan2_id = ?)
+        """, (clan[0], clan[0], enemy[0], enemy[0])) as c:
+            if await c.fetchone():
+                return await interaction.followup.send("❌ Война уже идёт.", ephemeral=True)
+
+        await bot.db.execute(
+            "INSERT INTO clan_wars (clan1_id, clan2_id, start_time, status) VALUES (?, ?, ?, 'active')",
+            (clan[0], enemy[0], datetime.datetime.now().isoformat())
+        )
+        await bot.db.commit()
+
+        embed = discord.Embed(
+            title="🔥 Война объявлена!",
+            description=f"Клан **{clan[1]}** против клана **{enemy[1]}**.\nПобедитель определяется по мощи через 24 часа.",
+            color=0xe74c3c
+        )
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+    @discord.ui.button(label="Итоги войны", emoji="🏆", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_war_results(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        async with bot.db.execute("SELECT id, clan1_id, clan2_id FROM clan_wars WHERE status = 'active'") as c:
+            wars = await c.fetchall()
+
+        if not wars:
+            return await interaction.followup.send("❌ Нет активных войн.", ephemeral=True)
+
+        for war_id, c1, c2 in wars:
+            p1 = await get_clan_power(c1)
+            p2 = await get_clan_power(c2)
+            winner = c1 if p1 > p2 else c2
+            await bot.db.execute("UPDATE clan_wars SET winner_id = ?, status = 'finished', end_time = ? WHERE id = ?",
+                                 (winner, datetime.datetime.now().isoformat(), war_id))
+            # Бонус победителю
+            await bot.db.execute("UPDATE clans SET bonus = bonus + 0.05 WHERE id = ?", (winner,))
+        await bot.db.commit()
+        await interaction.followup.send("✅ Войны завершены, победители получили +5% к доходу.", ephemeral=True)
+
+async def build_clan_embed(interaction, clan):
+    c_id, name, leader_id, treasury, bonus, created = clan
+    members = await get_clan_members(c_id)
+    power = await get_clan_power(c_id)
+
+    embed = discord.Embed(title=f"🏰 Клан «{name}»", color=0x9b59b6)
+    embed.add_field(name="Лидер", value=f"<@{leader_id}>", inline=True)
+    embed.add_field(name="Участников", value=str(len(members)), inline=True)
+    embed.add_field(name="Мощь клана", value=str(power), inline=True)
+    embed.add_field(name="Сундук", value=f"🪙 {treasury}", inline=True)
+    embed.add_field(name="Бонус к доходу", value=f"+{int(bonus*100)}%", inline=True)
+    return embed
+
+class NoClanView(BaseView):
+    @discord.ui.button(label="Создать клан", emoji="➕", style=discord.ButtonStyle.success)
+    async def btn_create(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CreateClanModal(self.author_id))
+
+    @discord.ui.button(label="Вступить", emoji="🚪", style=discord.ButtonStyle.primary)
+    async def btn_join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Чтобы вступить, попроси лидера клана пригласить тебя. (Команда `/клан_пригласить`)",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+class ClanMenuView(BaseView):
+    @discord.ui.button(label="Сундук", emoji="💰", style=discord.ButtonStyle.success)
+    async def btn_treasury(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DepositClanModal(self.author_id))
+
+    @discord.ui.button(label="Выйти", emoji="🚪", style=discord.ButtonStyle.danger)
+    async def btn_leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await bot.db.execute("DELETE FROM clan_members WHERE user_id = ?", (self.author_id,))
+        await bot.db.commit()
+        embed = discord.Embed(title="🚪 Ты покинул клан.", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+class CreateClanModal(discord.ui.Modal, title="Создание клана"):
+    name = discord.ui.TextInput(label="Название клана", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        cost = 500
+        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (self.author_id,)) as c:
+            coins = (await c.fetchone())[0]
+        if coins < cost:
+            return await interaction.followup.send(f"❌ Нужно {cost} монет для создания клана.", ephemeral=True)
+
+        # Проверка, что не в клане
+        existing = await get_clan(self.author_id)
+        if existing:
+            return await interaction.followup.send("❌ Ты уже в клане.", ephemeral=True)
+
+        try:
+            await bot.db.execute(
+                "INSERT INTO clans (name, leader_id, treasury) VALUES (?, ?, 0)",
+                (self.name.value.strip(), self.author_id)
+            )
+            clan_id = (await (await bot.db.execute("SELECT last_insert_rowid()")).fetchone())[0]
+            await bot.db.execute(
+                "INSERT INTO clan_members (user_id, clan_id, role) VALUES (?, ?, 'leader')",
+                (self.author_id, clan_id)
+            )
+            await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (cost, self.author_id))
+            await bot.db.commit()
+            await interaction.followup.send(f"✅ Клан **{self.name.value}** создан за {cost} монет!", ephemeral=True)
+        except aiosqlite.IntegrityError:
+            await interaction.followup.send("❌ Клан с таким названием уже существует.", ephemeral=True)
+
+
+class DepositClanModal(discord.ui.Modal, title="Пополнить сундук клана"):
+    amount = discord.ui.TextInput(label="Сумма (монеты)", default="100", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amt = int(self.amount.value)
+            if amt <= 0: raise ValueError
+        except ValueError:
+            return await interaction.followup.send("❌ Неверная сумма.", ephemeral=True)
+
+        clan = await get_clan(self.author_id)
+        if not clan:
+            return await interaction.followup.send("❌ Ты не в клане.", ephemeral=True)
+
+        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (self.author_id,)) as c:
+            coins = (await c.fetchone())[0]
+        if coins < amt:
+            return await interaction.followup.send("❌ Недостаточно монет.", ephemeral=True)
+
+        await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (amt, self.author_id))
+        await bot.db.execute("UPDATE clans SET treasury = treasury + ? WHERE id = ?", (amt, clan[0]))
+        await bot.db.commit()
+        await interaction.followup.send(f"✅ В сундук клана внесено 🪙 {amt}.", ephemeral=True)
 
 async def open_raid_targets(interaction: discord.Interaction, author_id: int, group_size: int):
     await interaction.response.send_modal(RaidTargetModal(author_id, group_size))
