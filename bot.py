@@ -1543,6 +1543,20 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
         if power_def == 0:
             power_def = 10 # Защита новичка
 
+        power_atk = await get_combat_power(self.author_id)
+        if power_atk <= 0:
+            return await interaction.followup.send(
+                "❌ У тебя нет генераторов в замке. Мощь = 0. Купи генераторы в магазине.",
+                ephemeral=True
+            )
+
+        power_def = await get_combat_power(target)
+        if power_def <= 0:
+            return await interaction.followup.send(
+                "❌ У цели нет генераторов. Атаковать нечего.",
+                ephemeral=True
+            )
+            
         # 4. Расчёт (рандом с учётом мощи)
         import random
         roll_atk = random.randint(1, power_atk)
