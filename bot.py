@@ -1,8 +1,3 @@
-# ============================================================
-#  🏰 Castle Mania — Discord Bot (только меню)
-#  Python 3.10+ | discord.py 2.x | aiosqlite
-# ============================================================
-
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -54,7 +49,7 @@ CRAFT_SETTINGS = {
 
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
-GEM_GEN_CAP = 3
+GEM_GEN_CAP = 6          # было 3
 SELL_RATE = 0.15
 
 START_COINS = 10
@@ -211,13 +206,16 @@ class CastleBot(commands.Bot):
             )
         """)
 
+        # --- ПРЕДМЕТЫ (доход в СЕКУНДУ) ---
+        # Монеты: старые /час ÷ 3600 (доход в час не изменился)
+        # Гемы: 0.05/час +25% = 0.0625/час ÷ 3600 = 0.0000173611/сек
         items_data = [
-            ("basic_gen", "Базовый генератор",    10, 3,   "⚙️", "common",    1, 0),
-            ("wood_gen",  "Деревянный генератор",  50, 8,   "🪵", "uncommon",  1, 0),
-            ("stone_gen", "Каменный генератор",   200, 20,  "🪨", "rare",      1, 0),
-            ("iron_gen",  "Железный генератор",   800, 50,  "⛓️", "epic",      1, 0),
-            ("gold_gen",  "Золотой генератор",   3000, 120, "🪙", "legendary", 1, 0),
-            ("gem_gen",   "Гемовый генератор",  12000, 0,   "💎", "mythic",    0, 0.05),
+            ("basic_gen", "Базовый генератор",    10, 3 / 3600,          "⚙️", "common",    1, 0),
+            ("wood_gen",  "Деревянный генератор",  50, 8 / 3600,          "🪵", "uncommon",  1, 0),
+            ("stone_gen", "Каменный генератор",   200, 20 / 3600,         "🪨", "rare",      1, 0),
+            ("iron_gen",  "Железный генератор",   800, 50 / 3600,         "⛓️", "epic",      1, 0),
+            ("gold_gen",  "Золотой генератор",   3000, 120 / 3600,        "🪙", "legendary", 1, 0),
+            ("gem_gen",   "Гемовый генератор",  12000, 0,                 "💎", "mythic",    0, 0.0625 / 3600),
         ]
         for item in items_data:
             await self.db.execute(
@@ -311,7 +309,8 @@ async def get_guild_emojis(guild_id: int) -> dict:
     return {}
 
 
-async def get_hourly_income(user_id: int) -> tuple[float, float]:
+async def get_per_second_income(user_id: int) -> tuple[float, float]:
+    """Доход в СЕКУНДУ с учётом бонуса."""
     grid_size, bonus, gems, coins = await get_player_stats(user_id)
     async with bot.db.execute("""
         SELECT
@@ -321,12 +320,13 @@ async def get_hourly_income(user_id: int) -> tuple[float, float]:
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ?
     """, (user_id,)) as c:
-        hourly_coins_raw, hourly_gems_raw = await c.fetchone()
+        per_sec_coins_raw, per_sec_gems_raw = await c.fetchone()
     multiplier = 1 + bonus
-    return hourly_coins_raw * multiplier, hourly_gems_raw * multiplier
+    return per_sec_coins_raw * multiplier, per_sec_gems_raw * multiplier
 
 
 async def calculate_passive_income(user_id: int):
+    """Секундный доход. Возвращает (coins_earned, gems_earned)."""
     async with bot.db.execute(
         "SELECT last_collected, last_gem_collected, income_bonus FROM players WHERE user_id = ?",
         (user_id,)
@@ -344,25 +344,26 @@ async def calculate_passive_income(user_id: int):
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'profile'
     """, (user_id,)) as c:
-        hourly_coins = (await c.fetchone())[0] or 0
+        per_sec_coins = (await c.fetchone())[0] or 0
 
     coins = 0
-    if hourly_coins > 0:
+    if per_sec_coins > 0:
         last = datetime.datetime.fromisoformat(last_coins_str)
-        coins = int(((now - last).total_seconds() / 3600) * hourly_coins * multiplier)
+        seconds = (now - last).total_seconds()
+        coins = int(seconds * per_sec_coins * multiplier)
 
     async with bot.db.execute("""
         SELECT SUM(i.income_gems_per_hour) FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND i.income_gems_per_hour > 0 AND inv.location = 'profile'
     """, (user_id,)) as c:
-        hourly_gems = (await c.fetchone())[0] or 0
+        per_sec_gems = (await c.fetchone())[0] or 0
 
     gems = 0
-    if hourly_gems > 0:
+    if per_sec_gems > 0:
         last = datetime.datetime.fromisoformat(last_gems_str)
-        hours = (now - last).total_seconds() / 3600
-        raw = hours * hourly_gems * multiplier
+        seconds = (now - last).total_seconds()
+        raw = seconds * per_sec_gems * multiplier
         gems = min(int(raw), GEM_GEN_CAP)
 
     return coins, gems
@@ -514,13 +515,13 @@ async def build_main_embed(interaction: discord.Interaction, notice: str = None)
     user_id = interaction.user.id
     await collect_income(user_id)
     grid_size, bonus, gems, coins = await get_player_stats(user_id)
-    hourly_coins, hourly_gems = await get_hourly_income(user_id)
+    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
 
     parts = []
-    if hourly_coins > 0:
-        parts.append(f"🪙 {hourly_coins:.2f}/час")
-    if hourly_gems > 0:
-        parts.append(f"💎 {hourly_gems:.3f}/час")
+    if per_sec_coins > 0:
+        parts.append(f"🪙 {per_sec_coins:.4f}/сек")
+    if per_sec_gems > 0:
+        parts.append(f"💎 {per_sec_gems:.5f}/сек")
     income_str = " | ".join(parts) if parts else "нет генераторов"
 
     embed = discord.Embed(
@@ -551,12 +552,12 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     custom_emojis = await get_guild_emojis(guild_id)
     items = {slot: custom_emojis.get(item_id, default) for slot, item_id, default in rows}
 
-    hourly_coins, hourly_gems = await get_hourly_income(user_id)
+    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
     parts = []
-    if hourly_coins > 0:
-        parts.append(f"🪙 {hourly_coins:.2f}/час")
-    if hourly_gems > 0:
-        parts.append(f"💎 {hourly_gems:.3f}/час")
+    if per_sec_coins > 0:
+        parts.append(f"🪙 {per_sec_coins:.4f}/сек")
+    if per_sec_gems > 0:
+        parts.append(f"💎 {per_sec_gems:.5f}/сек")
     income_str = " | ".join(parts) if parts else "нет генераторов"
 
     width = int(grid_size ** 0.5)
@@ -621,9 +622,9 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
         emoji = custom_emojis.get(item_id, default_emoji)
         inc = []
         if income_coins > 0:
-            inc.append(f"🪙 {income_coins}/час")
+            inc.append(f"🪙 {income_coins:.4f}/сек")
         if income_gems > 0:
-            inc.append(f"💎 {income_gems}/час")
+            inc.append(f"💎 {income_gems:.5f}/сек")
         inc_str = " ".join(inc) if inc else "без дохода"
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
@@ -1400,8 +1401,8 @@ async def settings_cmd(
     id="Уникальный ID (латиницей)",
     название="Название",
     цена="Цена в монетах",
-    доход_монет="Доход монет/час",
-    доход_гемов="Доход гемов/час",
+    доход_монет="Доход монет/сек",
+    доход_гемов="Доход гемов/сек",
     эмодзи="Эмодзи",
     редкость="common/uncommon/rare/epic/legendary/mythic"
 )
@@ -1410,7 +1411,7 @@ async def add_generator_cmd(
     id: str,
     название: str,
     цена: int,
-    доход_монет: int = 0,
+    доход_монет: float = 0.0,
     доход_гемов: float = 0.0,
     эмодзи: str = "⚙️",
     редкость: str = "common"
