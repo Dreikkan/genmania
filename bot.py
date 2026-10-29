@@ -280,15 +280,15 @@ def today_str():
     return datetime.date.today().isoformat()
 
 
-async def get_player_stats(user_id: int):
-    """Возвращает (grid_size, income_bonus, gems, coins)."""
-    async with bot.db.execute(
-        "SELECT grid_size, income_bonus, gems, coins FROM players WHERE user_id = ?",
-        (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return 36, 0.0, 0, 0
+if not row:
+        # Создаём нового игрока с 10 монетами
+        await bot.db.execute(
+            "INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, 10)",
+            (user_id,)
+        )
+        await bot.db.commit()
+        return 36, 0.0, 0, 10
+
     return row[0] or 36, row[1] or 0.0, row[2] or 0, row[3] or 0
 
 
