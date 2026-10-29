@@ -535,15 +535,19 @@ class CastleBot(commands.Bot):
 
         # Эксклюзивные генераторы для Daily (30 дней)
         daily_gens = [
-            ("daily_common", "Ежедневный лист", "🍃", "common", 0),
-            ("daily_uncommon", "Ежедневный камень", "🪨", "uncommon", 0),
-            ("daily_rare", "Ежедневный кристалл", "💠", "rare", 0),
-            ("daily_epic", "Ежедневная сфера", "🔮", "epic", 0),
-            ("daily_legendary", "Ежедневная корона", "👑", "legendary", 0),
-            ("daily_mythic", "Ежедневный феникс", "🔥", "mythic", 0),
+            ("daily_common", "Ежедневный лист", "🍃", "common"),
+            ("daily_uncommon", "Ежедневный камень", "🪨", "uncommon"),
+            ("daily_rare", "Ежедневный кристалл", "💠", "rare"),
+            ("daily_epic", "Ежедневная сфера", "🔮", "epic"),
+            ("daily_legendary", "Ежедневная корона", "👑", "legendary"),
+            ("daily_mythic", "Ежедневный феникс", "🔥", "mythic"),
         ]
         for g in daily_gens:
-            await self.db.execute("INSERT OR IGNORE INTO items (id, name, emoji, rarity, price, buyable, income_per_hour) VALUES (?, ?, ?, ?, 0, 0, 1.5)", g)
+            await self.db.execute(
+                "INSERT OR IGNORE INTO items (id, name, emoji, rarity, price, buyable, income_per_hour) "
+                "VALUES (?, ?, ?, ?, 0, 0, 1.5)",
+                g
+            )
 
 bot = CastleBot()
 
