@@ -1,8 +1,3 @@
-# ============================================================
-#  🏰 Castle Mania — Discord Bot
-#  Python 3.10+ | discord.py 2.x | aiosqlite
-# ============================================================
-
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -558,7 +553,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     embed.add_field(name="Кошелёк", value=f"🪙 {coins} | 💎 {gems}", inline=False)
     embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонус дохода", value=f"+{int(bonus * 100)}%", inline=True)
-    embed.add_field(name="Сетка", value=f"{width}x{width} ({grid_size} слотов)", inline=True)
+    #embed.add_field(name="Сетка", value=f"{width}x{width} ({grid_size} слотов)", inline=True)
 
     grid_str = ""
     for slot in range(grid_size):
