@@ -123,7 +123,6 @@ STAR_BONUS = {
 
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
-SELL_RATE = 0.15
 START_GRID = 9
 STORAGE_SIZE = 36
 PAGE_SIZE = 10
@@ -166,6 +165,7 @@ EMOJI_KEYS = {
     "_stats":        ("Статистика", "📊"),
 }
 
+CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
 
 # ============================================================
 #  🤖 БОТ
@@ -173,7 +173,6 @@ EMOJI_KEYS = {
 
 intents = discord.Intents.default()
 intents.message_content = True
-
 
 class CastleBot(commands.Bot):
     def __init__(self):
@@ -189,7 +188,7 @@ class CastleBot(commands.Bot):
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
-                coins INTEGER DEFAULT 10,
+                coins INTEGER DEFAULT 3,
                 gems INTEGER DEFAULT 0,
                 last_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -445,7 +444,6 @@ class CastleBot(commands.Bot):
 
         await self.db.commit()
 
-
 bot = CastleBot()
 
 
@@ -515,57 +513,35 @@ async def is_command_disabled(guild_id: int, command_key: str) -> bool:
 def today_str():
     return datetime.date.today().isoformat()
 
+def is_valid_emoji(s: str) -> bool:
+    s = s.strip()
+    if not s: return False
+    if CUSTOM_EMOJI_RE.match(s): return True
+    if len(s) <= 8 and not s.isascii(): return True
+    return False
+
+def parse_emoji(emoji_str: str):
+    """Возвращает discord.PartialEmoji для кастомных, или строку для юникодных."""
+    m = CUSTOM_EMOJI_RE.match(emoji_str)
+    if m:
+        try:
+            return discord.PartialEmoji(name="custom", id=int(m.group(1)))
+        except:
+            return None
+    return emoji_str
+
+def format_slot(emoji: str, stars: int) -> str:
+    """Добавляет пробелы, не ломая кастомные эмодзи."""
+    if stars > 0:
+        text = f"{emoji}({stars}⭐)"
+    else:
+        text = emoji
+    return text + "  "  # Просто 2 пробела, Discord сам выровняет картинку
 
 def make_select(placeholder: str, options: list[discord.SelectOption], callback, row: int = 0) -> discord.ui.Select:
     select = discord.ui.Select(placeholder=placeholder, options=options, row=row)
     select.callback = callback
     return select
-
-
-def _visual_len(text: str) -> int:
-    """Считает визуальную длину строки: кастомные эмодзи = 1 символ."""
-    length = 0
-    i = 0
-    while i < len(text):
-        if text[i] == "<" and i + 1 < len(text) and text[i + 1] in (":", "a"):
-            end = text.find(">", i)
-            if end == -1:
-                length += 1
-                i += 1
-                continue
-            length += 1
-            i = end + 1
-        else:
-            length += 1
-            i += 1
-    return length
-
-CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:\d+>$")
-
-def format_slot(emoji: str, stars: int) -> str:
-    """Фиксированная визуальная ширина ячейки. Кастомные эмодзи считаются как 1."""
-    if stars > 0:
-        text = f"{emoji}({stars}⭐)"
-    else:
-        text = emoji
-
-    visual = _visual_len(text)
-    padding = max(1, SLOT_WIDTH - visual)
-    return text + " " * padding
-
-
-def is_valid_emoji(s: str) -> bool:
-    """Проверяет, что строка — юникод-эмодзи или кастомный эмодзи Discord."""
-    s = s.strip()
-    if not s:
-        return False
-    if CUSTOM_EMOJI_RE.match(s):
-        return True
-    # Юникод-эмодзи: короткая не-ASCII строка
-    if len(s) <= 8 and not s.isascii():
-        return True
-    return False
-
 
 async def get_player_stats(user_id: int, guild_id: int = None):
     async with bot.db.execute(
@@ -1479,12 +1455,13 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
 
     options = []
     for slot, item_id, name, default_emoji, stars in rows[:25]:
-        emoji = custom.get(item_id, default_emoji)
+        emoji_str = custom.get(item_id, default_emoji)
+        emoji_obj = parse_emoji(emoji_str)
         stars_str = f"({stars}⭐)" if stars > 0 else ""
         options.append(discord.SelectOption(
             label=f"Слот {slot}: {name} {stars_str}".strip(),
             value=str(slot),
-            emoji=emoji
+            emoji=emoji_obj
         ))
 
     embed = discord.Embed(
@@ -1532,12 +1509,13 @@ class SwapFirstView(discord.ui.View):
 
         options = []
         for slot, item_id, name, default_emoji, stars in rows[:25]:
-            emoji = custom.get(item_id, default_emoji)
+            emoji_str = custom.get(item_id, default_emoji)
+            emoji_obj = parse_emoji(emoji_str)
             stars_str = f"({stars}⭐)" if stars > 0 else ""
             options.append(discord.SelectOption(
                 label=f"Слот {slot}: {name} {stars_str}".strip(),
                 value=str(slot),
-                emoji=emoji
+                emoji=emoji_obj
             ))
 
         embed = discord.Embed(
@@ -1668,7 +1646,8 @@ async def open_star_view(interaction: discord.Interaction, author_id: int):
 
     options = []
     for slot, item_id, name, default_emoji, stars in rows[:25]:
-        emoji = custom.get(item_id, default_emoji)
+        emoji_str = custom.get(item_id, default_emoji)
+        emoji_obj = parse_emoji(emoji_str)
         next_star = stars + 1
         need = STAR_UPGRADE[next_star]["copies"]
         async with bot.db.execute(
@@ -1679,7 +1658,7 @@ async def open_star_view(interaction: discord.Interaction, author_id: int):
         options.append(discord.SelectOption(
             label=f"Слот {slot}: {name} {stars}★ → {next_star}★ ({have}/{need})",
             value=f"{slot}:{item_id}:{stars}",
-            emoji=emoji
+            emoji=emoji_obj
         ))
 
     embed = discord.Embed(
@@ -1911,12 +1890,13 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
 
     options = []
     for slot, item_id, name, default_emoji, stars in chunk:
-        emoji = custom.get(item_id, default_emoji)
+        emoji_str = custom.get(item_id, default_emoji)
+        emoji_obj = parse_emoji(emoji_str)
         stars_str = f"({stars}⭐)" if stars > 0 else ""
         options.append(discord.SelectOption(
             label=f"Слот {slot}: {name} {stars_str}".strip(),
             value=f"{slot}:{item_id}:{stars}",
-            emoji=emoji
+            emoji=emoji_obj
         ))
 
     location_name = "Замка" if source == "profile" else "Хранилища"
@@ -2101,6 +2081,8 @@ class MoveConfirmView(discord.ui.View):
 
 async def open_craft_view(interaction: discord.Interaction, author_id: int, page: int = 0):
     user_id = interaction.user.id
+    guild_id = interaction.guild_id
+    custom = (await get_settings(guild_id))["custom_emojis"]
     chain_items = list(CRAFT_CHAIN.items())
 
     options_all = []
@@ -2116,10 +2098,14 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
             (user_id, item_id)
         ) as c:
             count = (await c.fetchone())[0]
+        
+        emoji_str = custom.get(item_id, src[1])
+        emoji_obj = parse_emoji(emoji_str)
+        
         options_all.append(discord.SelectOption(
             label=f"{src[0]} ({count}/5) → {dst[0]}",
             value=item_id,
-            emoji=src[1]
+            emoji=emoji_obj
         ))
 
     if not options_all:
@@ -2512,15 +2498,19 @@ class ShopView(BaseView):
 
 
 async def open_shop_buy_select(interaction: discord.Interaction, author_id: int, rows: list, page: int):
+    guild_id = interaction.guild_id
+    custom = (await get_settings(guild_id))["custom_emojis"]
     total = len(rows)
     total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
 
-    options = [
-        discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=emoji)
-        for item_id, name, price, emoji in chunk
-    ]
+    options = []
+    for item_id, name, price, default_emoji in chunk:
+        emoji_str = custom.get(item_id, default_emoji)
+        emoji_obj = parse_emoji(emoji_str)
+        options.append(discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=emoji_obj))
+        
     embed = discord.Embed(
         title="🛒 Выбери предмет",
         description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из списка:",
@@ -3528,6 +3518,9 @@ class SettingsGeneralModal(discord.ui.Modal, title="Общие настройк�
         guild_id = interaction.guild_id
         settings = await get_settings(guild_id)
         changes = []
+        if self.bot_name.value:
+            await save_setting(guild_id, "bot_name", self.bot_name.value.strip())
+            changes.append(f"📛 Название: **{self.bot_name.value}**")
         if self.item_id.value and self.emoji.value:
             item_id = self.item_id.value.strip()
             emoji_val = self.emoji.value.strip()
@@ -3546,6 +3539,9 @@ class SettingsGeneralModal(discord.ui.Modal, title="Общие настройк�
             custom[item_id] = emoji_val
             await save_setting(guild_id, "custom_emojis", custom)
             changes.append(f"🎨 {item[0]}: {emoji_val}")
+        await interaction.followup.send(
+            "✅ Обновлено:\n" + "\n".join(changes) if changes else "ℹ️ Ничего не изменено.", ephemeral=True
+        )
 
 
 class SettingsEconomyView(discord.ui.View):
@@ -3659,7 +3655,7 @@ class EditItemIncomeModal(discord.ui.Modal, title="Изменить доход")
 
 
 class EditStartCoinsModal(discord.ui.Modal, title="Стартовые монеты"):
-    value = discord.ui.TextInput(label="Монет новым игрокам", default="10", required=True)
+    value = discord.ui.TextInput(label="Монет новым игрокам", default="3", required=True)
 
     def __init__(self, author_id: int):
         super().__init__()
