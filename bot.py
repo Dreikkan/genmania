@@ -1764,4 +1764,4 @@ bot.tree.add_command(admin_group)
 # ============================================================
 
 if __name__ == "__main__":
-    bot.run("MTU2NTI3MDg5OTA1NjE4MTM2MA.G3q8qi.mgtRrUxnaRy9qKFZVmYj1eP0EuNyHaVepkBXAw")
+    bot.run("ТВОЙ_ТОКЕН")
