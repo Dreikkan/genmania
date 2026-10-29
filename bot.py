@@ -814,32 +814,31 @@ class MainMenuView(discord.ui.View):
             return False
         return True
 
-    async def _render(self, interaction: discord.Interaction, tab: str):
+        async def _render(self, interaction: discord.Interaction, tab: str):
         self.current_tab = tab
-        # Сразу подтверждаем — даёт 15 минут вместо 3 секунд
         await interaction.response.defer()
 
         if tab == "profile":
             embed = await build_profile_embed(interaction)
-            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, view=self)
         elif tab == "storage":
             embed = await build_storage_embed(interaction)
-            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, view=self)
         elif tab == "shop":
             embeds = await build_shop_embeds(interaction)
-            await interaction.edit_original_response(embed=None, embeds=embeds, view=self)
+            await interaction.edit_original_response(embeds=embeds, view=self)
         elif tab == "gem_shop":
             embed = await build_gem_shop_embed(interaction)
-            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, view=self)
         elif tab == "achievements":
             embed = await build_achievements_embed(interaction)
-            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, view=self)
         elif tab == "quests":
             embed = await build_quests_embed(interaction)
-            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, view=self)
         elif tab == "stats":
             embed = await build_stats_embed(interaction)
-            await interaction.edit_original_response(embed=embed, embeds=None, view=self)
+            await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Профиль", emoji="👤", style=discord.ButtonStyle.primary, row=0)
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
