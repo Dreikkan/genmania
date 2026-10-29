@@ -739,12 +739,12 @@ async def get_clan(user_id: int):
     ) as c:
         return await c.fetchone()
 
-async def get_clan(user_id: int):
+async def get_clan_members(clan_id: int):
     async with bot.db.execute(
-        "SELECT c.* FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE cm.user_id = ?",
-        (user_id,)
+        "SELECT user_id, role FROM clan_members WHERE clan_id = ?", (clan_id,)
     ) as c:
-        return await c.fetchone()
+        return await c.fetchall()
+
 
 async def get_clan_power(clan_id: int):
     # Мощь клана = суммарная мощь всех участников + мощь клановых генераторов
