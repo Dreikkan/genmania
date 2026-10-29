@@ -1876,7 +1876,7 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
         if c1 < bet or c2 < bet:
             return await interaction.followup.send("❌ У кого-то не хватает монет на ставку.", ephemeral=True)
 
-                if mode == "dice":
+        if mode == "dice":
             import random
             r1, r2 = random.randint(1, 100), random.randint(1, 100)
             winner = self.author_id if r1 > r2 else target
