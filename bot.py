@@ -1684,13 +1684,13 @@ class SocialView(BaseView):
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
-    @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success)
+        @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         clan = await get_clan(self.author_id)
         if clan:
             embed = await build_clan_embed(interaction, clan)
-            view = ClanMenuView(self.author_id)
+            view = ClanMenuView(self.author_id, clan[0])   # <-- clan[0] = ID клана
         else:
             embed = discord.Embed(
                 title="🏰 Кланы",
