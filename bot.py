@@ -1649,7 +1649,13 @@ class SocialView(BaseView):
         await interaction.followup.send("✅ Войны завершены, победители получили +5% к доходу.", ephemeral=True)
 
 async def build_clan_embed(interaction, clan):
-    c_id, name, leader_id, treasury, bonus, created = clan
+    # clan = (id, name, leader_id, treasury, bonus)  — 5 колонок
+    c_id = clan[0]
+    name = clan[1]
+    leader_id = clan[2]
+    treasury = clan[3]
+    bonus = clan[4]
+
     members = await get_clan_members(c_id)
     power = await get_clan_power(c_id)
 
