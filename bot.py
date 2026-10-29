@@ -12,6 +12,7 @@ import random
 import json
 import os
 import re
+import sqlite3
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -727,11 +728,12 @@ async def get_clan(user_id: int):
     ) as c:
         return await c.fetchone()
 
-async def get_clan_members(clan_id: int):
+async def get_clan(user_id: int):
     async with bot.db.execute(
-        "SELECT user_id, role FROM clan_members WHERE clan_id = ?", (clan_id,)
+        "SELECT c.* FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE cm.user_id = ?",
+        (user_id,)
     ) as c:
-        return await c.fetchall()
+        return await c.fetchone()
 
 async def get_clan_power(clan_id: int):
     # Мощь клана = суммарная мощь всех участников + мощь клановых генераторов
@@ -1695,8 +1697,11 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         cost = 500
+
+        # Проверка баланса
         async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (self.author_id,)) as c:
-            coins = (await c.fetchone())[0]
+            row = await c.fetchone()
+        coins = row[0] if row else 0
         if coins < cost:
             return await interaction.followup.send(f"❌ Нужно {cost} монет для создания клана.", ephemeral=True)
 
@@ -1705,21 +1710,33 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
         if existing:
             return await interaction.followup.send("❌ Ты уже в клане.", ephemeral=True)
 
+        # Проверка названия
+        clan_name = self.name.value.strip()
+        if len(clan_name) < 3 or len(clan_name) > 32:
+            return await interaction.followup.send("❌ Название должно быть от 3 до 32 символов.", ephemeral=True)
+
+        # Создание клана
         try:
-            await bot.db.execute(
+            cursor = await bot.db.execute(
                 "INSERT INTO clans (name, leader_id, treasury) VALUES (?, ?, 0)",
-                (self.name.value.strip(), self.author_id)
+                (clan_name, self.author_id)
             )
-            clan_id = (await (await bot.db.execute("SELECT last_insert_rowid()")).fetchone())[0]
+            clan_id = cursor.lastrowid
             await bot.db.execute(
                 "INSERT INTO clan_members (user_id, clan_id, role) VALUES (?, ?, 'leader')",
                 (self.author_id, clan_id)
             )
-            await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (cost, self.author_id))
+            await bot.db.execute(
+                "UPDATE players SET coins = coins - ? WHERE user_id = ?",
+                (cost, self.author_id)
+            )
             await bot.db.commit()
-            await interaction.followup.send(f"✅ Клан **{self.name.value}** создан за {cost} монет!", ephemeral=True)
-        except aiosqlite.IntegrityError:
-            await interaction.followup.send("❌ Клан с таким названием уже существует.", ephemeral=True)
+            await interaction.followup.send(
+                f"✅ Клан **{clan_name}** создан за {cost} монет!", ephemeral=True
+            )
+        except Exception as e:
+            await bot.db.rollback()
+            await interaction.followup.send(f"❌ Ошибка: `{e}`", ephemeral=True)
 
 
 class DepositClanModal(discord.ui.Modal, title="Пополнить сундук клана"):
