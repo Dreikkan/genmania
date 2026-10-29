@@ -5,6 +5,7 @@ import aiosqlite
 import datetime
 import random
 import json
+import os
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -1764,4 +1765,4 @@ bot.tree.add_command(admin_group)
 # ============================================================
 
 if __name__ == "__main__":
-    bot.run("ТВОЙ_ТОКЕН")
+    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
