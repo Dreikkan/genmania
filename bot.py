@@ -116,9 +116,15 @@ STAR_BONUS_PER_STAR = 0.05
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
 SELL_RATE = 0.15
-START_GRID = 36
+START_GRID = 9
 PAGE_SIZE = 10
 SHOP_SELECT_PAGE_SIZE = 10
+
+# Обмен валют (с комиссией 10%, чтобы не было арбитража)
+COINS_PER_GEM = 12        # 12 монет → 1 гем
+GEMS_PER_COIN_RATE = 9    # 1 гем → 9 монет
+GEM_EXCHANGE_MIN = 1
+COIN_EXCHANGE_MIN = 12
 
 QUEST_POOL = {
     "craft_3":        ("Сделай 3 синтеза", 3, 5),
@@ -212,7 +218,7 @@ class CastleBot(commands.Bot):
             ("daily_quest_claimed", "TEXT DEFAULT '[]'"),
             ("total_crafts", "INTEGER DEFAULT 0"),
             ("total_successes", "INTEGER DEFAULT 0"),
-            ("grid_size", "INTEGER DEFAULT 36"),
+            ("grid_size", "INTEGER DEFAULT 9"),
             ("income_bonus", "REAL DEFAULT 0.0"),
         ]:
             try:
@@ -299,6 +305,7 @@ class CastleBot(commands.Bot):
             except Exception:
                 pass
 
+        # Магазин улучшений за гемы (сетки 7×7–10×10 + статусы)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS gem_shop (
                 id TEXT PRIMARY KEY,
@@ -319,6 +326,26 @@ class CastleBot(commands.Bot):
                 PRIMARY KEY (user_id, upgrade_id)
             )
         """)
+
+        # Магазин сеток за монеты (4×4–6×6)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS grid_shop (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                description TEXT,
+                price_coins INTEGER,
+                size INTEGER,
+                emoji TEXT DEFAULT '📐'
+            )
+        """)
+
+        grid_items = [
+            ("grid_4x4", "Сетка 4×4", "Увеличивает замок до 16 слотов", 500,   16, "📐"),
+            ("grid_5x5", "Сетка 5×5", "Увеличивает замок до 25 слотов", 5000,  25, "📐"),
+            ("grid_6x6", "Сетка 6×6", "Увеличивает замок до 36 слотов", 50000, 36, "📐"),
+        ]
+        for g in grid_items:
+            await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
 
         gen_names = [
             ("basic_gen",     "Базовый генератор",        "⚙️", "common",    False),
@@ -397,10 +424,10 @@ class CastleBot(commands.Bot):
             await self.db.execute("INSERT OR IGNORE INTO achievements VALUES (?, ?, ?, ?, ?)", a)
 
         gem_items = [
-            ("grid_7x7",   "Сетка 7x7",   "Увеличивает замок до 49 слотов",   50,  "📐", "upgrade", 1),
-            ("grid_8x8",   "Сетка 8x8",   "Увеличивает замок до 64 слотов",  150,  "📐", "upgrade", 1),
-            ("grid_9x9",   "Сетка 9x9",   "Увеличивает замок до 81 слота",   400,  "📐", "upgrade", 1),
-            ("grid_10x10", "Сетка 10x10", "Увеличивает замок до 100 слотов",1000,  "📐", "upgrade", 1),
+            ("grid_7x7",   "Сетка 7×7",   "Увеличивает замок до 49 слотов",   50,  "📐", "upgrade", 1),
+            ("grid_8x8",   "Сетка 8×8",   "Увеличивает замок до 64 слотов",  150,  "📐", "upgrade", 1),
+            ("grid_9x9",   "Сетка 9×9",   "Увеличивает замок до 81 слота",   400,  "📐", "upgrade", 1),
+            ("grid_10x10", "Сетка 10×10", "Увеличивает замок до 100 слотов",1000,  "📐", "upgrade", 1),
             ("vip",        "VIP-статус",  "+15% к доходу навсегда",             100,  "⭐", "status", 1),
             ("platinum",   "Платинум",    "+25% к доходу навсегда",             300,  "💠", "status", 1),
             ("gold",       "Голд",        "+35% к доходу навсегда",             700,  "🥇", "status", 1),
@@ -921,11 +948,16 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     guild_id = interaction.guild_id
     custom = (await get_settings(guild_id))["custom_emojis"]
     gem = custom.get("_gem", "💎")
+    coin = custom.get("_coin", "🪙")
     up_emoji = custom.get("_upgrades", "💎")
 
-    async with bot.db.execute(
-        "SELECT id, name, description, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
-    ) as c:
+    # Собираем все улучшения: сетки за монеты + гемы
+    async with bot.db.execute("""
+        SELECT id, name, description, price_coins as price, emoji, 'coins' as currency FROM grid_shop
+        UNION ALL
+        SELECT id, name, description, price_gems as price, emoji, 'gems' as currency FROM gem_shop
+        ORDER BY currency DESC, price
+    """) as c:
         rows = await c.fetchall()
 
     async with bot.db.execute(
@@ -943,11 +975,12 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
         description=f"Страница {page + 1}/{total_pages}",
         color=0x9b59b6
     )
-    for gid, name, desc, price, emoji in chunk:
+    for gid, name, desc, price, emoji, currency in chunk:
         status = "✅ Куплено" if gid in owned else "🔒 Не куплено"
+        price_str = f"{coin} {price}" if currency == "coins" else f"{gem} {price}"
         embed.add_field(
             name=f"{emoji} {name} (`{gid}`)",
-            value=f"{desc}\nЦена: {gem} {price}\n{status}",
+            value=f"{desc}\nЦена: {price_str}\n{status}",
             inline=False
         )
     return embed, total_pages
@@ -1097,11 +1130,142 @@ class MainMenuView(BaseView):
         embed = await build_stats_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=StatsView(self.author_id))
 
+    @discord.ui.button(label="Обмен", emoji="💱", style=discord.ButtonStyle.success, row=2)
+    async def tab_exchange(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="💱 Обмен валют",
+            description=(
+                f"Курсы (с комиссией):\n"
+                f"🪙 {COINS_PER_GEM} монет → 💎 1 гем\n"
+                f"💎 1 гем → 🪙 {GEMS_PER_COIN_RATE} монет\n\n"
+                f"Выбери направление:"
+            ),
+            color=0x2ecc71
+        )
+        await interaction.edit_original_response(embed=embed, view=ExchangeView(self.author_id))
+
 
 class BackOnlyView(BaseView):
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.back_to_main(interaction)
+
+
+# ============================================================
+#  💱 ОБМЕН ВАЛЮТ
+# ============================================================
+
+class ExchangeView(discord.ui.View):
+    def __init__(self, author_id: int, timeout: int = 120):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Монеты → Гемы", emoji="🪙", style=discord.ButtonStyle.primary, row=0)
+    async def coins_to_gems(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CoinsToGemsModal(self.author_id))
+
+    @discord.ui.button(label="Гемы → Монеты", emoji="💎", style=discord.ButtonStyle.success, row=0)
+    async def gems_to_coins(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GemsToCoinsModal(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+
+class CoinsToGemsModal(discord.ui.Modal, title="Обмен монет на гемы"):
+    amount = discord.ui.TextInput(
+        label=f"Сколько монет обменять (мин. {COIN_EXCHANGE_MIN})",
+        placeholder=f"Например, {COINS_PER_GEM}",
+        required=True
+    )
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user_id = interaction.user.id
+        try:
+            coins = int(self.amount.value)
+            if coins < COIN_EXCHANGE_MIN:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send(f"❌ Минимум {COIN_EXCHANGE_MIN} монет.", ephemeral=True)
+            return
+
+        gems = coins // COINS_PER_GEM
+        if gems < 1:
+            await interaction.followup.send(f"❌ Нужно минимум {COINS_PER_GEM} монет для 1 гема.", ephemeral=True)
+            return
+        spent_coins = gems * COINS_PER_GEM
+        remainder = coins - spent_coins
+
+        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (user_id,)) as c:
+            balance = (await c.fetchone())[0]
+        if balance < spent_coins:
+            await interaction.followup.send(f"❌ Нужно 🪙 {spent_coins}, у тебя {balance}.", ephemeral=True)
+            return
+
+        await bot.db.execute(
+            "UPDATE players SET coins = coins - ?, gems = gems + ? WHERE user_id = ?",
+            (spent_coins, gems, user_id)
+        )
+        await bot.db.commit()
+
+        msg = f"✅ Обменяно 🪙 {spent_coins} → 💎 {gems}."
+        if remainder > 0:
+            msg += f"\nОстаток {remainder} монет не обменян (нужно кратно {COINS_PER_GEM})."
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на монеты"):
+    amount = discord.ui.TextInput(
+        label=f"Сколько гемов обменять (мин. {GEM_EXCHANGE_MIN})",
+        placeholder="Например, 1",
+        required=True
+    )
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user_id = interaction.user.id
+        try:
+            gems = int(self.amount.value)
+            if gems < GEM_EXCHANGE_MIN:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send(f"❌ Минимум {GEM_EXCHANGE_MIN} гем.", ephemeral=True)
+            return
+
+        coins = gems * GEMS_PER_COIN_RATE
+
+        async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (user_id,)) as c:
+            balance = (await c.fetchone())[0]
+        if balance < gems:
+            await interaction.followup.send(f"❌ Нужно 💎 {gems}, у тебя {balance}.", ephemeral=True)
+            return
+
+        await bot.db.execute(
+            "UPDATE players SET gems = gems - ?, coins = coins + ? WHERE user_id = ?",
+            (gems, coins, user_id)
+        )
+        await bot.db.commit()
+
+        await interaction.followup.send(f"✅ Обменяно 💎 {gems} → 🪙 {coins}.", ephemeral=True)
 
 
 # ============================================================
@@ -2160,9 +2324,12 @@ class UpgradesView(BaseView):
 
     async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
-        ) as c:
+        async with bot.db.execute("""
+            SELECT id, name, price_coins as price, emoji, 'coins' FROM grid_shop
+            UNION ALL
+            SELECT id, name, price_gems as price, emoji, 'gems' FROM gem_shop
+            ORDER BY 5 DESC, 3
+        """) as c:
             rows = await c.fetchall()
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
@@ -2192,13 +2359,13 @@ async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: 
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
 
-    options = [
-        discord.SelectOption(
-            label=f"{name} — 💎 {price}" + (" ✅" if gid in owned else ""),
+    options = []
+    for gid, name, price, emoji, currency in chunk:
+        cur = "🪙" if currency == "coins" else "💎"
+        options.append(discord.SelectOption(
+            label=f"{name} — {cur} {price}" + (" ✅" if gid in owned else ""),
             value=gid, emoji=emoji
-        )
-        for gid, name, price, emoji in chunk
-    ]
+        ))
     embed = discord.Embed(
         title="💎 Выбери улучшение",
         description=f"Страница {page + 1}/{total_pages}\nВыбери улучшение:",
@@ -2241,30 +2408,57 @@ class UpgradesBuySelectView(discord.ui.View):
         await interaction.response.defer()
         user_id = interaction.user.id
         guild_id = interaction.guild_id
+
+        # Ищем в grid_shop или gem_shop
         async with bot.db.execute(
-            "SELECT name, price_gems, emoji, category FROM gem_shop WHERE id = ?", (upgrade_id,)
+            "SELECT name, price_coins, emoji, size FROM grid_shop WHERE id = ?", (upgrade_id,)
         ) as c:
-            item = await c.fetchone()
-        if not item:
-            await interaction.followup.send("❌ Не найдено.", ephemeral=True)
-            return
-        name, price, emoji, category = item
+            grid_item = await c.fetchone()
+
+        if grid_item:
+            name, price, emoji, size = grid_item
+            currency = "coins"
+            category = "grid"
+        else:
+            async with bot.db.execute(
+                "SELECT name, price_gems, emoji, category FROM gem_shop WHERE id = ?", (upgrade_id,)
+            ) as c:
+                gem_item = await c.fetchone()
+            if not gem_item:
+                await interaction.followup.send("❌ Не найдено.", ephemeral=True)
+                return
+            name, price, emoji, category = gem_item
+            currency = "gems"
+
         async with bot.db.execute(
             "SELECT 1 FROM player_upgrades WHERE user_id = ? AND upgrade_id = ?", (user_id, upgrade_id)
         ) as c:
             if await c.fetchone():
                 await interaction.followup.send(f"❌ **{name}** уже куплено.", ephemeral=True)
                 return
-        async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (user_id,)) as c:
-            gems = (await c.fetchone())[0]
-        if gems < price:
-            await interaction.followup.send(f"❌ Нужно 💎 {price}.", ephemeral=True)
+
+        async with bot.db.execute(
+            f"SELECT {currency} FROM players WHERE user_id = ?", (user_id,)
+        ) as c:
+            balance = (await c.fetchone())[0]
+
+        if balance < price:
+            unit = "🪙" if currency == "coins" else "💎"
+            await interaction.followup.send(f"❌ Нужно {unit} {price}, у тебя {balance}.", ephemeral=True)
             return
-        await bot.db.execute("UPDATE players SET gems = gems - ? WHERE user_id = ?", (price, user_id))
+
+        await bot.db.execute(
+            f"UPDATE players SET {currency} = {currency} - ? WHERE user_id = ?", (price, user_id)
+        )
         await bot.db.execute(
             "INSERT INTO player_upgrades (user_id, upgrade_id) VALUES (?, ?)", (user_id, upgrade_id)
         )
-        if upgrade_id.startswith("grid_"):
+
+        if category == "grid":
+            await bot.db.execute(
+                "UPDATE players SET grid_size = ? WHERE user_id = ?", (size, user_id)
+            )
+        elif upgrade_id.startswith("grid_"):
             size = int(upgrade_id.split("_")[1].split("x")[0])
             await bot.db.execute(
                 "UPDATE players SET grid_size = ? WHERE user_id = ?", (size * size, user_id)
@@ -2292,14 +2486,19 @@ class UpgradesBuySelectView(discord.ui.View):
                             await member.add_roles(role, reason=f"Покупка {name}")
                         except discord.HTTPException:
                             pass
+
         await bot.db.commit()
-        await interaction.followup.send(f"✅ Куплено **{emoji} {name}** за 💎 {price}!", ephemeral=True)
+        unit = "🪙" if currency == "coins" else "💎"
+        await interaction.followup.send(f"✅ Куплено **{emoji} {name}** за {unit} {price}!", ephemeral=True)
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
-        ) as c:
+        async with bot.db.execute("""
+            SELECT id, name, price_coins as price, emoji, 'coins' FROM grid_shop
+            UNION ALL
+            SELECT id, name, price_gems as price, emoji, 'gems' FROM gem_shop
+            ORDER BY 5 DESC, 3
+        """) as c:
             rows = await c.fetchall()
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
@@ -2309,9 +2508,12 @@ class UpgradesBuySelectView(discord.ui.View):
 
     async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT id, name, price_gems, emoji FROM gem_shop ORDER BY category, price_gems"
-        ) as c:
+        async with bot.db.execute("""
+            SELECT id, name, price_coins as price, emoji, 'coins' FROM grid_shop
+            UNION ALL
+            SELECT id, name, price_gems as price, emoji, 'gems' FROM gem_shop
+            ORDER BY 5 DESC, 3
+        """) as c:
             rows = await c.fetchall()
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
@@ -2672,7 +2874,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
         await bot.db.execute("""
             UPDATE players SET
                 coins = ?, gems = 0, catalysts = 0,
-                grid_size = 36, income_bonus = 0.0,
+                grid_size = 9, income_bonus = 0.0,
                 total_crafts = 0, total_successes = 0,
                 last_collected = CURRENT_TIMESTAMP,
                 last_gem_collected = CURRENT_TIMESTAMP,
