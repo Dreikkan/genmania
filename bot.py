@@ -814,7 +814,7 @@ class MainMenuView(discord.ui.View):
             return False
         return True
 
-        async def _render(self, interaction: discord.Interaction, tab: str):
+    async def _render(self, interaction: discord.Interaction, tab: str):
         self.current_tab = tab
         await interaction.response.defer()
 
