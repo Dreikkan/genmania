@@ -1869,14 +1869,39 @@ class ClanMenuView(BaseView):
         embed = await build_clan_quests_embed(self.clan_id)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    @discord.ui.button(label="Участники", emoji="👥", style=discord.ButtonStyle.secondary, row=2)
+        @discord.ui.button(label="Участники", emoji="👥", style=discord.ButtonStyle.secondary, row=2)
     async def btn_members(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         members = await get_clan_members(self.clan_id)
         embed = discord.Embed(title="👥 Участники клана", color=0x9b59b6)
-        role_names = {"leader": "👑 Лидер", "deputy": "🥈 Заместитель", "officer": "🥉 Офицер", "veteran": "🎖️ Ветеран", "member": "👤 Участник"}
+        role_names = {
+            "leader": "👑 Лидер",
+            "deputy": "🥈 Заместитель",
+            "officer": "🥉 Офицер",
+            "veteran": "🎖️ Ветеран",
+            "member": "👤 Участник",
+        }
         for uid, role in members:
-            embed.add_field(name=f"<@{uid}>", value=role_names.get(role, role), inline=True)
+            # Пытаемся получить имя пользователя
+            user = bot.get_user(uid)
+            if user is None:
+                try:
+                    user = await bot.fetch_user(uid)
+                except discord.NotFound:
+                    user = None
+                except discord.HTTPException:
+                    user = None
+
+            if user:
+                display = f"**{user.name}**"
+            else:
+                display = f"`{uid}`"
+
+            embed.add_field(
+                name=display,
+                value=role_names.get(role, role),
+                inline=True
+            )
         await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Управление", emoji="⚙️", style=discord.ButtonStyle.danger, row=2)
