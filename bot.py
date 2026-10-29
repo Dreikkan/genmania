@@ -585,10 +585,37 @@ async def profile(interaction: discord.Interaction):
         emoji = await get_item_emoji(guild_id, item_id, default_emoji) if guild_id else default_emoji
         items[slot] = emoji
 
-    width = int(grid_size ** 0.5)
+        width = int(grid_size ** 0.5)
+
+    # Считаем суммарный доход в час (с учётом бонуса)
+    async with bot.db.execute("""
+        SELECT
+            COALESCE(SUM(CASE WHEN inv.location = 'profile' THEN i.income_per_hour ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN inv.location = 'profile' THEN i.income_gems_per_hour ELSE 0 END), 0)
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ?
+    """, (user_id,)) as c:
+        hourly_coins_raw, hourly_gems_raw = await c.fetchone()
+
+    multiplier = 1 + bonus
+    hourly_coins = hourly_coins_raw * multiplier
+    hourly_gems = hourly_gems_raw * multiplier
+
+    # Форматируем доход
+    if hourly_coins > 0 or hourly_gems > 0:
+        income_parts = []
+        if hourly_coins > 0:
+            income_parts.append(f"🪙 {hourly_coins:.2f}/час")
+        if hourly_gems > 0:
+            income_parts.append(f"💎 {hourly_gems:.3f}/час")
+        income_str = " | ".join(income_parts)
+    else:
+        income_str = "нет генераторов"
 
     embed = discord.Embed(title=f"🏰 Замок {interaction.user.name}", color=0x00ff00)
     embed.add_field(name="Кошелёк", value=f"🪙 {coins} | 💎 {gems}", inline=False)
+    embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонус дохода", value=f"+{int(bonus * 100)}%", inline=True)
     embed.add_field(name="Сетка", value=f"{width}x{width} ({grid_size} слотов)", inline=True)
 
