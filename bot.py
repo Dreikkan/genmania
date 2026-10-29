@@ -111,18 +111,27 @@ STAR_UPGRADE = {
     5: {"copies": 6, "chance": 0.45, "gems": 40},
 }
 
-STAR_BONUS_PER_STAR = 0.05
+# Суммарный бонус к доходу за N звёзд (компенсирует потерю копий)
+STAR_BONUS = {
+    0: 0.00,
+    1: 1.10,
+    2: 2.30,
+    3: 3.60,
+    4: 5.00,
+    5: 6.50,
+}
 
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
 SELL_RATE = 0.15
 START_GRID = 9
+STORAGE_SIZE = 36
 PAGE_SIZE = 10
 SHOP_SELECT_PAGE_SIZE = 10
+SLOT_WIDTH = 8
 
-# Обмен валют (с комиссией 10%, чтобы не было арбитража)
-COINS_PER_GEM = 12        # 12 монет → 1 гем
-GEMS_PER_COIN_RATE = 9    # 1 гем → 9 монет
+COINS_PER_GEM = 12
+GEMS_PER_COIN_RATE = 9
 GEM_EXCHANGE_MIN = 1
 COIN_EXCHANGE_MIN = 12
 
@@ -219,6 +228,7 @@ class CastleBot(commands.Bot):
             ("total_crafts", "INTEGER DEFAULT 0"),
             ("total_successes", "INTEGER DEFAULT 0"),
             ("grid_size", "INTEGER DEFAULT 9"),
+            ("storage_size", "INTEGER DEFAULT 36"),
             ("income_bonus", "REAL DEFAULT 0.0"),
         ]:
             try:
@@ -305,7 +315,6 @@ class CastleBot(commands.Bot):
             except Exception:
                 pass
 
-        # Магазин улучшений за гемы (сетки 7×7–10×10 + статусы)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS gem_shop (
                 id TEXT PRIMARY KEY,
@@ -326,8 +335,6 @@ class CastleBot(commands.Bot):
                 PRIMARY KEY (user_id, upgrade_id)
             )
         """)
-
-        # Магазин сеток за монеты (4×4–6×6)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS grid_shop (
                 id TEXT PRIMARY KEY,
@@ -341,8 +348,8 @@ class CastleBot(commands.Bot):
 
         grid_items = [
             ("grid_4x4", "Сетка 4×4", "Увеличивает замок до 16 слотов", 500,   16, "📐"),
-            ("grid_5x5", "Сетка 5×5", "Увеличивает замок до 25 слотов", 5000,  25, "📐"),
-            ("grid_6x6", "Сетка 6×6", "Увеличивает замок до 36 слотов", 50000, 36, "📐"),
+            ("grid_5x5", "Сетка 5×5", "Увеличивает замок до 25 слотов", 1250,  25, "📐"),
+            ("grid_6x6", "Сетка 6×6", "Увеличивает замок до 36 слотов", 1750,  36, "📐"),
         ]
         for g in grid_items:
             await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
@@ -424,14 +431,14 @@ class CastleBot(commands.Bot):
             await self.db.execute("INSERT OR IGNORE INTO achievements VALUES (?, ?, ?, ?, ?)", a)
 
         gem_items = [
-            ("grid_7x7",   "Сетка 7×7",   "Увеличивает замок до 49 слотов",   50,  "📐", "upgrade", 1),
-            ("grid_8x8",   "Сетка 8×8",   "Увеличивает замок до 64 слотов",  150,  "📐", "upgrade", 1),
+            ("grid_7x7",   "Сетка 7×7",   "Увеличивает замок до 49 слотов",  100,  "📐", "upgrade", 1),
+            ("grid_8x8",   "Сетка 8×8",   "Увеличивает замок до 64 слотов",  250,  "📐", "upgrade", 1),
             ("grid_9x9",   "Сетка 9×9",   "Увеличивает замок до 81 слота",   400,  "📐", "upgrade", 1),
             ("grid_10x10", "Сетка 10×10", "Увеличивает замок до 100 слотов",1000,  "📐", "upgrade", 1),
-            ("vip",        "VIP-статус",  "+15% к доходу навсегда",             100,  "⭐", "status", 1),
-            ("platinum",   "Платинум",    "+25% к доходу навсегда",             300,  "💠", "status", 1),
-            ("gold",       "Голд",        "+35% к доходу навсегда",             700,  "🥇", "status", 1),
-            ("diamond",    "Даймонд",     "+45% к доходу навсегда",            1500,  "💎", "status", 1),
+            ("vip",        "VIP",         "+15% к доходу навсегда",             100,  "⭐", "status", 1),
+            ("gold",       "Gold",        "+35% к доходу навсегда",             300,  "🥇", "status", 1),
+            ("platinum",   "Platinum",    "+25% к доходу навсегда",             700,  "💠", "status", 1),
+            ("diamond",    "Diamond",     "+45% к доходу навсегда",            1500,  "💎", "status", 1),
         ]
         for g in gem_items:
             await self.db.execute("INSERT OR IGNORE INTO gem_shop VALUES (?, ?, ?, ?, ?, ?, ?)", g)
@@ -515,6 +522,15 @@ def make_select(placeholder: str, options: list[discord.SelectOption], callback,
     return select
 
 
+def format_slot(emoji: str, stars: int) -> str:
+    """Фиксированная ширина ячейки для ровной сетки."""
+    if stars > 0:
+        text = f"{emoji}({stars}⭐)"
+    else:
+        text = emoji
+    return text.ljust(SLOT_WIDTH)
+
+
 async def get_player_stats(user_id: int, guild_id: int = None):
     async with bot.db.execute(
         "SELECT grid_size, income_bonus, gems, coins FROM players WHERE user_id = ?",
@@ -528,8 +544,8 @@ async def get_player_stats(user_id: int, guild_id: int = None):
             settings = await get_settings(guild_id)
             start = settings["start_coins"]
         await bot.db.execute(
-            "INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, ?)",
-            (user_id, start)
+            "INSERT OR IGNORE INTO players (user_id, coins, grid_size, storage_size) VALUES (?, ?, ?, ?)",
+            (user_id, start, START_GRID, STORAGE_SIZE)
         )
         await bot.db.commit()
         return START_GRID, 0.0, 0, start
@@ -542,20 +558,39 @@ async def get_grid_size(user_id: int) -> int:
     return size
 
 
+async def get_storage_size(user_id: int) -> int:
+    async with bot.db.execute(
+        "SELECT storage_size FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return STORAGE_SIZE
+    return row[0] or STORAGE_SIZE
+
+
 async def get_per_second_income(user_id: int) -> tuple[float, float]:
-    grid_size, bonus, gems, coins = await get_player_stats(user_id)
+    async with bot.db.execute(
+        "SELECT income_bonus FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    bonus = (row[0] if row else 0.0) or 0.0
+    multiplier = 1 + bonus
+
     async with bot.db.execute("""
-        SELECT
-            COALESCE(SUM(CASE WHEN inv.location = 'profile'
-                THEN i.income_per_hour * (1 + inv.stars * ?) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN inv.location = 'profile'
-                THEN i.income_gems_per_hour * (1 + inv.stars * ?) ELSE 0 END), 0)
+        SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ?
-    """, (STAR_BONUS_PER_STAR, STAR_BONUS_PER_STAR, user_id)) as c:
-        per_sec_coins_raw, per_sec_gems_raw = await c.fetchone()
-    multiplier = 1 + bonus
+        WHERE inv.user_id = ? AND inv.location = 'profile'
+    """, (user_id,)) as c:
+        rows = await c.fetchall()
+
+    per_sec_coins_raw = 0.0
+    per_sec_gems_raw = 0.0
+    for stars, inc_coins, inc_gems in rows:
+        star_mult = 1 + STAR_BONUS.get(stars, 0)
+        per_sec_coins_raw += inc_coins * star_mult
+        per_sec_gems_raw += inc_gems * star_mult
+
     return per_sec_coins_raw * multiplier, per_sec_gems_raw * multiplier
 
 
@@ -574,29 +609,28 @@ async def calculate_passive_income(user_id: int, guild_id: int = None):
     gem_cap = settings["gem_cap"]
     passive_limit = settings["passive_limit"]
 
-    now = datetime.datetime.now()
-
     async with bot.db.execute("""
-        SELECT SUM(i.income_per_hour * (1 + inv.stars * ?))
+        SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'profile'
-    """, (STAR_BONUS_PER_STAR, user_id)) as c:
-        per_sec_coins = (await c.fetchone())[0] or 0
+    """, (user_id,)) as c:
+        rows = await c.fetchall()
+
+    per_sec_coins = 0.0
+    per_sec_gems = 0.0
+    for stars, inc_coins, inc_gems in rows:
+        star_mult = 1 + STAR_BONUS.get(stars, 0)
+        per_sec_coins += inc_coins * star_mult
+        per_sec_gems += inc_gems * star_mult
+
+    now = datetime.datetime.now()
 
     coins = 0
     if per_sec_coins > 0:
         last = datetime.datetime.fromisoformat(last_coins_str)
         seconds = (now - last).total_seconds()
         coins = min(int(seconds * per_sec_coins * multiplier), passive_limit)
-
-    async with bot.db.execute("""
-        SELECT SUM(i.income_gems_per_hour * (1 + inv.stars * ?))
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND i.income_gems_per_hour > 0 AND inv.location = 'profile'
-    """, (STAR_BONUS_PER_STAR, user_id)) as c:
-        per_sec_gems = (await c.fetchone())[0] or 0
 
     gems = 0
     if per_sec_gems > 0:
@@ -627,6 +661,72 @@ async def collect_income(user_id: int, guild_id: int = None):
     await bot.db.commit()
     await update_quest_progress(user_id, "collect_income")
     return coins_earned, gems_earned
+
+
+async def place_items(user_id: int, item_id: str, quantity: int) -> tuple[int, int]:
+    """Размещает предметы: сначала в замок, остаток — в хранилище.
+    Возвращает (в_замок, в_хранилище). Бросает ValueError, если места не хватило."""
+    grid_size = await get_grid_size(user_id)
+    storage_size = await get_storage_size(user_id)
+
+    async with bot.db.execute(
+        "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'", (user_id,)
+    ) as c:
+        used_profile = {r[0] for r in await c.fetchall()}
+    free_profile = [s for s in range(grid_size) if s not in used_profile]
+
+    async with bot.db.execute(
+        "SELECT slot FROM inventory WHERE user_id = ? AND location = 'storage'", (user_id,)
+    ) as c:
+        used_storage = {r[0] for r in await c.fetchall()}
+    free_storage = [s for s in range(storage_size) if s not in used_storage]
+
+    total_free = len(free_profile) + len(free_storage)
+    if total_free < quantity:
+        raise ValueError(f"Не хватает места: свободно {total_free}, нужно {quantity}.")
+
+    to_profile = min(quantity, len(free_profile))
+    to_storage = quantity - to_profile
+
+    for i in range(to_profile):
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'profile', 0)",
+            (user_id, free_profile[i], item_id)
+        )
+    for i in range(to_storage):
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', 0)",
+            (user_id, free_storage[i], item_id)
+        )
+    await bot.db.commit()
+    return to_profile, to_storage
+
+
+async def sort_inventory(user_id: int, location: str):
+    """Сортирует предметы в локации: по цене (убывание), затем по звёздам (убывание)."""
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, inv.stars, i.price
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = ?
+        ORDER BY i.price DESC, inv.stars DESC
+    """, (user_id, location)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return
+
+    await bot.db.execute(
+        "DELETE FROM inventory WHERE user_id = ? AND location = ?",
+        (user_id, location)
+    )
+
+    for new_slot, (_, item_id, stars, _) in enumerate(rows):
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
+            (user_id, new_slot, item_id, location, stars)
+        )
+    await bot.db.commit()
 
 
 # ============================================================
@@ -801,9 +901,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     items = {}
     for slot, item_id, default_emoji, stars in rows:
         emoji = custom.get(item_id, default_emoji)
-        if stars > 0:
-            emoji = f"{emoji}({stars}⭐)"
-        items[slot] = emoji
+        items[slot] = format_slot(emoji, stars)
 
     coin = custom.get("_coin", "🪙")
     gem = custom.get("_gem", "💎")
@@ -827,7 +925,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
 
     grid_str = ""
     for slot in range(grid_size):
-        grid_str += f"{items.get(slot, '⬛')} "
+        grid_str += f"{items.get(slot, format_slot('⬛', 0))} "
         if (slot + 1) % width == 0:
             grid_str += "\n"
     embed.add_field(name="Замок", value=f"```\n{grid_str}\n```", inline=False)
@@ -838,7 +936,7 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     user_id = interaction.user.id
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
-    grid_size = await get_grid_size(user_id)
+    grid_size = await get_storage_size(user_id)
 
     async with bot.db.execute("""
         SELECT inv.slot, i.id, i.emoji, inv.stars FROM inventory inv
@@ -851,16 +949,14 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     items = {}
     for slot, item_id, default_emoji, stars in rows:
         emoji = custom.get(item_id, default_emoji)
-        if stars > 0:
-            emoji = f"{emoji}({stars}⭐)"
-        items[slot] = emoji
+        items[slot] = format_slot(emoji, stars)
 
     storage_emoji = custom.get("_storage", "🎒")
     width = int(grid_size ** 0.5)
     embed = discord.Embed(title=f"{storage_emoji} Хранилище {interaction.user.name}", color=0x808080)
     grid_str = ""
     for slot in range(grid_size):
-        grid_str += f"{items.get(slot, '⬛')} "
+        grid_str += f"{items.get(slot, format_slot('⬛', 0))} "
         if (slot + 1) % width == 0:
             grid_str += "\n"
     embed.add_field(name="Предметы (эффекты отключены)", value=f"```\n{grid_str}\n```", inline=False)
@@ -951,14 +1047,19 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     coin = custom.get("_coin", "🪙")
     up_emoji = custom.get("_upgrades", "💎")
 
-    # Собираем все улучшения: сетки за монеты + гемы
     async with bot.db.execute("""
         SELECT id, name, description, price_coins as price, emoji, 'coins' as currency FROM grid_shop
         UNION ALL
         SELECT id, name, description, price_gems as price, emoji, 'gems' as currency FROM gem_shop
-        ORDER BY currency DESC, price
     """) as c:
         rows = await c.fetchall()
+
+    order = {
+        "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
+        "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
+        "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
+    }
+    rows = sorted(rows, key=lambda r: order.get(r[0], 99))
 
     async with bot.db.execute(
         "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
@@ -1302,12 +1403,211 @@ class ProfileView(BackOnlyView):
         await interaction.response.defer()
         await open_star_view(interaction, self.author_id)
 
+    @discord.ui.button(label="Поменять", emoji="↔️", style=discord.ButtonStyle.secondary, row=2)
+    async def swap_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_swap_view(interaction, "profile", self.author_id)
+
 
 class StorageView(BackOnlyView):
     @discord.ui.button(label="Переместить", emoji="🔀", style=discord.ButtonStyle.primary, row=1)
     async def move_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_move_view(interaction, "storage", self.author_id)
+
+    @discord.ui.button(label="Поменять", emoji="↔️", style=discord.ButtonStyle.secondary, row=1)
+    async def swap_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_swap_view(interaction, "storage", self.author_id)
+
+
+# ============================================================
+#  ↔️ ОБМЕН СЛОТОВ
+# ============================================================
+
+async def open_swap_view(interaction: discord.Interaction, location: str, author_id: int):
+    user_id = interaction.user.id
+    guild_id = interaction.guild_id
+    settings = await get_settings(guild_id)
+    custom = settings["custom_emojis"]
+
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = ?
+        ORDER BY inv.slot ASC
+    """, (user_id, location)) as c:
+        rows = await c.fetchall()
+
+    if len(rows) < 2:
+        await interaction.followup.send("❌ Нужно минимум 2 предмета для обмена.", ephemeral=True)
+        return
+
+    options = []
+    for slot, item_id, name, default_emoji, stars in rows[:25]:
+        emoji = custom.get(item_id, default_emoji)
+        stars_str = f"({stars}⭐)" if stars > 0 else ""
+        options.append(discord.SelectOption(
+            label=f"Слот {slot}: {name} {stars_str}".strip(),
+            value=str(slot),
+            emoji=emoji
+        ))
+
+    embed = discord.Embed(
+        title="↔️ Обмен слотами",
+        description="Выбери **первый** предмет для обмена:",
+        color=0x3498db
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=SwapFirstView(author_id, location, options)
+    )
+
+
+class SwapFirstView(discord.ui.View):
+    def __init__(self, author_id: int, location: str, options: list[discord.SelectOption]):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.location = location
+        self.add_item(make_select("Выбери первый слот", options, self.first_select, row=0))
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
+            return False
+        return True
+
+    async def first_select(self, interaction: discord.Interaction):
+        first_slot = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        user_id = interaction.user.id
+        guild_id = interaction.guild_id
+        custom = (await get_settings(guild_id))["custom_emojis"]
+
+        async with bot.db.execute("""
+            SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
+            FROM inventory inv
+            JOIN items i ON inv.item_id = i.id
+            WHERE inv.user_id = ? AND inv.location = ? AND inv.slot != ?
+            ORDER BY inv.slot ASC
+        """, (user_id, self.location, first_slot)) as c:
+            rows = await c.fetchall()
+
+        options = []
+        for slot, item_id, name, default_emoji, stars in rows[:25]:
+            emoji = custom.get(item_id, default_emoji)
+            stars_str = f"({stars}⭐)" if stars > 0 else ""
+            options.append(discord.SelectOption(
+                label=f"Слот {slot}: {name} {stars_str}".strip(),
+                value=str(slot),
+                emoji=emoji
+            ))
+
+        embed = discord.Embed(
+            title="↔️ Обмен слотами",
+            description=f"Первый слот: **{first_slot}**.\nВыбери **второй** слот:",
+            color=0x3498db
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=SwapSecondView(self.author_id, self.location, first_slot, options)
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if self.location == "profile":
+            embed = await build_profile_embed(interaction)
+            view = ProfileView(self.author_id)
+        else:
+            embed = await build_storage_embed(interaction)
+            view = StorageView(self.author_id)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+
+class SwapSecondView(discord.ui.View):
+    def __init__(self, author_id: int, location: str, first_slot: int, options: list[discord.SelectOption]):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.location = location
+        self.first_slot = first_slot
+        self.add_item(make_select("Выбери второй слот", options, self.second_select, row=0))
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
+            return False
+        return True
+
+    async def second_select(self, interaction: discord.Interaction):
+        second_slot = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        user_id = interaction.user.id
+        first_slot = self.first_slot
+
+        async with bot.db.execute(
+            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            (user_id, self.location, first_slot)
+        ) as c:
+            first = await c.fetchone()
+        async with bot.db.execute(
+            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            (user_id, self.location, second_slot)
+        ) as c:
+            second = await c.fetchone()
+
+        if not first or not second:
+            await self.fail(interaction, "❌ Один из слотов пуст.")
+            return
+
+        await bot.db.execute(
+            "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot IN (?, ?)",
+            (user_id, self.location, first_slot, second_slot)
+        )
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
+            (user_id, first_slot, second[0], self.location, second[1])
+        )
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
+            (user_id, second_slot, first[0], self.location, first[1])
+        )
+        await bot.db.commit()
+
+        embed = discord.Embed(
+            title="✅ Слоты поменяны",
+            description=f"Предметы в слотах **{first_slot}** и **{second_slot}** поменялись местами.",
+            color=0x2ecc71
+        )
+        if self.location == "profile":
+            view = ProfileView(self.author_id)
+        else:
+            view = StorageView(self.author_id)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    async def fail(self, interaction: discord.Interaction, msg: str):
+        embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
+        if self.location == "profile":
+            view = ProfileView(self.author_id)
+        else:
+            view = StorageView(self.author_id)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if self.location == "profile":
+            embed = await build_profile_embed(interaction)
+            view = ProfileView(self.author_id)
+        else:
+            embed = await build_storage_embed(interaction)
+            view = StorageView(self.author_id)
+        await interaction.edit_original_response(embed=embed, view=view)
 
 
 # ============================================================
@@ -1352,8 +1652,10 @@ async def open_star_view(interaction: discord.Interaction, author_id: int):
     embed = discord.Embed(
         title="⭐ Улучшение звёзд",
         description=(
-            f"Каждая звезда даёт **+{int(STAR_BONUS_PER_STAR * 100)}%** к доходу этого генератора.\n"
-            f"Максимум — 5★ (+{int(STAR_BONUS_PER_STAR * 500)}%).\n\n"
+            f"Бонус к доходу за звёзды (суммарный):\n"
+            f"1★ +{int(STAR_BONUS[1] * 100)}%, 2★ +{int(STAR_BONUS[2] * 100)}%, "
+            f"3★ +{int(STAR_BONUS[3] * 100)}%, 4★ +{int(STAR_BONUS[4] * 100)}%, "
+            f"5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
             f"Чтобы поднять звезду, нужно **несколько копий** того же генератора с такой же звёздностью.\n"
             f"При провале копии сгорают, но звезда **не понижается**.\n\n"
             f"Выбери генератор:"
@@ -1423,7 +1725,7 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
             f"Нужно копий: **{have}/{need}**\n"
             f"Шанс успеха: **{int(settings_star['chance'] * 100)}%**\n"
             f"Стоимость: **💎 {settings_star['gems']}**\n"
-            f"Бонус: **+{int(STAR_BONUS_PER_STAR * 100)}%** к доходу.\n\n"
+            f"Новый суммарный бонус: **+{int(STAR_BONUS[next_star] * 100)}%** к доходу.\n\n"
             f"При провале копии сгорают, но звезда **не понижается**."
         ),
         color=0xf1c40f if enough else 0xe74c3c
@@ -1519,7 +1821,7 @@ class StarConfirmView(discord.ui.View):
                 title="⭐ Успех!",
                 description=(
                     f"Генератор в слоте {keep_slot} улучшен до **{self.next_star}★**.\n"
-                    f"Бонус к доходу: **+{int(self.next_star * STAR_BONUS_PER_STAR * 100)}%**.\n"
+                    f"Суммарный бонус к доходу: **+{int(STAR_BONUS[self.next_star] * 100)}%**.\n"
                     f"Сгорело копий: **{len(to_delete)}**."
                 ),
                 color=0x2ecc71
@@ -1691,6 +1993,15 @@ class MoveConfirmView(discord.ui.View):
         user_id = interaction.user.id
         target = "storage" if self.source == "profile" else "profile"
 
+        # Проверка валидности слота для целевой локации
+        if target == "storage":
+            target_size = await get_storage_size(user_id)
+        else:
+            target_size = await get_grid_size(user_id)
+        if self.slot >= target_size:
+            await self.fail(interaction, f"❌ Слот {self.slot} вне диапазона (макс. {target_size - 1}).")
+            return
+
         async with bot.db.execute(
             "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
             (user_id, self.source, self.slot)
@@ -1720,6 +2031,10 @@ class MoveConfirmView(discord.ui.View):
         await bot.db.commit()
 
         await update_quest_progress(user_id, "move_2")
+
+        # Сортируем обе локации
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
 
         if self.source == "profile":
             embed = await build_profile_embed(interaction)
@@ -1869,32 +2184,33 @@ class CraftConfirmView(discord.ui.View):
         dst_name, dst_emoji = dst
 
         async with bot.db.execute(
-            "SELECT location, slot FROM inventory WHERE user_id = ? AND item_id = ?", (user_id, item_id)
+            "SELECT location, slot FROM inventory WHERE user_id = ? AND item_id = ?",
+            (user_id, item_id)
         ) as c:
             owned = await c.fetchall()
+
         if len(owned) < CRAFT_COST:
-            await self.fail(interaction, f"❌ Нужно {CRAFT_COST} × {src_name}.")
+            await self.fail(interaction, f"❌ Нужно {CRAFT_COST} × {src_name}, у тебя {len(owned)}.")
             return
 
         async with bot.db.execute("SELECT gems, catalysts FROM players WHERE user_id = ?", (user_id,)) as c:
             gems, cats = await c.fetchone()
         if gems < gem_cost:
-            await self.fail(interaction, f"❌ Нужно 💎 {gem_cost}.")
+            await self.fail(interaction, f"❌ Нужно 💎 {gem_cost}, у тебя {gems}.")
             return
         if use_cat and cats < 1:
             await self.fail(interaction, "❌ Нет катализаторов.")
             return
 
-        grid_size = await get_grid_size(user_id)
-        async with bot.db.execute(
-            "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'", (user_id,)
-        ) as c:
-            used = {r[0] for r in await c.fetchall()}
-        free = [s for s in range(grid_size) if s not in used]
-        if not free:
-            await self.fail(interaction, "❌ В замке нет места.")
-            return
+        # Удаляем ингредиенты
+        to_remove = owned[:CRAFT_COST]
+        for location, slot in to_remove:
+            await bot.db.execute(
+                "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+                (user_id, location, slot)
+            )
 
+        # Списываем гемы и катализатор
         if gem_cost > 0:
             await bot.db.execute("UPDATE players SET gems = gems - ? WHERE user_id = ?", (gem_cost, user_id))
         catalyst_used = 0
@@ -1902,31 +2218,32 @@ class CraftConfirmView(discord.ui.View):
             await bot.db.execute("UPDATE players SET catalysts = catalysts - 1 WHERE user_id = ?", (user_id,))
             catalyst_used = 1
 
-        for location, slot in owned[:CRAFT_COST]:
-            await bot.db.execute(
-                "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-                (user_id, location, slot)
-            )
-
+        # Бросок
         final_chance = min(1.0, base_chance + (CATALYST_BONUS if use_cat else 0))
         success = random.random() < final_chance
 
+        # Лог
         await bot.db.execute(
             "INSERT INTO craft_log (user_id, item_id, success, gems_spent, catalyst_used) VALUES (?, ?, ?, ?, ?)",
             (user_id, item_id, int(success), gem_cost, catalyst_used)
         )
 
+        # Вставка при успехе
         if success:
-            await bot.db.execute(
-                "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'profile', 0)",
-                (user_id, free[0], next_id)
-            )
+            try:
+                await place_items(user_id, next_id, 1)
+            except ValueError:
+                pass  # место должно быть после удаления 5 ингредиентов
 
         await bot.db.execute(
             "UPDATE players SET total_crafts = total_crafts + 1, total_successes = total_successes + ? "
             "WHERE user_id = ?", (int(success), user_id)
         )
         await bot.db.commit()
+
+        # Сортировка
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
 
         await update_quest_progress(user_id, "craft_3")
         await update_quest_progress(user_id, "craft_5")
@@ -2258,28 +2575,27 @@ class BuyItemQuantityView(discord.ui.View):
             await self.fail(interaction, f"❌ Нужно {total_cost} монет, у тебя {balance}.")
             return
 
-        grid_size = await get_grid_size(user_id)
-        async with bot.db.execute(
-            "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'", (user_id,)
-        ) as c:
-            used = {r[0] for r in await c.fetchall()}
-        free = [s for s in range(grid_size) if s not in used]
-        if len(free) < qty:
-            await self.fail(interaction, f"❌ В замке только {len(free)} слотов.")
+        # Проверка места (замок + хранилище)
+        try:
+            to_profile, to_storage = await place_items(user_id, self.item_id, qty)
+        except ValueError as e:
+            await self.fail(interaction, f"❌ {e}")
             return
 
+        # Списываем деньги
         await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (total_cost, user_id))
-        for i in range(qty):
-            await bot.db.execute(
-                "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'profile', 0)",
-                (user_id, free[i], self.item_id)
-            )
         await bot.db.commit()
+
+        # Сортировка
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
 
         await update_quest_progress(user_id, "buy_3", qty)
         unlocked = await check_achievements(user_id)
 
         msg = f"✅ Куплено **{name}** x{qty} за {total_cost} монет."
+        if to_storage > 0:
+            msg += f"\n📦 {to_profile} в замок, {to_storage} в хранилище (в замке не хватило места)."
         if unlocked:
             msg += "\n🏆 " + ", ".join(f"{e} {n}" for e, n, _ in unlocked)
         embed = discord.Embed(title="🛒 Покупка", description=msg, color=0x2ecc71)
@@ -2325,12 +2641,19 @@ class UpgradesView(BaseView):
     async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute("""
-            SELECT id, name, price_coins as price, emoji, 'coins' FROM grid_shop
+            SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
             UNION ALL
-            SELECT id, name, price_gems as price, emoji, 'gems' FROM gem_shop
-            ORDER BY 5 DESC, 3
+            SELECT id, name, price_gems as price, emoji, 'gems' as currency FROM gem_shop
         """) as c:
             rows = await c.fetchall()
+
+        order = {
+            "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
+            "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
+            "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
+        }
+        rows = sorted(rows, key=lambda r: order.get(r[0], 99))
+
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
@@ -2409,7 +2732,6 @@ class UpgradesBuySelectView(discord.ui.View):
         user_id = interaction.user.id
         guild_id = interaction.guild_id
 
-        # Ищем в grid_shop или gem_shop
         async with bot.db.execute(
             "SELECT name, price_coins, emoji, size FROM grid_shop WHERE id = ?", (upgrade_id,)
         ) as c:
@@ -2464,10 +2786,10 @@ class UpgradesBuySelectView(discord.ui.View):
                 "UPDATE players SET grid_size = ? WHERE user_id = ?", (size * size, user_id)
             )
         elif category == "status":
-            bonuses = {"vip": 0.15, "platinum": 0.25, "gold": 0.35, "diamond": 0.45}
+            bonuses = {"vip": 0.15, "gold": 0.35, "platinum": 0.25, "diamond": 0.45}
             async with bot.db.execute(
                 "SELECT upgrade_id FROM player_upgrades WHERE user_id = ? AND upgrade_id IN "
-                "('vip','platinum','gold','diamond')", (user_id,)
+                "('vip','gold','platinum','diamond')", (user_id,)
             ) as c:
                 statuses = [r[0] for r in await c.fetchall()]
             max_bonus = max(bonuses[s] for s in statuses) if statuses else 0.0
@@ -2494,12 +2816,17 @@ class UpgradesBuySelectView(discord.ui.View):
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute("""
-            SELECT id, name, price_coins as price, emoji, 'coins' FROM grid_shop
+            SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
             UNION ALL
-            SELECT id, name, price_gems as price, emoji, 'gems' FROM gem_shop
-            ORDER BY 5 DESC, 3
+            SELECT id, name, price_gems as price, emoji, 'gems' as currency FROM gem_shop
         """) as c:
             rows = await c.fetchall()
+        order = {
+            "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
+            "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
+            "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
+        }
+        rows = sorted(rows, key=lambda r: order.get(r[0], 99))
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
@@ -2509,12 +2836,17 @@ class UpgradesBuySelectView(discord.ui.View):
     async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute("""
-            SELECT id, name, price_coins as price, emoji, 'coins' FROM grid_shop
+            SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
             UNION ALL
-            SELECT id, name, price_gems as price, emoji, 'gems' FROM gem_shop
-            ORDER BY 5 DESC, 3
+            SELECT id, name, price_gems as price, emoji, 'gems' as currency FROM gem_shop
         """) as c:
             rows = await c.fetchall()
+        order = {
+            "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
+            "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
+            "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
+        }
+        rows = sorted(rows, key=lambda r: order.get(r[0], 99))
         async with bot.db.execute(
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
@@ -2833,7 +3165,7 @@ class AdminEditModal(discord.ui.Modal, title="Изменить поле проф
             await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
             return
         field = self.field.value.strip()
-        if field not in ("coins", "gems", "catalysts", "grid_size", "income_bonus"):
+        if field not in ("coins", "gems", "catalysts", "grid_size", "storage_size", "income_bonus"):
             await interaction.followup.send("❌ Неверное поле.", ephemeral=True)
             return
         try:
@@ -2874,7 +3206,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
         await bot.db.execute("""
             UPDATE players SET
                 coins = ?, gems = 0, catalysts = 0,
-                grid_size = 9, income_bonus = 0.0,
+                grid_size = 9, storage_size = 36, income_bonus = 0.0,
                 total_crafts = 0, total_successes = 0,
                 last_collected = CURRENT_TIMESTAMP,
                 last_gem_collected = CURRENT_TIMESTAMP,
@@ -2922,22 +3254,37 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
             await interaction.followup.send("❌ Предмет не найден.", ephemeral=True)
             return
         name, emoji = item
-        grid_size = await get_grid_size(uid)
-        async with bot.db.execute(
-            "SELECT slot FROM inventory WHERE user_id = ? AND location = ?", (uid, loc)
-        ) as c:
-            used = {r[0] for r in await c.fetchall()}
-        free = [s for s in range(grid_size) if s not in used]
-        if len(free) < qty:
-            await interaction.followup.send(f"❌ Только {len(free)} слотов.", ephemeral=True)
-            return
-        for i in range(qty):
-            await bot.db.execute(
-                "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, 0)",
-                (uid, free[i], item_id, loc)
-            )
-        await bot.db.commit()
-        await interaction.followup.send(f"✅ Выдано {qty}×{emoji} {name} <@{uid}>.", ephemeral=True)
+
+        if loc == "profile":
+            try:
+                to_profile, to_storage = await place_items(uid, item_id, qty)
+            except ValueError as e:
+                await interaction.followup.send(f"❌ {e}", ephemeral=True)
+                return
+            msg = f"✅ Выдано {qty}×{emoji} {name} <@{uid}>."
+            if to_storage > 0:
+                msg += f"\n📦 {to_profile} в замок, {to_storage} в хранилище."
+        else:
+            storage_size = await get_storage_size(uid)
+            async with bot.db.execute(
+                "SELECT slot FROM inventory WHERE user_id = ? AND location = 'storage'", (uid,)
+            ) as c:
+                used = {r[0] for r in await c.fetchall()}
+            free = [s for s in range(storage_size) if s not in used]
+            if len(free) < qty:
+                await interaction.followup.send(f"❌ В хранилище только {len(free)} слотов.", ephemeral=True)
+                return
+            for i in range(qty):
+                await bot.db.execute(
+                    "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', 0)",
+                    (uid, free[i], item_id)
+                )
+            await bot.db.commit()
+            msg = f"✅ Выдано {qty}×{emoji} {name} в хранилище <@{uid}>."
+
+        await sort_inventory(uid, "profile")
+        await sort_inventory(uid, "storage")
+        await interaction.followup.send(msg, ephemeral=True)
 
 
 class AddGeneratorModal(discord.ui.Modal, title="Добавить генератор"):
