@@ -54,6 +54,9 @@ CATALYST_BONUS = 0.15
 GEM_GEN_CAP = 3
 SELL_RATE = 0.15
 
+START_COINS = 10
+START_GRID = 36
+
 # Пул ежедневных заданий: id -> (описание, цель, награда гемами)
 QUEST_POOL = {
     "craft_3":        ("Сделай 3 синтеза", 3, 5),
@@ -89,7 +92,7 @@ class CastleBot(commands.Bot):
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
-                coins INTEGER DEFAULT 3,
+                coins INTEGER DEFAULT 10,
                 gems INTEGER DEFAULT 0,
                 last_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -215,7 +218,6 @@ class CastleBot(commands.Bot):
         """)
 
         # --- Заполняем предметы ---
-        # id, name, price, income_coins, emoji, rarity, buyable, income_gems
         items_data = [
             ("basic_gen", "Базовый генератор",    10, 3,   "⚙️", "common",    1, 0),
             ("wood_gen",  "Деревянный генератор",  50, 8,   "🪵", "uncommon",  1, 0),
@@ -255,11 +257,11 @@ class CastleBot(commands.Bot):
             ("grid_7x7",   "Сетка 7x7",   "Увеличивает профиль до 49 слотов",   50,  "📐", "upgrade", 1),
             ("grid_8x8",   "Сетка 8x8",   "Увеличивает профиль до 64 слотов",  150,  "📐", "upgrade", 1),
             ("grid_9x9",   "Сетка 9x9",   "Увеличивает профиль до 81 слота",   400,  "📐", "upgrade", 1),
-            ("grid_10x10", "Сетка 10x10", "Увеличивает профиль до 100 слотов",750,  "📐", "upgrade", 1),
-            ("vip",        "VIP-статус",  "+15% к доходу навсегда (% не складывается, действует по самому высокому статусу)",             100,  "⭐", "status", 1),
-            ("platinum",   "Платинум",    "+25% к доходу навсегда (% не складывается, действует по самому высокому статусу)",             300,  "💠", "status", 1),
-            ("gold",       "Голд",        "+35% к доходу навсегда (% не складывается, действует по самому высокому статусу)",             700,  "🥇", "status", 1),
-            ("diamond",    "Даймонд",     "+45% к доходу навсегда (% не складывается, действует по самому высокому статусу)",            1500,  "💎", "status", 1),
+            ("grid_10x10", "Сетка 10x10", "Увеличивает профиль до 100 слотов",1000,  "📐", "upgrade", 1),
+            ("vip",        "VIP-статус",  "+15% к доходу навсегда",             100,  "⭐", "status", 1),
+            ("platinum",   "Платинум",    "+25% к доходу навсегда",             300,  "💠", "status", 1),
+            ("gold",       "Голд",        "+35% к доходу навсегда",             700,  "🥇", "status", 1),
+            ("diamond",    "Даймонд",     "+45% к доходу навсегда",            1500,  "💎", "status", 1),
         ]
         for g in gem_items:
             await self.db.execute(
@@ -280,16 +282,24 @@ def today_str():
     return datetime.date.today().isoformat()
 
 
-if not row:
-        # Создаём нового игрока с 10 монетами
+async def get_player_stats(user_id: int):
+    """Возвращает (grid_size, income_bonus, gems, coins).
+    Если игрока нет — создаёт его с START_COINS монетами."""
+    async with bot.db.execute(
+        "SELECT grid_size, income_bonus, gems, coins FROM players WHERE user_id = ?",
+        (user_id,)
+    ) as c:
+        row = await c.fetchone()
+
+    if not row:
         await bot.db.execute(
-            "INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, 10)",
-            (user_id,)
+            "INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, ?)",
+            (user_id, START_COINS)
         )
         await bot.db.commit()
-        return 36, 0.0, 0, 10
+        return START_GRID, 0.0, 0, START_COINS
 
-    return row[0] or 36, row[1] or 0.0, row[2] or 0, row[3] or 0
+    return row[0] or START_GRID, row[1] or 0.0, row[2] or 0, row[3] or 0
 
 
 async def get_grid_size(user_id: int) -> int:
@@ -387,8 +397,50 @@ async def collect_income(user_id: int, channel: discord.abc.Messageable):
     ]))
     await channel.send(msg, delete_after=10)
 
-    # Прогресс задания на сбор дохода
     await update_quest_progress(user_id, "collect_income")
+
+
+# ============================================================
+#  🗑️ МЕНЮ С КНОПКОЙ «УБРАТЬ»
+# ============================================================
+
+class CloseMenuView(discord.ui.View):
+    """View с одной кнопкой «Убрать». Доступна только автору команды."""
+
+    def __init__(self, author_id: int, timeout: int = 180):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Это меню открыто не тобой.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Убрать", emoji="🗑️", style=discord.ButtonStyle.secondary)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+async def send_menu(interaction: discord.Interaction, *, embed=None, embeds=None):
+    """Отправляет меню с кнопкой «Убрать»."""
+    view = CloseMenuView(interaction.user.id)
+    kwargs = {"view": view}
+    if embed is not None:
+        kwargs["embed"] = embed
+    if embeds is not None:
+        kwargs["embeds"] = embeds
+    return await interaction.response.send_message(**kwargs)
 
 
 # ============================================================
@@ -416,7 +468,6 @@ async def check_achievements(user_id: int, extra: dict = None):
     ) as c:
         unlocked = {r[0] for r in await c.fetchall()}
 
-    # Суммарно использованных катализаторов
     async with bot.db.execute(
         "SELECT COALESCE(SUM(catalyst_used), 0) FROM craft_log WHERE user_id = ?",
         (user_id,)
@@ -552,7 +603,7 @@ async def profile(interaction: discord.Interaction):
         value=f"```\n{grid_str}\n```",
         inline=False
     )
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 # ============================================================
@@ -591,7 +642,7 @@ async def storage(interaction: discord.Interaction):
         value=f"```\n{grid_str}\n```",
         inline=False
     )
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 # ============================================================
@@ -647,7 +698,7 @@ async def shop(interaction: discord.Interaction):
             )
         embeds.append(embed)
 
-    await interaction.response.send_message(embeds=embeds)
+    await send_menu(interaction, embeds=embeds)
 
 
 @bot.tree.command(name="купить", description="Купить предмет")
@@ -1080,7 +1131,7 @@ async def craft_stats(interaction: discord.Interaction):
     if detail:
         embed.add_field(name="По предметам (успех/всего)", value=detail, inline=False)
 
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 # ============================================================
@@ -1112,7 +1163,7 @@ async def achievements_list(interaction: discord.Interaction):
             inline=False
         )
 
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 # ============================================================
@@ -1136,7 +1187,7 @@ async def daily_quests(interaction: discord.Interaction):
         )
     embed.set_footer(text="Задания обновляются раз в 24 часа. Забрать награду: /забрать <id>")
 
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 @bot.tree.command(name="забрать", description="Забрать награду за выполненное задание")
@@ -1199,7 +1250,7 @@ async def gem_shop_cmd(interaction: discord.Interaction):
             inline=False
         )
     embed.set_footer(text="Купить: /купить_гем <id>")
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 @bot.tree.command(name="купить_гем", description="Купить улучшение за гемы")
@@ -1334,7 +1385,7 @@ async def settings(
         embed.add_field(name="Название", value=name, inline=False)
         embed.add_field(name="Кастомные эмодзи", value=emojis or "нет", inline=False)
         embed.set_footer(text="Использование: /настройки название:<...> предмет:<id> эмодзи:<emoji>")
-        return await interaction.response.send_message(embed=embed)
+        return await send_menu(interaction, embed=embed)
 
     await interaction.response.send_message(
         "✅ Настройки обновлены:\n" + "\n".join(changes),
@@ -1391,6 +1442,7 @@ async def add_generator(
         delete_after=10
     )
 
+
 # ============================================================
 #  🛡️ МЕНЮ АДМИНИСТРАЦИИ
 # ============================================================
@@ -1403,17 +1455,19 @@ admin_group = app_commands.Group(
 
 
 async def _resolve_target(interaction: discord.Interaction, target: discord.User):
-    """Проверяет, что у игрока есть запись в БД. Возвращает True/False."""
+    """Проверяет, что у игрока есть запись в БД. Создаёт, если нет."""
     async with bot.db.execute(
         "SELECT 1 FROM players WHERE user_id = ?", (target.id,)
     ) as c:
         exists = await c.fetchone()
+
     if not exists:
-        await interaction.response.send_message(
-            f"❌ У пользователя {target.mention} ещё нет профиля (он не заходил в бота).",
-            ephemeral=True
+        await bot.db.execute(
+            "INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, ?)",
+            (target.id, START_COINS)
         )
-        return False
+        await bot.db.commit()
+
     return True
 
 
@@ -1527,7 +1581,6 @@ async def admin_profile(interaction: discord.Interaction, пользовател
     (coins, gems, catalysts, grid_size, bonus,
      total_crafts, total_successes, last_coins, last_gems) = row
 
-    # Инвентарь
     async with bot.db.execute("""
         SELECT inv.location, inv.slot, i.name, i.emoji
         FROM inventory inv JOIN items i ON inv.item_id = i.id
@@ -1544,13 +1597,11 @@ async def admin_profile(interaction: discord.Interaction, пользовател
         else:
             storage_items.append(entry)
 
-    # Достижения
     async with bot.db.execute(
         "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (пользователь.id,)
     ) as c:
         ach_count = (await c.fetchone())[0]
 
-    # Апгрейды
     async with bot.db.execute(
         "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (пользователь.id,)
     ) as c:
@@ -1582,7 +1633,7 @@ async def admin_profile(interaction: discord.Interaction, пользовател
         inline=False
     )
 
-    await interaction.response.send_message(embed=embed)
+    await send_menu(interaction, embed=embed)
 
 
 # --- /админ изменить ---
@@ -1609,7 +1660,6 @@ async def admin_edit(
     if not await _resolve_target(interaction, пользователь):
         return
 
-    # Парсим значение в зависимости от поля
     try:
         if поле == "income_bonus":
             parsed = float(значение)
@@ -1663,10 +1713,9 @@ async def admin_reset(
 
     uid = пользователь.id
 
-    # Сбрасываем players
     await bot.db.execute("""
         UPDATE players SET
-            coins = 3, gems = 0, catalysts = 0,
+            coins = ?, gems = 0, catalysts = 0,
             grid_size = 36, income_bonus = 0.0,
             total_crafts = 0, total_successes = 0,
             last_collected = CURRENT_TIMESTAMP,
@@ -1675,9 +1724,8 @@ async def admin_reset(
             daily_quest_progress = '{}',
             daily_quest_claimed = '[]'
         WHERE user_id = ?
-    """, (uid,))
+    """, (START_COINS, uid))
 
-    # Удаляем инвентарь, достижения, апгрейды, лог
     await bot.db.execute("DELETE FROM inventory WHERE user_id = ?", (uid,))
     await bot.db.execute("DELETE FROM player_achievements WHERE user_id = ?", (uid,))
     await bot.db.execute("DELETE FROM player_upgrades WHERE user_id = ?", (uid,))
@@ -1757,12 +1805,14 @@ async def admin_give_item(
     )
 
 
-# Регистрируем группу
+# Регистрируем группу админа
 bot.tree.add_command(admin_group)
+
 
 # ============================================================
 #  🚀 ЗАПУСК
 # ============================================================
 
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+    token = os.getenv("DISCORD_BOT_TOKEN", "ТВОЙ_ТОКЕН")
+    bot.run(token)
