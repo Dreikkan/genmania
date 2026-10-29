@@ -354,7 +354,8 @@ class CastleBot(commands.Bot):
             await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
 
         gen_names = [
-            ("basic_gen",     "Базовый генератор",        "⚙️", "common",    False),
+            ("basic_gen",     "Базовый генератор",        "<:basic_gen:
+1565443870773215404>", "common",    False),
             ("copper_gen",    "Медный генератор",         "🔩", "common",    False),
             ("bronze_gen",    "Бронзовый генератор",      "🥉", "common",    False),
             ("iron_gen",      "Железный генератор",       "⛓️", "uncommon",  False),
@@ -910,7 +911,11 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     items = {}
     for slot, item_id, default_emoji, stars in rows:
         emoji = custom.get(item_id, default_emoji)
-        items[slot] = format_slot(emoji, stars)
+        # Убираем format_slot, оставляем чистый эмодзи и звезды
+        if stars > 0:
+            items[slot] = f"{emoji}({stars}⭐)"
+        else:
+            items[slot] = emoji
 
     coin = custom.get("_coin", "🪙")
     gem = custom.get("_gem", "💎")
@@ -932,12 +937,17 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     embed.add_field(name="Бонус", value=f"+{int(bonus * 100)}%", inline=True)
     embed.add_field(name="Сетка", value=f"{width}x{width}", inline=True)
 
-    grid_str = ""
-    for slot in range(grid_size):
-        grid_str += f"{items.get(slot, format_slot('⬛', 0))} "
-        if (slot + 1) % width == 0:
-            grid_str += "\n"
-    embed.add_field(name="Замок", value=f"```\n{grid_str}\n```", inline=False)
+    # Выводим сетку по рядам (каждый ряд — отдельное Inline-поле)
+    for row_idx in range(width):
+        row_items = []
+        for col_idx in range(width):
+            slot = row_idx * width + col_idx
+            row_items.append(items.get(slot, "⬛"))
+        
+        # Соединяем ячейки пробелами
+        row_str = "  ".join(row_items)
+        embed.add_field(name="\u200b", value=row_str, inline=False)
+
     return embed
 
 
@@ -958,17 +968,25 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     items = {}
     for slot, item_id, default_emoji, stars in rows:
         emoji = custom.get(item_id, default_emoji)
-        items[slot] = format_slot(emoji, stars)
+        if stars > 0:
+            items[slot] = f"{emoji}({stars}⭐)"
+        else:
+            items[slot] = emoji
 
     storage_emoji = custom.get("_storage", "🎒")
     width = int(grid_size ** 0.5)
     embed = discord.Embed(title=f"{storage_emoji} Хранилище {interaction.user.name}", color=0x808080)
-    grid_str = ""
-    for slot in range(grid_size):
-        grid_str += f"{items.get(slot, format_slot('⬛', 0))} "
-        if (slot + 1) % width == 0:
-            grid_str += "\n"
-    embed.add_field(name="Предметы (эффекты отключены)", value=f"```\n{grid_str}\n```", inline=False)
+
+    # Выводим сетку по рядам
+    for row_idx in range(width):
+        row_items = []
+        for col_idx in range(width):
+            slot = row_idx * width + col_idx
+            row_items.append(items.get(slot, "⬛"))
+        
+        row_str = "  ".join(row_items)
+        embed.add_field(name="\u200b", value=row_str, inline=False)
+
     return embed
 
 
