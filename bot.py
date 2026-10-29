@@ -3340,14 +3340,10 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
         await interaction.followup.send(msg, ephemeral=True)
 
 
-class AddGeneratorModal(discord.ui.Modal, title="Добавить генератор"):
-    id = discord.ui.TextInput(label="ID (латиницей)", required=True)
-    name = discord.ui.TextInput(label="Название", required=True)
+class AddGeneratorModal(discord.ui.Modal, title="Добавить генератор (шаг 1/2)"):
+    id = discord.ui.TextInput(label="ID (латиницей)", placeholder="my_gen", required=True)
+    name = discord.ui.TextInput(label="Название", placeholder="Мой генератор", required=True)
     price = discord.ui.TextInput(label="Цена", default="100", required=True)
-    income_coins = discord.ui.TextInput(label="Доход монет/сек", default="0.001", required=True)
-    income_gems = discord.ui.TextInput(label="Доход гемов/сек", default="0", required=True)
-    emoji = discord.ui.TextInput(label="Эмодзи", default="⚙️", required=True)
-    rarity = discord.ui.TextInput(label="Редкость", default="common", required=True)
 
     def __init__(self, author_id: int):
         super().__init__()
@@ -3363,24 +3359,97 @@ class AddGeneratorModal(discord.ui.Modal, title="Добавить генерат
             if await c.fetchone():
                 await interaction.followup.send(f"❌ ID `{item_id}` уже существует.", ephemeral=True)
                 return
-        rarity = self.rarity.value.strip().lower()
-        if rarity not in RARITY_COLORS:
-            await interaction.followup.send(f"❌ Редкость: {', '.join(RARITY_COLORS.keys())}.", ephemeral=True)
-            return
         try:
             price = int(self.price.value)
+            if price < 0:
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send("❌ Цена >= 0.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="Добавить генератор (шаг 2/2)",
+            description=(
+                f"ID: `{item_id}`\n"
+                f"Название: **{self.name.value.strip()}**\n"
+                f"Цена: 🪙 {price}\n\n"
+                f"Заполни доходы и внешний вид:"
+            ),
+            color=0x3498db
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=AddGeneratorStep2View(self.author_id, item_id, self.name.value.strip(), price)
+        )
+
+
+class AddGeneratorStep2View(discord.ui.View):
+    def __init__(self, author_id: int, item_id: str, name: str, price: int, timeout: int = 120):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.item_id = item_id
+        self.name = name
+        self.price = price
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Заполнить", emoji="📝", style=discord.ButtonStyle.primary, row=0)
+    async def fill(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            AddGeneratorStep2Modal(self.author_id, self.item_id, self.name, self.price)
+        )
+
+    @discord.ui.button(label="Отмена", emoji="❌", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="🛡️ Панель администратора", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
+
+
+class AddGeneratorStep2Modal(discord.ui.Modal, title="Добавить генератор (шаг 2/2)"):
+    income_coins = discord.ui.TextInput(label="Доход монет/сек", default="0.001", required=True)
+    income_gems = discord.ui.TextInput(label="Доход гемов/сек", default="0", required=True)
+    emoji = discord.ui.TextInput(label="Эмодзи", default="⚙️", required=True)
+    rarity = discord.ui.TextInput(label="Редкость", default="common", required=True)
+
+    def __init__(self, author_id: int, item_id: str, name: str, price: int):
+        super().__init__()
+        self.author_id = author_id
+        self.item_id = item_id
+        self.name = name
+        self.price = price
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        rarity = self.rarity.value.strip().lower()
+        if rarity not in RARITY_COLORS:
+            await interaction.followup.send(
+                f"❌ Редкость: {', '.join(RARITY_COLORS.keys())}.", ephemeral=True
+            )
+            return
+        try:
             inc_c = float(self.income_coins.value)
             inc_g = float(self.income_gems.value)
+            if inc_c < 0 or inc_g < 0:
+                raise ValueError
         except ValueError:
-            await interaction.followup.send("❌ Цена и доходы — числа.", ephemeral=True)
+            await interaction.followup.send("❌ Доходы должны быть числами >= 0.", ephemeral=True)
             return
+
         await bot.db.execute(
             "INSERT INTO items (id, name, price, income_per_hour, emoji, rarity, buyable, income_gems_per_hour) "
             "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            (item_id, self.name.value.strip(), price, inc_c, self.emoji.value.strip(), rarity, inc_g)
+            (self.item_id, self.name, self.price, inc_c, self.emoji.value.strip(), rarity, inc_g)
         )
         await bot.db.commit()
-        await interaction.followup.send(f"✅ Генератор **{self.emoji.value} {self.name.value}** добавлен.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Генератор **{self.emoji.value} {self.name}** (`{self.item_id}`) добавлен.",
+            ephemeral=True
+        )
 
 
 # ============================================================
