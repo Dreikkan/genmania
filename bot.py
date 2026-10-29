@@ -111,7 +111,6 @@ STAR_UPGRADE = {
     5: {"copies": 6, "chance": 0.45, "gems": 40},
 }
 
-# Суммарный бонус к доходу за N звёзд (компенсирует потерю копий)
 STAR_BONUS = {
     0: 0.00,
     1: 1.10,
@@ -523,7 +522,6 @@ def make_select(placeholder: str, options: list[discord.SelectOption], callback,
 
 
 def format_slot(emoji: str, stars: int) -> str:
-    """Фиксированная ширина ячейки для ровной сетки."""
     if stars > 0:
         text = f"{emoji}({stars}⭐)"
     else:
@@ -664,8 +662,6 @@ async def collect_income(user_id: int, guild_id: int = None):
 
 
 async def place_items(user_id: int, item_id: str, quantity: int) -> tuple[int, int]:
-    """Размещает предметы: сначала в замок, остаток — в хранилище.
-    Возвращает (в_замок, в_хранилище). Бросает ValueError, если места не хватило."""
     grid_size = await get_grid_size(user_id)
     storage_size = await get_storage_size(user_id)
 
@@ -703,7 +699,6 @@ async def place_items(user_id: int, item_id: str, quantity: int) -> tuple[int, i
 
 
 async def sort_inventory(user_id: int, location: str):
-    """Сортирует предметы в локации: по цене (убывание), затем по звёздам (убывание)."""
     async with bot.db.execute("""
         SELECT inv.slot, inv.item_id, inv.stars, i.price
         FROM inventory inv
@@ -1993,7 +1988,6 @@ class MoveConfirmView(discord.ui.View):
         user_id = interaction.user.id
         target = "storage" if self.source == "profile" else "profile"
 
-        # Проверка валидности слота для целевой локации
         if target == "storage":
             target_size = await get_storage_size(user_id)
         else:
@@ -2032,7 +2026,6 @@ class MoveConfirmView(discord.ui.View):
 
         await update_quest_progress(user_id, "move_2")
 
-        # Сортируем обе локации
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
 
@@ -2065,12 +2058,15 @@ class MoveConfirmView(discord.ui.View):
 
 
 # ============================================================
-#  ⚗️ СИНТЕЗ
+#  ⚗️ СИНТЕЗ (с пагинацией)
 # ============================================================
 
-async def open_craft_view(interaction: discord.Interaction, author_id: int):
-    options = []
-    for item_id, next_id in CRAFT_CHAIN.items():
+async def open_craft_view(interaction: discord.Interaction, author_id: int, page: int = 0):
+    user_id = interaction.user.id
+    chain_items = list(CRAFT_CHAIN.items())
+
+    options_all = []
+    for item_id, next_id in chain_items:
         async with bot.db.execute("SELECT name, emoji FROM items WHERE id = ?", (item_id,)) as c:
             src = await c.fetchone()
         async with bot.db.execute("SELECT name, emoji FROM items WHERE id = ?", (next_id,)) as c:
@@ -2079,31 +2075,51 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int):
             continue
         async with bot.db.execute(
             "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND item_id = ?",
-            (interaction.user.id, item_id)
+            (user_id, item_id)
         ) as c:
             count = (await c.fetchone())[0]
-        options.append(discord.SelectOption(
+        options_all.append(discord.SelectOption(
             label=f"{src[0]} ({count}/5) → {dst[0]}",
             value=item_id,
             emoji=src[1]
         ))
-    if not options:
+
+    if not options_all:
         await interaction.followup.send("❌ Нет предметов для синтеза.", ephemeral=True)
         return
+
+    total_pages = max(1, (len(options_all) + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = options_all[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+
     embed = discord.Embed(
         title="⚗️ Синтез",
-        description="Выбери предмет для синтеза из списка.",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет для синтеза:",
         color=0x3498db
     )
-    await interaction.edit_original_response(embed=embed, view=CraftSelectView(author_id, options))
+    await interaction.edit_original_response(
+        embed=embed,
+        view=CraftSelectView(author_id, chunk, page, total_pages)
+    )
 
 
 class CraftSelectView(discord.ui.View):
-    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
         self.add_item(make_select("Выбери предмет для синтеза", options, self.item_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -2134,6 +2150,14 @@ class CraftSelectView(discord.ui.View):
             color=0x3498db
         )
         await interaction.edit_original_response(embed=embed, view=CraftConfirmView(self.author_id, item_id))
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_craft_view(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_craft_view(interaction, self.author_id, self.page + 1)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -2202,7 +2226,6 @@ class CraftConfirmView(discord.ui.View):
             await self.fail(interaction, "❌ Нет катализаторов.")
             return
 
-        # Удаляем ингредиенты
         to_remove = owned[:CRAFT_COST]
         for location, slot in to_remove:
             await bot.db.execute(
@@ -2210,7 +2233,6 @@ class CraftConfirmView(discord.ui.View):
                 (user_id, location, slot)
             )
 
-        # Списываем гемы и катализатор
         if gem_cost > 0:
             await bot.db.execute("UPDATE players SET gems = gems - ? WHERE user_id = ?", (gem_cost, user_id))
         catalyst_used = 0
@@ -2218,22 +2240,19 @@ class CraftConfirmView(discord.ui.View):
             await bot.db.execute("UPDATE players SET catalysts = catalysts - 1 WHERE user_id = ?", (user_id,))
             catalyst_used = 1
 
-        # Бросок
         final_chance = min(1.0, base_chance + (CATALYST_BONUS if use_cat else 0))
         success = random.random() < final_chance
 
-        # Лог
         await bot.db.execute(
             "INSERT INTO craft_log (user_id, item_id, success, gems_spent, catalyst_used) VALUES (?, ?, ?, ?, ?)",
             (user_id, item_id, int(success), gem_cost, catalyst_used)
         )
 
-        # Вставка при успехе
         if success:
             try:
                 await place_items(user_id, next_id, 1)
             except ValueError:
-                pass  # место должно быть после удаления 5 ингредиентов
+                pass
 
         await bot.db.execute(
             "UPDATE players SET total_crafts = total_crafts + 1, total_successes = total_successes + ? "
@@ -2241,7 +2260,6 @@ class CraftConfirmView(discord.ui.View):
         )
         await bot.db.commit()
 
-        # Сортировка
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
 
@@ -2575,18 +2593,15 @@ class BuyItemQuantityView(discord.ui.View):
             await self.fail(interaction, f"❌ Нужно {total_cost} монет, у тебя {balance}.")
             return
 
-        # Проверка места (замок + хранилище)
         try:
             to_profile, to_storage = await place_items(user_id, self.item_id, qty)
         except ValueError as e:
             await self.fail(interaction, f"❌ {e}")
             return
 
-        # Списываем деньги
         await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (total_cost, user_id))
         await bot.db.commit()
 
-        # Сортировка
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
 
