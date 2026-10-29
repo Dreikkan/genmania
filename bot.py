@@ -495,7 +495,10 @@ class CastleBot(commands.Bot):
         """)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS clan_members (
-                user_id INTEGER PRIMARY KEY, clan_id INTEGER
+                user_id INTEGER PRIMARY KEY,
+                clan_id INTEGER,
+                role TEXT DEFAULT 'member',
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         try:
