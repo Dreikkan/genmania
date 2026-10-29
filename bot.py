@@ -1678,13 +1678,7 @@ class SocialView(BaseView):
     async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DuelModal(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
-
-        @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         clan = await get_clan(self.author_id)
@@ -1706,6 +1700,12 @@ class SocialView(BaseView):
         clan = await get_clan(self.author_id)
         if not clan or clan[2] != self.author_id:
             return await interaction.followup.send("❌ Только лидер клана может объявить войну.", ephemeral=True)
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
         # Найти случайный клан
         async with bot.db.execute("SELECT id, name FROM clans WHERE id != ? ORDER BY RANDOM() LIMIT 1", (clan[0],)) as c:
