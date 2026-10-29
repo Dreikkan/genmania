@@ -354,7 +354,7 @@ class CastleBot(commands.Bot):
             ("time_gen",      "Временной генератор",      "⏳", "mythic",    False),
             ("space_gen",     "Пространственный генератор","🌍", "mythic",   True),
             ("divine_gen",    "Божественный генератор",   "✨", "mythic",    True),
-            ("legendary_gen", "Легендарный генератор",    "👑", "mythic",    True),
+            ("mythical_gen", "Мифический генератор",    "👑", "mythic",    True),
         ]
 
         GEM_INCOME = {
