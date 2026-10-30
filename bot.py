@@ -3304,13 +3304,47 @@ class MoveConfirmView(discord.ui.View):
             return
         item_id, stars = row
 
+                # Проверяем, свободен ли целевой слот
         async with bot.db.execute(
             "SELECT 1 FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
             (user_id, target, self.slot)
         ) as c:
-            if await c.fetchone():
-                await self.fail(interaction, f"❌ Слот {self.slot} занят в целевой локации.")
+            target_busy = await c.fetchone() is not None
+
+        if target_busy:
+            # Ищем первый свободный слот в целевой локации
+            if target == "storage":
+                target_size = await get_storage_size(user_id)
+            else:
+                target_size = await get_grid_size(user_id)
+
+            async with bot.db.execute(
+                "SELECT slot FROM inventory WHERE user_id = ? AND location = ?",
+                (user_id, target)
+            ) as c:
+                used = {r[0] for r in await c.fetchall()}
+            free = [s for s in range(target_size) if s not in used]
+
+            if not free:
+                await self.fail(interaction, f"❌ В целевой локации нет свободных слотов.")
                 return
+
+            # Ставим предмет в первый свободный слот
+            new_slot = free[0]
+        else:
+            new_slot = self.slot
+
+        # Удаляем из исходной локации
+        await bot.db.execute(
+            "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            (user_id, self.source, self.slot)
+        )
+        # Вставляем в целевой слот (или первый свободный)
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
+            (user_id, new_slot, item_id, target, stars)
+        )
+        await bot.db.commit()
 
         await bot.db.execute(
             "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
@@ -4195,6 +4229,12 @@ class UserProfileView(BaseView):
             color=0x808080
         )
         await interaction.edit_original_response(embed=embed, view=UserSettingsView(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
 class UserSettingsView(BaseView):
     @discord.ui.button(label="Сбросить прогресс", emoji="🗑️", style=discord.ButtonStyle.danger, row=0)
