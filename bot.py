@@ -171,6 +171,62 @@ EMOJI_KEYS = {
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
 
+# Сюжетные квесты: id -> (название, описание, цель, тип действия, награда гемами)
+STORY_QUESTS = {
+    "q_first_gen": ("Первые шаги", "Купи первый генератор", 1, "buy", 10),
+    "q_synth_1": ("Алхимик", "Сделай первый синтез", 1, "synthesize", 15),
+    "q_stars_1": ("Звездочёт", "Улучши любой генератор до 1★", 1, "stars", 20),
+    "q_gold": ("Золотая лихорадка", "Накопи 1000 монет", 1000, "coins", 25),
+    "q_raid_1": ("Завоеватель", "Соверши успешный рейд", 1, "raid_win", 30),
+}
+
+# Титулы: id -> (название, требование для открытия)
+TITLES = {
+    "novice": ("Новичок", "Доступен всем"),
+    "builder": ("Строитель", "Купи 10 генераторов"),
+    "alchemist": ("Алхимик", "Сделай 10 синтезов"),
+    "star_lord": ("Звёздный лорд", "Получи 5★ генератор"),
+    "rich": ("Богач", "Накопи 10,000 монет"),
+    "raider": ("Рейдер", "Выиграй 5 рейдов"),
+    "duelist": ("Дуэлянт", "Выиграй 10 дуэлей"),
+    "collector": ("Коллекционер", "Собери 20 разных генераторов"),
+}
+
+TITLES_PER_PAGE = 25
+
+DAILY_REWARDS = {
+    1:  (10,   1,  None),
+    2:  (20,   1,  None),
+    3:  (30,   2,  None),
+    4:  (50,   2,  None),
+    5:  (80,   3,  "daily_common"),
+    6:  (120,  3,  None),
+    7:  (200,  5,  "daily_uncommon"),
+    8:  (250,  4,  None),
+    9:  (300,  5,  None),
+    10: (400,  6,  "daily_rare"),
+    11: (450,  6,  None),
+    12: (500,  7,  None),
+    13: (600,  7,  None),
+    14: (700,  8,  "daily_epic"),
+    15: (800,  8,  None),
+    16: (900,  9,  None),
+    17: (1000, 9,  None),
+    18: (1100, 10, None),
+    19: (1200, 10, None),
+    20: (1500, 12, "daily_legendary"),
+    21: (1600, 12, None),
+    22: (1800, 13, None),
+    23: (2000, 14, None),
+    24: (2200, 15, None),
+    25: (2500, 16, "daily_mythic"),
+    26: (2700, 17, None),
+    27: (3000, 18, None),
+    28: (3300, 19, None),
+    29: (3700, 20, None),
+    30: (5000, 30, "daily_mythic"),
+}
+
 # ============================================================
 #  🤖 БОТ
 # ============================================================
@@ -594,37 +650,49 @@ class CastleBot(commands.Bot):
                 user_id INTEGER PRIMARY KEY, pet_id TEXT, level INTEGER DEFAULT 1, last_fed TIMESTAMP
             )
         """)
+        
+        # Ежедневный вход
+        try: await self.db.execute("ALTER TABLE players ADD COLUMN streak_days INTEGER DEFAULT 0")
+        except Exception: pass
+        try: await self.db.execute("ALTER TABLE players ADD COLUMN last_daily TIMESTAMP DEFAULT NULL")
+        except Exception: pass
+        try: await self.db.execute("ALTER TABLE players ADD COLUMN title TEXT DEFAULT 'Новичок'")
+        except Exception: pass
+
+        # Косметика
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS user_cosmetics (
-                user_id INTEGER PRIMARY KEY, embed_color INTEGER DEFAULT 0x00ff00, bg_url TEXT, castle_icon TEXT
+                user_id INTEGER PRIMARY KEY,
+                embed_color INTEGER DEFAULT 65280, -- 0x00ff00 (зелёный)
+                bg_url TEXT DEFAULT NULL,
+                castle_icon TEXT DEFAULT NULL
             )
         """)
-        
-        # Колонки в players
-        for column, definition in [
-            ("streak_days", "INTEGER DEFAULT 0"),
-            ("last_daily", "TIMESTAMP DEFAULT NULL"),
-            ("title", "TEXT DEFAULT 'Новичок'"),
-            ("auto_collect", "INTEGER DEFAULT 0"),
-            ("advent_claimed", "INTEGER DEFAULT 0"),
-        ]:
-            try: await self.db.execute(f"ALTER TABLE players ADD COLUMN {column} {definition}")
-            except: pass
 
-        # Эксклюзивные генераторы для Daily (30 дней)
+        # Прогресс сюжетных квестов
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS player_quests (
+                user_id INTEGER,
+                quest_id TEXT,
+                progress INTEGER DEFAULT 0,
+                completed INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, quest_id)
+            )
+        """)
+
+        # Добавляем эксклюзивные генераторы для 30-го дня (если их нет)
         daily_gens = [
-            ("daily_common", "Ежедневный лист", "🍃", "common"),
-            ("daily_uncommon", "Ежедневный камень", "🪨", "uncommon"),
-            ("daily_rare", "Ежедневный кристалл", "💠", "rare"),
-            ("daily_epic", "Ежедневная сфера", "🔮", "epic"),
-            ("daily_legendary", "Ежедневная корона", "👑", "legendary"),
-            ("daily_mythic", "Ежедневный феникс", "🔥", "mythic"),
+            ("daily_common", "Ежедневный лист", "🍃", "common", 0),
+            ("daily_uncommon", "Ежедневный камень", "🪨", "uncommon", 0),
+            ("daily_rare", "Ежедневный кристалл", "💠", "rare", 0),
+            ("daily_epic", "Ежедневная сфера", "🔮", "epic", 0),
+            ("daily_legendary", "Ежедневная корона", "👑", "legendary", 0),
+            ("daily_mythic", "Ежедневный феникс", "🔥", "mythic", 0),
         ]
         for g in daily_gens:
             await self.db.execute(
                 "INSERT OR IGNORE INTO items (id, name, emoji, rarity, price, buyable, income_per_hour) "
-                "VALUES (?, ?, ?, ?, 0, 0, 1.5)",
-                g
+                "VALUES (?, ?, ?, ?, 0, 0, 1.5)", g
             )
 
         # --- КЛАНЫ ---
@@ -1253,6 +1321,8 @@ async def collect_income(user_id: int, guild_id: int = None):
     await bot.db.commit()
     await update_quest_progress(user_id, "collect_income")
     return coins_earned, gems_earned
+    await update_story_quests(user_id, "coins", coins_earned)
+    await update_story_quests(user_id, "collect_income", 1)
 
 
 async def place_items(user_id: int, item_id: str, quantity: int) -> tuple[int, int]:
@@ -1393,6 +1463,107 @@ async def invite_to_clan(inviter_id: int, target_id: int) -> str:
     )
     await bot.db.commit()
     return f"✅ Приглашение отправлено <@{target_id}>."
+
+async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
+    """Обновляет прогресс сюжетных квестов при действиях."""
+    async with bot.db.execute("SELECT quest_id, progress FROM player_quests WHERE user_id = ?", (user_id,)) as c:
+        rows = await c.fetchall()
+    progress_map = {r[0]: r[1] for r in rows}
+
+    for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
+        if q_type != action_type:
+            continue
+        current = progress_map.get(qid, 0)
+        if current >= target:
+            continue
+
+        new_val = min(current + amount, target)
+        await bot.db.execute(
+            "INSERT INTO player_quests (user_id, quest_id, progress, completed) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, quest_id) DO UPDATE SET progress = ?, completed = ?",
+            (user_id, qid, new_val, int(new_val >= target), new_val, int(new_val >= target))
+        )
+        # Если квест только что выполнен — даём награду
+        if new_val >= target and current < target:
+            await bot.db.execute("UPDATE players SET gems = gems + ? WHERE user_id = ?", (reward, user_id))
+    await bot.db.commit()
+
+async def claim_daily(user_id: int) -> dict:
+    async with bot.db.execute(
+        "SELECT last_daily, streak_days FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return {"ok": False, "reason": "Профиль не найден."}
+
+    last_daily, streak = row
+    now = datetime.datetime.now()
+    today = now.date()
+
+    if last_daily:
+        last_date = datetime.datetime.fromisoformat(last_daily).date()
+        delta = (today - last_date).days
+        if delta == 0:
+            return {"ok": False, "reason": "Ты уже забирал награду сегодня. Возвращайся завтра!"}
+        new_streak = min(streak + 1, 30) if delta == 1 else 1
+    else:
+        new_streak = 1
+
+    coins, gems, item_id = DAILY_REWARDS[new_streak]
+
+    await bot.db.execute(
+        "UPDATE players SET coins = coins + ?, gems = gems + ?, "
+        "last_daily = ?, streak_days = ? WHERE user_id = ?",
+        (coins, gems, now.isoformat(), new_streak, user_id)
+    )
+    await bot.db.commit()
+
+    item_name = None
+    if item_id:
+        try:
+            await place_items(user_id, item_id, 1)
+            async with bot.db.execute("SELECT name FROM items WHERE id = ?", (item_id,)) as c:
+                r = await c.fetchone()
+                item_name = r[0] if r else item_id
+        except ValueError:
+            item_name = f"{item_id} (нет места — предмет потерян)"
+
+    return {"ok": True, "day": new_streak, "coins": coins, "gems": gems,
+            "item": item_name, "streak": new_streak}
+
+
+async def get_unlocked_titles(user_id: int) -> set:
+    async with bot.db.execute("""
+        SELECT 
+            (SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile') AS gens,
+            (SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile' AND stars >= 5) AS five_star,
+            (SELECT COUNT(DISTINCT item_id) FROM inventory WHERE user_id = ? AND location = 'profile') AS distinct_gens,
+            (SELECT total_crafts FROM players WHERE user_id = ?) AS crafts,
+            (SELECT coins FROM players WHERE user_id = ?) AS coins
+    """, (user_id, user_id, user_id, user_id, user_id)) as c:
+        row = await c.fetchone()
+    gens, five_star, distinct_gens, crafts, coins = row or (0,)*5
+
+    async with bot.db.execute(
+        "SELECT progress FROM player_quests WHERE user_id = ? AND quest_id = 'q_raid_1'", (user_id,)
+    ) as c:
+        r = await c.fetchone()
+        raid_wins = r[0] if r else 0
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM duel_history WHERE winner_id = ?", (user_id,)
+    ) as c:
+        duel_wins = (await c.fetchone())[0] or 0
+
+    unlocked = {"novice"}
+    if gens >= 10: unlocked.add("builder")
+    if crafts >= 10: unlocked.add("alchemist")
+    if five_star >= 1: unlocked.add("star_lord")
+    if coins >= 10000: unlocked.add("rich")
+    if raid_wins >= 5: unlocked.add("raider")
+    if duel_wins >= 10: unlocked.add("duelist")
+    if distinct_gens >= 20: unlocked.add("collector")
+    return unlocked
 # ============================================================
 #  🏆 ДОСТИЖЕНИЯ
 # ============================================================
@@ -1870,7 +2041,8 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
         color=0x3498db
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    
+
+    embed.add_field(name="🏅 Титул", value=title, inline=True)
     embed.add_field(name="🪙 Кошелёк", value=f"Монеты: **{coins}**\nГемы: **{gems}**\nКатализаторы: **{catalysts}**", inline=True)
     embed.add_field(name="📈 Статистика", value=f"Синтезов: **{crafts}**\nУспешных: **{successes}**\nВинрейт: **{winrate:.1f}%**", inline=True)
     
@@ -1878,6 +2050,91 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
     embed.add_field(name="🏆 Достижения", value=f"Открыто: **{ach_count}**", inline=True)
     embed.add_field(name="🆔 ID", value=f"`{user_id}`", inline=True)
     
+    return embed
+
+async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT last_daily, streak_days FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    last_daily, streak = row if row else (None, 0)
+
+    today = datetime.date.today()
+    can_claim = True
+    if last_daily:
+        last_date = datetime.datetime.fromisoformat(last_daily).date()
+        can_claim = (today - last_date).days >= 1
+        delta = (today - last_date).days
+        if delta == 0:
+            next_day = streak
+        elif delta == 1:
+            next_day = min(streak + 1, 30)
+        else:
+            next_day = 1
+    else:
+        next_day = 1
+
+    coins, gems, item_id = DAILY_REWARDS[next_day]
+    embed = discord.Embed(
+        title="📅 Ежедневный вход",
+        description=(
+            f"🔥 Стрик: **{streak}** / 30 дней\n"
+            f"Награда за день **{next_day}**:\n"
+            f"🪙 {coins} | 💎 {gems}" + (f" | 🎁 {item_id}" if item_id else "")
+        ),
+        color=0x3498db
+    )
+    days_str = ""
+    for d in range(next_day, min(next_day + 7, 31)):
+        c_, g_, it = DAILY_REWARDS[d]
+        mark = "🎁" if it else "·"
+        days_str += f"**{d}.** 🪙{c_} 💎{g_} {mark}\n"
+    embed.add_field(name="Ближайшие дни", value=days_str, inline=False)
+    embed.set_footer(text="Нажми «Забрать», чтобы получить награду!" if can_claim
+                     else "Возвращайся завтра за следующей наградой.")
+    return embed
+
+
+async def build_story_quests_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT quest_id, progress, completed FROM player_quests WHERE user_id = ?", (user_id,)
+    ) as c:
+        rows = await c.fetchall()
+    progress_map = {r[0]: (r[1], r[2]) for r in rows}
+
+    embed = discord.Embed(title="📜 Сюжетные квесты", color=0x9b59b6)
+    for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
+        prog, done = progress_map.get(qid, (0, 0))
+        status = "✅ Выполнено" if done else f"⏳ {prog}/{target}"
+        embed.add_field(
+            name=name,
+            value=f"{desc}\n{status} | Награда: 💎 {reward}",
+            inline=False
+        )
+    return embed
+
+
+async def build_cosmetics_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT embed_color, bg_url, castle_icon FROM user_cosmetics WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        await bot.db.execute("INSERT OR IGNORE INTO user_cosmetics (user_id) VALUES (?)", (user_id,))
+        await bot.db.commit()
+        row = (65280, None, None)
+    color, bg, icon = row
+    embed = discord.Embed(
+        title="🎨 Косметика",
+        description="Настрой внешний вид своего профиля.",
+        color=color or 0x00ff00
+    )
+    embed.add_field(name="Цвет эмбеда", value=f"`#{color:06X}`" if color else "по умолчанию", inline=True)
+    embed.add_field(name="Фон (URL)", value=bg or "не задан", inline=True)
+    embed.add_field(name="Иконка замка", value=icon or "не задана", inline=True)
     return embed
 
 
@@ -2638,6 +2895,7 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
 
         embed = discord.Embed(title="Результат рейда", description=msg, color=0x2ecc71 if success else 0xe74c3c)
         await interaction.followup.send(embed=embed)
+        await update_story_quests(self.author_id, "raid_win", 1)
 
 class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
     opponent_id = discord.ui.TextInput(label="ID противника", required=True)
@@ -2813,7 +3071,244 @@ class EconomyView(BaseView):
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
+async def open_titles_view(interaction: discord.Interaction, author_id: int, page: int = 0, return_to: str = "main"):
+    user_id = interaction.user.id
+    unlocked = await get_unlocked_titles(user_id)
+    async with bot.db.execute("SELECT title FROM players WHERE user_id = ?", (user_id,)) as c:
+        current = (await c.fetchone())[0] or "Новичок"
 
+    all_titles = list(TITLES.items())
+    total_pages = max(1, (len(all_titles) + TITLES_PER_PAGE - 1) // TITLES_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = all_titles[page*TITLES_PER_PAGE:(page+1)*TITLES_PER_PAGE]
+
+    options = []
+    for tid, (name, req) in chunk:
+        if tid not in unlocked:
+            options.append(discord.SelectOption(label=f"🔒 {name}"[:100], value=tid, description=req[:100]))
+        else:
+            mark = "✅" if name == current else "•"
+            options.append(discord.SelectOption(label=f"{mark} {name}"[:100], value=tid, description=req[:100]))
+
+    embed = discord.Embed(
+        title="🏅 Титулы",
+        description=f"Текущий: **{current}**\nСтраница {page+1}/{total_pages}",
+        color=0xf1c40f
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=TitlesView(author_id, options, page, total_pages, return_to)
+    )
+
+
+class TitlesView(discord.ui.View):
+    def __init__(self, author_id: int, options, page: int, total_pages: int, return_to: str = "main"):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self.return_to = return_to
+        self.add_item(make_select("Выбери титул", options, self.select, row=0))
+        if total_pages > 1:
+            p = discord.ui.Button(label="◀️", style=discord.ButtonStyle.secondary, row=1)
+            p.callback = self.prev; self.add_item(p)
+            n = discord.ui.Button(label="▶️", style=discord.ButtonStyle.secondary, row=1)
+            n.callback = self.next; self.add_item(n)
+        b = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        b.callback = self.back; self.add_item(b)
+
+    async def interaction_check(self, interaction):
+        return interaction.user.id == self.author_id
+
+    async def select(self, interaction: discord.Interaction):
+        tid = interaction.data["values"][0]
+        await interaction.response.defer()
+        unlocked = await get_unlocked_titles(self.author_id)
+        if tid not in unlocked:
+            await interaction.followup.send("❌ Титул ещё не открыт.", ephemeral=True)
+            return
+        name = TITLES[tid][0]
+        await bot.db.execute("UPDATE players SET title = ? WHERE user_id = ?", (name, self.author_id))
+        await bot.db.commit()
+        await interaction.followup.send(f"✅ Титул изменён на **{name}**.", ephemeral=True)
+
+    async def prev(self, i):
+        await i.response.defer()
+        await open_titles_view(i, self.author_id, self.page-1, self.return_to)
+
+    async def next(self, i):
+        await i.response.defer()
+        await open_titles_view(i, self.author_id, self.page+1, self.return_to)
+
+    async def back(self, i):
+        await i.response.defer()
+        if self.return_to == "hub":
+            embed = discord.Embed(
+                title="🎨 Кастомизация",
+                description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+                color=0x9b59b6
+            )
+            await i.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
+        else:
+            embed = await build_main_embed(i)
+            await i.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+class DailyView(BaseView):
+    def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
+        super().__init__(author_id, timeout)
+        self.return_to = return_to
+
+    @discord.ui.button(label="Забрать", emoji="🎁", style=discord.ButtonStyle.success, row=0)
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        res = await claim_daily(interaction.user.id)
+        if not res["ok"]:
+            await interaction.followup.send(f"❌ {res['reason']}", ephemeral=True)
+            return
+        msg = f"🎉 День **{res['day']}**! Получено 🪙 {res['coins']} и 💎 {res['gems']}."
+        if res["item"]:
+            msg += f"\n🎁 Предмет: **{res['item']}**"
+        embed = discord.Embed(title="📅 Награда получена", description=msg, color=0x2ecc71)
+        await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, self.return_to))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.return_to == "hub":
+            embed = discord.Embed(
+                title="🎨 Кастомизация",
+                description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+                color=0x9b59b6
+            )
+            await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
+        else:
+            await self.back_to_main(interaction)
+
+
+class StoryQuestsView(BaseView):
+    def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
+        super().__init__(author_id, timeout)
+        self.return_to = return_to
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.return_to == "hub":
+            embed = discord.Embed(
+                title="🎨 Кастомизация",
+                description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+                color=0x9b59b6
+            )
+            await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
+        else:
+            await self.back_to_main(interaction)
+
+
+class CosmeticsView(BaseView):
+    def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
+        super().__init__(author_id, timeout)
+        self.return_to = return_to
+
+    @discord.ui.button(label="Цвет", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
+    async def set_color(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CosmeticColorModal(self.author_id))
+
+    @discord.ui.button(label="Фон", emoji="🖼️", style=discord.ButtonStyle.primary, row=0)
+    async def set_bg(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CosmeticBgModal(self.author_id))
+
+    @discord.ui.button(label="Иконка", emoji="🏰", style=discord.ButtonStyle.primary, row=0)
+    async def set_icon(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CosmeticIconModal(self.author_id))
+
+    @discord.ui.button(label="Сбросить всё", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await bot.db.execute(
+            "UPDATE user_cosmetics SET embed_color = 65280, bg_url = NULL, castle_icon = NULL WHERE user_id = ?",
+            (self.author_id,)
+        )
+        await bot.db.commit()
+        embed = await build_cosmetics_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=CosmeticsView(self.author_id, self.return_to))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.return_to == "hub":
+            embed = discord.Embed(
+                title="🎨 Кастомизация",
+                description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+                color=0x9b59b6
+            )
+            await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
+        else:
+            await self.back_to_main(interaction)
+
+
+class CosmeticColorModal(discord.ui.Modal, title="Цвет эмбеда"):
+    hex_code = discord.ui.TextInput(label="HEX (например, FF0000)", required=True, max_length=7)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        val = self.hex_code.value.strip().lstrip("#")
+        try:
+            color = int(val, 16)
+            if not (0 <= color <= 0xFFFFFF):
+                raise ValueError
+        except ValueError:
+            await interaction.followup.send("❌ Неверный HEX.", ephemeral=True)
+            return
+        await bot.db.execute(
+            "UPDATE user_cosmetics SET embed_color = ? WHERE user_id = ?", (color, self.author_id)
+        )
+        await bot.db.commit()
+        await interaction.followup.send(f"✅ Цвет `#{color:06X}` сохранён.", ephemeral=True)
+
+
+class CosmeticBgModal(discord.ui.Modal, title="Фон профиля"):
+    url = discord.ui.TextInput(label="URL картинки", required=True, max_length=300)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        url = self.url.value.strip()
+        if not (url.startswith("http://") or url.startswith("https://")):
+            await interaction.followup.send("❌ Нужен http(s)-URL.", ephemeral=True)
+            return
+        await bot.db.execute(
+            "UPDATE user_cosmetics SET bg_url = ? WHERE user_id = ?", (url, self.author_id)
+        )
+        await bot.db.commit()
+        await interaction.followup.send("✅ Фон сохранён.", ephemeral=True)
+
+
+class CosmeticIconModal(discord.ui.Modal, title="Иконка замка"):
+    emoji = discord.ui.TextInput(label="Эмодзи или <:name:id>", required=True, max_length=100)
+    note = discord.ui.TextInput(label="Комментарий (необязательно)", required=False, max_length=100)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        val = self.emoji.value.strip()
+        if not is_valid_emoji(val):
+            await interaction.followup.send("❌ Неверный эмодзи.", ephemeral=True)
+            return
+        await bot.db.execute(
+            "UPDATE user_cosmetics SET castle_icon = ? WHERE user_id = ?", (val, self.author_id)
+        )
+        await bot.db.commit()
+        await interaction.followup.send("✅ Иконка сохранена.", ephemeral=True)
 
 
 # ============================================================
@@ -3601,6 +4096,7 @@ class StarConfirmView(discord.ui.View):
                 "UPDATE inventory SET stars = ? WHERE user_id = ? AND location = 'profile' AND slot = ?",
                 (self.next_star, user_id, keep_slot)
             )
+            await update_story_quests(self.author_id, "stars", 1)
 
         await bot.db.commit()
 
@@ -4071,6 +4567,7 @@ class CraftConfirmView(discord.ui.View):
             "WHERE user_id = ?", (int(success), user_id)
         )
         await bot.db.commit()
+        await update_story_quests(user_id, "synthesize", 1)
 
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
@@ -4657,6 +5154,8 @@ class BuyItemQuantityView(discord.ui.View):
         embed = discord.Embed(title="🛒 Покупка", description=msg, color=0x2ecc71)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
+        await update_story_quests(user_id, "buy", qty)
+
     async def fail(self, interaction: discord.Interaction, msg: str):
         embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
@@ -4929,11 +5428,52 @@ class UserProfileView(BaseView):
         )
         await interaction.edit_original_response(embed=embed, view=UserSettingsView(self.author_id))
 
+    @discord.ui.button(label="Кастомизация", emoji="🎨", style=discord.ButtonStyle.success, row=0)
+    async def btn_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="🎨 Кастомизация",
+            description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+            color=0x9b59b6
+        )
+        await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
+
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+
+class CustomizationHubView(BaseView):
+    @discord.ui.button(label="Титулы", emoji="🏅", style=discord.ButtonStyle.primary, row=0)
+    async def btn_titles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_titles_view(interaction, self.author_id, 0, return_to="hub")
+
+    @discord.ui.button(label="Ежедневный вход", emoji="📅", style=discord.ButtonStyle.success, row=0)
+    async def btn_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_daily_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, return_to="hub"))
+
+    @discord.ui.button(label="Косметика", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
+    async def btn_cosmetics(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_cosmetics_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=CosmeticsView(self.author_id, return_to="hub"))
+
+    @discord.ui.button(label="Сюжетные квесты", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_story_quests_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=StoryQuestsView(self.author_id, return_to="hub"))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
 class UserSettingsView(BaseView):
     @discord.ui.button(label="Сбросить прогресс", emoji="🗑️", style=discord.ButtonStyle.danger, row=0)
