@@ -2375,6 +2375,10 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
 
+    async with bot.db.execute("SELECT title FROM players WHERE user_id = ?", (user_id,)) as c:
+        title_row = await c.fetchone()
+    title = (title_row[0] if title_row else None) or "Новичок"
+
     unlocked_titles = await get_unlocked_titles(user_id)
 
     # бонус активного титула
