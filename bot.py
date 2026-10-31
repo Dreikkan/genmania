@@ -563,11 +563,15 @@ class CastleBot(commands.Bot):
         # --- ЭКОНОМИКА ---
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS bank_deposits (
-                user_id INTEGER PRIMARY KEY, amount INTEGER, interest_rate REAL, end_time TIMESTAMP
+                user_id INTEGER PRIMARY KEY,
+                amount INTEGER,
+                interest_rate REAL DEFAULT 0.05,
+                start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                end_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
-                # Миграция для bank_deposits
+        # Миграция для bank_deposits (если таблица уже была создана без start_time)
         for column, definition in [
             ("start_time", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
             ("end_time", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
