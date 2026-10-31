@@ -1062,6 +1062,50 @@ async def sort_inventory(user_id: int, location: str):
         )
     await bot.db.commit()
 
+async def sort_inventory_by(user_id: int, location: str, sort_type: str):
+    """Сортирует инвентарь по выбранному критерию."""
+    # Получаем все предметы
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, inv.stars, i.price, i.income_per_hour, i.rarity
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = ?
+    """, (user_id, location)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return
+
+    rarity_order = {"common": 1, "uncommon": 2, "rare": 3, "epic": 4, "legendary": 5, "mythic": 6}
+
+    if sort_type == "price_desc":
+        rows.sort(key=lambda r: r[3], reverse=True)
+    elif sort_type == "price_asc":
+        rows.sort(key=lambda r: r[3])
+    elif sort_type == "stars_desc":
+        rows.sort(key=lambda r: (r[2], r[3]), reverse=True)
+    elif sort_type == "stars_asc":
+        rows.sort(key=lambda r: (r[2], r[3]))
+    elif sort_type == "income_desc":
+        rows.sort(key=lambda r: r[4], reverse=True)
+    elif sort_type == "rarity_desc":
+        rows.sort(key=lambda r: (rarity_order.get(r[5], 0), r[3]), reverse=True)
+    else:
+        # По умолчанию: цена (убывание), затем звёзды
+        rows.sort(key=lambda r: (r[3], r[2]), reverse=True)
+
+    # Удаляем и вставляем заново
+    await bot.db.execute(
+        "DELETE FROM inventory WHERE user_id = ? AND location = ?",
+        (user_id, location)
+    )
+    for new_slot, (_, item_id, stars, _, _, _) in enumerate(rows):
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
+            (user_id, new_slot, item_id, location, stars)
+        )
+    await bot.db.commit()
+
 async def log_admin_action(admin_id: int, target_id: int, action: str, details: str = ""):
     await bot.db.execute(
         "INSERT INTO admin_log (admin_id, target_id, action, details) VALUES (?, ?, ?, ?)",
@@ -2561,6 +2605,56 @@ class ProfileView(BackOnlyView):
     async def swap_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_swap_view(interaction, "profile", self.author_id)
+
+    @discord.ui.button(label="Сортировка", emoji="🔄", style=discord.ButtonStyle.secondary, row=2)
+    async def sort_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="🔄 Сортировка генераторов",
+            description="Выбери, как упорядочить генераторы в замке:",
+            color=0x3498db
+        )
+        await interaction.edit_original_response(embed=embed, view=SortMenuView(self.author_id))
+
+class SortMenuView(BaseView):
+    def __init__(self, author_id: int):
+        super().__init__(author_id)
+
+    async def _do_sort(self, interaction: discord.Interaction, sort_type: str):
+        await interaction.response.defer()
+        await sort_inventory_by(self.author_id, "profile", sort_type)
+        embed = await build_profile_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
+
+    @discord.ui.button(label="По цене (убыв.)", emoji="💰", style=discord.ButtonStyle.primary, row=0)
+    async def sort_price_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "price_desc")
+
+    @discord.ui.button(label="По цене (возр.)", emoji="💸", style=discord.ButtonStyle.secondary, row=0)
+    async def sort_price_asc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "price_asc")
+
+    @discord.ui.button(label="По звёздам (убыв.)", emoji="⭐", style=discord.ButtonStyle.success, row=1)
+    async def sort_stars_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "stars_desc")
+
+    @discord.ui.button(label="По звёздам (возр.)", emoji="✨", style=discord.ButtonStyle.secondary, row=1)
+    async def sort_stars_asc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "stars_asc")
+
+    @discord.ui.button(label="По доходу", emoji="📈", style=discord.ButtonStyle.success, row=2)
+    async def sort_income_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "income_desc")
+
+    @discord.ui.button(label="По редкости", emoji="🏆", style=discord.ButtonStyle.secondary, row=2)
+    async def sort_rarity_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "rarity_desc")
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=3)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_profile_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
 
 class StorageView(BackOnlyView):
