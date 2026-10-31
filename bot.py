@@ -333,6 +333,21 @@ PET_FEED_COST_GEMS = 1             # и немного гемов
 PET_FEED_XP = 1                    # +1 уровень за кормление (упрощённо)
 
 # ============================================================
+#  🤖 АВТОСБОРЩИК
+# ============================================================
+
+AUTOCOLLECT_PRICE_GEMS = 500          # цена покупки
+AUTOCOLLECT_INTERVAL_HOURS = 4        # как часто собирает
+AUTOCOLLECT_MAX_LEVEL = 3             # уровни (можно улучшать)
+
+# Уровень -> (цена улучшения в гемах, интервал в часах)
+AUTOCOLLECT_LEVELS = {
+    1: (0,    4),   # базовый (после покупки)
+    2: (300,  3),   # улучшение: 300 гемов, раз в 3 часа
+    3: (700,  2),   # улучшение: 700 гемов, раз в 2 часа
+}
+
+# ============================================================
 #  🤖 БОТ
 # ============================================================
 
@@ -365,6 +380,8 @@ class CastleBot(commands.Bot):
         asyncio.create_task(self.auction_closer())
         asyncio.create_task(self.market_updater())
         asyncio.create_task(self.tax_collector())
+        asyncio.create_task(self.autocollector_task())   # ← добавь
+      
 
     async def init_db(self):
         await self.db.execute("""
@@ -1002,6 +1019,15 @@ class CastleBot(commands.Bot):
         except Exception:
             pass
 
+            # --- автосборщик ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS autocollectors (
+                user_id INTEGER PRIMARY KEY,
+                level INTEGER DEFAULT 1,
+                last_auto TIMESTAMP DEFAULT NULL
+            )
+        """)
+
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 
     async def auction_closer(self):
@@ -1115,6 +1141,49 @@ class CastleBot(commands.Bot):
             except Exception as e:
                 print(f"[TAX_COLLECTOR] Ошибка: {e}")
                 await asyncio.sleep(600)
+
+    async def autocollector_task(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(600)  # проверяем каждые 10 минут
+                now = datetime.datetime.now()
+                async with self.db.execute(
+                    "SELECT user_id, level, last_auto FROM autocollectors"
+                ) as c:
+                    rows = await c.fetchall()
+
+                for uid, level, last_auto in rows:
+                    interval = AUTOCOLLECT_LEVELS.get(level, (0, 4))[1]
+                    if last_auto:
+                        last = datetime.datetime.fromisoformat(last_auto)
+                        if (now - last).total_seconds() < interval * 3600:
+                            continue
+                    else:
+                        last = now - datetime.timedelta(hours=interval)
+
+                    # Собираем доход
+                    coins, gems = await calculate_passive_income(uid)
+                    if coins > 0 or gems > 0:
+                        now_iso = now.isoformat()
+                        if coins > 0:
+                            await self.db.execute(
+                                "UPDATE players SET coins = coins + ?, last_collected = ? WHERE user_id = ?",
+                                (coins, now_iso, uid)
+                            )
+                        if gems > 0:
+                            await self.db.execute(
+                                "UPDATE players SET gems = gems + ?, last_gem_collected = ? WHERE user_id = ?",
+                                (gems, now_iso, uid)
+                            )
+                        await self.db.execute(
+                            "UPDATE autocollectors SET last_auto = ? WHERE user_id = ?",
+                            (now_iso, uid)
+                        )
+                await self.db.commit()
+            except Exception as e:
+                print(f"[AUTOCOLLECTOR] Ошибка: {e}")
+                await asyncio.sleep(60)
 
 
 
@@ -1865,6 +1934,63 @@ async def get_pet_bonus(user_id: int, effect_type: str) -> float:
         return 0.0
     return ptype["per_level"] * level
 
+async def get_autocollector(user_id: int):
+    """Возвращает (level, last_auto) или None, если автосборщика нет."""
+    async with bot.db.execute(
+        "SELECT level, last_auto FROM autocollectors WHERE user_id = ?", (user_id,)
+    ) as c:
+        return await c.fetchone()
+
+
+async def buy_autocollector(user_id: int) -> tuple[bool, str]:
+    """Покупка автосборщика. Возвращает (успех, сообщение)."""
+    existing = await get_autocollector(user_id)
+    if existing:
+        return False, "❌ У тебя уже есть автосборщик."
+
+    async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (user_id,)) as c:
+        gems = (await c.fetchone())[0]
+    if gems < AUTOCOLLECT_PRICE_GEMS:
+        return False, f"❌ Нужно 💎 {AUTOCOLLECT_PRICE_GEMS}, у тебя {gems}."
+
+    await bot.db.execute(
+        "UPDATE players SET gems = gems - ? WHERE user_id = ?", (AUTOCOLLECT_PRICE_GEMS, user_id)
+    )
+    await bot.db.execute(
+        "INSERT INTO autocollectors (user_id, level, last_auto) VALUES (?, 1, ?)",
+        (user_id, datetime.datetime.now().isoformat())
+    )
+    await bot.db.commit()
+    return True, f"✅ Автосборщик куплен за 💎 {AUTOCOLLECT_PRICE_GEMS}! Теперь доход собирается раз в {AUTOCOLLECT_LEVELS[1][1]} ч."
+
+
+async def upgrade_autocollector(user_id: int) -> tuple[bool, str]:
+    """Улучшение автосборщика на следующий уровень."""
+    existing = await get_autocollector(user_id)
+    if not existing:
+        return False, "❌ У тебя нет автосборщика. Сначала купи его."
+
+    level, _ = existing
+    if level >= AUTOCOLLECT_MAX_LEVEL:
+        return False, f"❌ Автосборщик уже максимального уровня ({AUTOCOLLECT_MAX_LEVEL})."
+
+    next_level = level + 1
+    price, interval = AUTOCOLLECT_LEVELS[next_level]
+
+    async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (user_id,)) as c:
+        gems = (await c.fetchone())[0]
+    if gems < price:
+        return False, f"❌ Нужно 💎 {price}, у тебя {gems}."
+
+    await bot.db.execute(
+        "UPDATE players SET gems = gems - ? WHERE user_id = ?", (price, user_id)
+    )
+    await bot.db.execute(
+        "UPDATE autocollectors SET level = ? WHERE user_id = ?", (next_level, user_id)
+    )
+    await bot.db.commit()
+    return True, f"✅ Автосборщик улучшен до {next_level} ур.! Теперь собирает раз в {interval} ч."
+
 
 async def get_user_pets(user_id: int) -> list:
     """Список (pet_id, level, last_fed) всех питомцев игрока."""
@@ -2190,6 +2316,14 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     embed.add_field(name="Кошелёк", value=f"{coin} {coins} | {gem} {gems}", inline=False)
     embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонусы", value=bonus_line, inline=False)
+    autoc = await get_autocollector(user_id)
+    if autoc:
+        lvl, _ = autoc
+        embed.add_field(
+            name="🤖 Автосборщик",
+            value=f"Ур. {lvl} (раз в {AUTOCOLLECT_LEVELS[lvl][1]} ч)",
+            inline=True
+        )
     embed.add_field(name="Сетка", value=f"{width}x{width}", inline=True)
 
     # Выводим сетку по рядам
@@ -2488,9 +2622,16 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
                 value=f"{pt['name']} (ур. {lvl})",
                 inline=True
             )
+    autoc = await get_autocollector(user_id)
+    if autoc:
+        lvl, _ = autoc
+        embed.add_field(
+            name="🤖 Автосборщик",
+            value=f"Ур. {lvl} (раз в {AUTOCOLLECT_LEVELS[lvl][1]} ч)",
+            inline=True
+        )
     embed.add_field(name="🪙 Кошелёк", value=f"Монеты: **{coins}**\nГемы: **{gems}**\nКатализаторы: **{catalysts}**", inline=True)
     embed.add_field(name="📈 Статистика", value=f"Синтезов: **{crafts}**\nУспешных: **{successes}**\nВинрейт: **{winrate:.1f}%**", inline=True)
-    
     embed.add_field(name="🏰 Замок", value=f"Сетка: **{grid}** слотов\nБонус дохода: **+{int(bonus * 100)}%**", inline=True)
     embed.add_field(name="🏆 Достижения", value=f"Открыто: **{ach_count}**", inline=True)
     embed.add_field(name="🆔 ID", value=f"`{user_id}`", inline=True)
@@ -2629,8 +2770,66 @@ async def build_pets_embed(interaction: discord.Interaction) -> discord.Embed:
                 inline=False
             )
 
-    embed.set_footer(text="Купить питомца — /питомцы_магазин или кнопка ниже.")
+    embed.set_footer(text="Купить питомца — кнопка ниже.")
     return embed
+
+async def build_autocollector_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    existing = await get_autocollector(user_id)
+
+    embed = discord.Embed(title="🤖 Автосборщик", color=0x3498db)
+
+    if not existing:
+        embed.description = (
+            f"Покупай автосборщик, чтобы доход собирался **автоматически** раз в "
+            f"{AUTOCOLLECT_LEVELS[1][1]} ч, даже когда ты офлайн.\n\n"
+            f"Цена: 💎 {AUTOCOLLECT_PRICE_GEMS}"
+        )
+    else:
+        level, last_auto = existing
+        interval = AUTOCOLLECT_LEVELS[level][1]
+        next_level = level + 1
+        if next_level <= AUTOCOLLECT_MAX_LEVEL:
+            next_price, next_interval = AUTOCOLLECT_LEVELS[next_level]
+            upgrade_str = f"\nУлучшение до {next_level} ур.: 💎 {next_price} → раз в {next_interval} ч"
+        else:
+            upgrade_str = "\nМаксимальный уровень."
+        embed.description = (
+            f"Уровень: **{level}/{AUTOCOLLECT_MAX_LEVEL}**\n"
+            f"Интервал: раз в **{interval} ч**\n"
+            f"Последний сбор: `{last_auto or '—'}`"
+            f"{upgrade_str}"
+        )
+
+    return embed
+
+
+class AutocollectorView(BaseView):
+    @discord.ui.button(label="Купить", emoji="🛒", style=discord.ButtonStyle.success, row=0)
+    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, msg = await buy_autocollector(self.author_id)
+        if not ok:
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+        embed = await build_autocollector_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
+
+    @discord.ui.button(label="Улучшить", emoji="⬆️", style=discord.ButtonStyle.primary, row=0)
+    async def btn_upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, msg = await upgrade_autocollector(self.author_id)
+        if not ok:
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+        embed = await build_autocollector_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
 
 
@@ -6268,6 +6467,12 @@ class UserProfileView(BaseView):
         await interaction.response.defer()
         embed = await build_pets_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
+
+    @discord.ui.button(label="Автосборщик", emoji="🤖", style=discord.ButtonStyle.primary, row=1)
+    async def btn_autocollector(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_autocollector_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
 
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
