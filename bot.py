@@ -15,6 +15,7 @@ import re
 import sqlite3
 from pathlib import Path
 import asyncio
+import io
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -360,6 +361,22 @@ NOTIFICATION_TYPES = {
 }
 
 NOTIFICATION_COOLDOWN_HOURS = 24   # не чаще 1 раза в сутки на каждый тип
+
+# ============================================================
+#  📊 ТОПЫ
+# ============================================================
+
+TOP_TYPES = {
+    "coins":    ("🪙 По монетам", "players.coins"),
+    "gems":     ("💎 По гемам", "players.gems"),
+    "power":    ("⚔️ По мощи", "combat_power"),
+    "crafts":   ("⚗️ По синтезам", "players.total_crafts"),
+    "pets":     ("🐾 По питомцам", "pet_count"),
+    "clans":    ("🏰 По кланам", "clan_power"),
+}
+
+TOP_PAGE_SIZES = (10, 20, 30)   # доступные размеры страницы
+
 
 # ============================================================
 #  🤖 БОТ
@@ -2125,6 +2142,309 @@ async def get_notifications(user_id: int) -> dict:
         result[ntype] = (enabled, last_sent)
     return result
 
+async def get_top_players(top_type: str, limit: int = 10) -> list:
+    """Возвращает список (user_id, value) для указанного типа топа."""
+    if top_type == "coins":
+        async with bot.db.execute(
+            "SELECT user_id, coins FROM players ORDER BY coins DESC LIMIT ?", (limit,)
+        ) as c:
+            return await c.fetchall()
+
+    elif top_type == "gems":
+        async with bot.db.execute(
+            "SELECT user_id, gems FROM players ORDER BY gems DESC LIMIT ?", (limit,)
+        ) as c:
+            return await c.fetchall()
+
+    elif top_type == "crafts":
+        async with bot.db.execute(
+            "SELECT user_id, total_crafts FROM players ORDER BY total_crafts DESC LIMIT ?", (limit,)
+        ) as c:
+            return await c.fetchall()
+
+    elif top_type == "pets":
+        async with bot.db.execute("""
+            SELECT user_id, COUNT(*) AS cnt FROM user_pets_v2
+            GROUP BY user_id ORDER BY cnt DESC LIMIT ?
+        """, (limit,)) as c:
+            return await c.fetchall()
+
+    elif top_type == "power":
+        # Мощь считается через get_combat_power — нужно пройтись по всем игрокам
+        async with bot.db.execute("SELECT user_id FROM players") as c:
+            all_users = [r[0] for r in await c.fetchall()]
+        results = []
+        for uid in all_users:
+            power = await get_combat_power(uid)
+            if power > 0:
+                results.append((uid, power))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:limit]
+
+    elif top_type == "clans":
+        async with bot.db.execute("SELECT id, name FROM clans") as c:
+            clans = await c.fetchall()
+        results = []
+        for clan_id, name in clans:
+            power = await get_clan_power(clan_id)
+            results.append((clan_id, power, name))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:limit]
+
+    return []
+
+
+async def build_top_embed(interaction: discord.Interaction, top_type: str, limit: int = 10) -> discord.Embed:
+    """Строит embed для указанного топа."""
+    if top_type not in TOP_TYPES:
+        top_type = "coins"
+    title, _ = TOP_TYPES[top_type]
+
+    rows = await get_top_players(top_type, limit)
+
+    embed = discord.Embed(
+        title=f"📊 Топ — {title}",
+        description=f"Топ-{limit} игроков/кланов",
+        color=0xf1c40f
+    )
+
+    if not rows:
+        embed.description = "Пока нет данных."
+        return embed
+
+    lines = []
+    for i, row in enumerate(rows, start=1):
+        if top_type == "clans":
+            clan_id, power, name = row
+            lines.append(f"**{i}.** 🏰 {name} — ⚔️ {power}")
+        else:
+            uid, value = row
+            # Пытаемся получить имя пользователя
+            user = bot.get_user(uid)
+            if user is None:
+                try:
+                    user = await bot.fetch_user(uid)
+                except discord.NotFound:
+                    user = None
+                except discord.HTTPException:
+                    user = None
+
+            display = f"**{user.name}**" if user else f"`{uid}`"
+            lines.append(f"**{i}.** {display} — {value}")
+
+    # Разбиваем на поля по 10 строк, чтобы не превысить лимит 1024 символа в поле
+    chunk_size = 10
+    for i in range(0, len(lines), chunk_size):
+        chunk = lines[i:i+chunk_size]
+        start = i + 1
+        end = i + len(chunk)
+        embed.add_field(
+            name=f"Места {start}–{end}",
+            value="\n".join(chunk),
+            inline=False
+        )
+
+    return embed
+
+async def build_analytics_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+
+    # --- Базовые данные ---
+    async with bot.db.execute("""
+        SELECT coins, gems, catalysts, total_crafts, total_successes,
+               grid_size, income_bonus, title
+        FROM players WHERE user_id = ?
+    """, (user_id,)) as c:
+        row = await c.fetchone()
+    if not row:
+        return discord.Embed(title="❌ Профиль не найден", color=0xe74c3c)
+
+    coins, gems, catalysts, crafts, successes, grid_size, bonus, title = row
+    successes = successes or 0
+    crafts = crafts or 0
+    winrate = (successes / crafts * 100) if crafts > 0 else 0.0
+
+    # --- Доход ---
+    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
+    income_coins_h = per_sec_coins * 3600
+    income_gems_h = per_sec_gems * 3600
+
+    # --- Генераторы ---
+    async with bot.db.execute("""
+        SELECT COUNT(*), 
+               SUM(CASE WHEN i.income_per_hour > 0 THEN 1 ELSE 0 END),
+               MAX(i.price)
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = 'profile'
+    """, (user_id,)) as c:
+        gens_total, gens_income, best_price = await c.fetchone()
+    gens_total = gens_total or 0
+    gens_income = gens_income or 0
+    best_price = best_price or 0
+
+    avg_income = (income_coins_h / gens_income) if gens_income > 0 else 0
+
+    # --- Питомцы ---
+    async with bot.db.execute(
+        "SELECT COUNT(*), MAX(level) FROM user_pets_v2 WHERE user_id = ?", (user_id,)
+    ) as c:
+        pet_count, pet_max = await c.fetchone()
+    pet_count = pet_count or 0
+    pet_max = pet_max or 0
+    active_pet = await get_active_pet(user_id)
+    active_pet_str = "нет"
+    if active_pet:
+        pid, lvl = active_pet
+        pt = PET_TYPES.get(pid)
+        if pt:
+            active_pet_str = f"{pt['emoji']} {pt['name']} (ур. {lvl})"
+
+    # --- Титулы ---
+    unlocked_titles = await get_unlocked_titles(user_id)
+
+    # --- Рейды/дуэли ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM duel_history WHERE winner_id = ?", (user_id,)
+    ) as c:
+        duel_wins = (await c.fetchone())[0] or 0
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM duel_history WHERE loser_id = ?", (user_id,)
+    ) as c:
+        duel_losses = (await c.fetchone())[0] or 0
+    duel_total = duel_wins + duel_losses
+    duel_wr = (duel_wins / duel_total * 100) if duel_total > 0 else 0.0
+
+    async with bot.db.execute(
+        "SELECT progress FROM player_quests WHERE user_id = ? AND quest_id = 'q_raid_1'", (user_id,)
+    ) as c:
+        r = await c.fetchone()
+        raid_wins = r[0] if r else 0
+
+    # --- Экономика ---
+    async with bot.db.execute(
+        "SELECT amount, interest_rate, end_time FROM bank_deposits WHERE user_id = ?", (user_id,)
+    ) as c:
+        deposit = await c.fetchone()
+    deposit_str = "нет"
+    if deposit:
+        amt, rate, end = deposit
+        deposit_str = f"🪙 {amt} ({int(rate*100)}%)"
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM tax_log WHERE user_id = ?", (user_id,)
+    ) as c:
+        tax_count = (await c.fetchone())[0] or 0
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM auctions WHERE seller_id = ?", (user_id,)
+    ) as c:
+        auction_sold = (await c.fetchone())[0] or 0
+
+    # --- Достижения ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
+    ) as c:
+        ach_count = (await c.fetchone())[0] or 0
+
+    # --- Строим embed ---
+    embed = discord.Embed(
+        title=f"📈 Аналитика — {interaction.user.name}",
+        description="Подробная статистика твоего прогресса.",
+        color=0x3498db
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+    # Доход
+    embed.add_field(
+        name="💰 Доход",
+        value=(
+            f"🪙 {income_coins_h:.2f}/час\n"
+            f"💎 {income_gems_h:.4f}/час\n"
+            f"Бонус: +{int(bonus*100)}%"
+        ),
+        inline=True
+    )
+
+    # Замок
+    embed.add_field(
+        name="🏰 Замок",
+        value=(
+            f"Генераторов: **{gens_total}**\n"
+            f"Доходных: **{gens_income}**\n"
+            f"Средний: 🪙 {avg_income:.2f}/час\n"
+            f"Сетка: **{grid_size}**"
+        ),
+        inline=True
+    )
+
+    # Синтез
+    embed.add_field(
+        name="⚗️ Синтез",
+        value=(
+            f"Попыток: **{crafts}**\n"
+            f"Успехов: **{successes}**\n"
+            f"Винрейт: **{winrate:.1f}%**\n"
+            f"Катализаторов: **{catalysts}**"
+        ),
+        inline=True
+    )
+
+    # Питомцы
+    embed.add_field(
+        name="🐾 Питомцы",
+        value=(
+            f"Куплено: **{pet_count}**\n"
+            f"Лучший ур.: **{pet_max}**\n"
+            f"Активный: {active_pet_str}"
+        ),
+        inline=True
+    )
+
+    # Титулы
+    embed.add_field(
+        name="🏅 Титулы",
+        value=(
+            f"Активный: **{title or 'Новичок'}**\n"
+            f"Открыто: **{len(unlocked_titles)}/{len(TITLES)}**"
+        ),
+        inline=True
+    )
+
+    # PvP
+    embed.add_field(
+        name="⚔️ PvP",
+        value=(
+            f"Дуэли: **{duel_wins}W / {duel_losses}L** ({duel_wr:.1f}%)\n"
+            f"Рейды (победы): **{raid_wins}**"
+        ),
+        inline=True
+    )
+
+    # Экономика
+    embed.add_field(
+        name="🏦 Экономика",
+        value=(
+            f"Вклад: {deposit_str}\n"
+            f"Налогов: **{tax_count}**\n"
+            f"Лотов продано: **{auction_sold}**"
+        ),
+        inline=True
+    )
+
+    # Прогресс
+    embed.add_field(
+        name="🏆 Прогресс",
+        value=(
+            f"Достижений: **{ach_count}**\n"
+            f"Гемов: **{gems}**\n"
+            f"Монет: **{coins}**"
+        ),
+        inline=True
+    )
+
+    return embed
+
 
 async def set_notification(user_id: int, notif_type: str, enabled: bool):
     """Включает/выключает уведомление. Создаёт запись, если её нет."""
@@ -3285,6 +3605,105 @@ class AutocollectorView(BaseView):
         embed = await build_user_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
+class TopView(BaseView):
+    def __init__(self, author_id: int, top_type: str = "coins", limit: int = 10, timeout: int = 600):
+        super().__init__(author_id, timeout)
+        self.top_type = top_type
+        self.limit = limit
+
+        # Ряд 0: переключение типа (6 кнопок — разобьём на 2 ряда по 3)
+        types = list(TOP_TYPES.items())
+        for idx, (ttype, (label, _)) in enumerate(types):
+            btn = discord.ui.Button(
+                label=label[:80],
+                style=discord.ButtonStyle.primary if ttype == self.top_type else discord.ButtonStyle.secondary,
+                row=0 if idx < 3 else 1,
+            )
+            btn.callback = self._make_type_switch(ttype)
+            self.add_item(btn)
+
+        # Ряд 2: размер страницы (10/20/30)
+        for size in TOP_PAGE_SIZES:
+            btn = discord.ui.Button(
+                label=f"{size}",
+                style=discord.ButtonStyle.success if size == self.limit else discord.ButtonStyle.secondary,
+                row=2,
+            )
+            btn.callback = self._make_size_switch(size)
+            self.add_item(btn)
+
+        # Ряд 3: обновить + назад
+        refresh = discord.ui.Button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.secondary, row=3)
+        refresh.callback = self.btn_refresh
+        self.add_item(refresh)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=3)
+        back.callback = self.btn_back
+        self.add_item(back)
+
+    def _make_type_switch(self, ttype: str):
+        async def switch(interaction: discord.Interaction):
+            await interaction.response.defer()
+            embed = await build_top_embed(interaction, ttype, self.limit)
+            await interaction.edit_original_response(
+                embed=embed, view=TopView(self.author_id, ttype, self.limit)
+            )
+        return switch
+
+    def _make_size_switch(self, size: int):
+        async def switch(interaction: discord.Interaction):
+            await interaction.response.defer()
+            embed = await build_top_embed(interaction, self.top_type, size)
+            await interaction.edit_original_response(
+                embed=embed, view=TopView(self.author_id, self.top_type, size)
+            )
+        return switch
+
+    async def btn_refresh(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_top_embed(interaction, self.top_type, self.limit)
+        await interaction.edit_original_response(
+            embed=embed, view=TopView(self.author_id, self.top_type, self.limit)
+        )
+
+    async def btn_back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=MainMenuView(self.author_id)
+        )
+
+class AnalyticsView(BaseView):
+    def __init__(self, author_id: int, return_to: str = "profile", timeout: int = 600):
+        super().__init__(author_id, timeout)
+        self.return_to = return_to
+
+    @discord.ui.button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.primary, row=0)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_analytics_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=AnalyticsView(self.author_id, self.return_to)
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.return_to == "settings":
+            embed = discord.Embed(
+                title="⚙️ Личные настройки",
+                description="Здесь ты можешь управлять своим профилем.",
+                color=0x808080
+            )
+            await interaction.edit_original_response(
+                embed=embed, view=UserSettingsView(self.author_id)
+            )
+        else:
+            embed = await build_user_profile_embed(interaction)
+            await interaction.edit_original_response(
+                embed=embed, view=UserProfileView(self.author_id)
+            )
+
 class NotificationsView(BaseView):
     def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(author_id, timeout)
@@ -3326,7 +3745,7 @@ class NotificationsView(BaseView):
         )
 
 class SocialView(BaseView):
-    @discord.ui.button(label="Рейд", emoji="🏰", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Рейд", emoji="🏰", style=discord.ButtonStyle.primary, row=0)
     async def btn_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Подготовка к рейду", description="Выбери режим:", color=0xe74c3c)
@@ -3346,11 +3765,11 @@ class SocialView(BaseView):
 
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Дуэль", emoji="🤺", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Дуэль", emoji="🤺", style=discord.ButtonStyle.success, row=0)
     async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DuelModal(self.author_id))
 
-    @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Клан", emoji="🏰", style=discord.ButtonStyle.success, row=0)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         clan = await get_clan(self.author_id)
@@ -3366,7 +3785,15 @@ class SocialView(BaseView):
             view = NoClanView(self.author_id)
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Топы", emoji="📊", style=discord.ButtonStyle.primary, row=1)
+    async def btn_tops(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_top_embed(interaction, "coins", 10)
+        await interaction.edit_original_response(
+            embed=embed, view=TopView(self.author_id, "coins", 10)
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
@@ -6777,19 +7204,27 @@ class UserProfileView(BaseView):
         )
         await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
 
-    @discord.ui.button(label="Питомцы", emoji="🐾", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Питомцы", emoji="🐾", style=discord.ButtonStyle.primary, row=0)
     async def btn_pets(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_pets_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
 
-    @discord.ui.button(label="Автосборщик", emoji="🤖", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Автосборщик", emoji="🤖", style=discord.ButtonStyle.primary, row=0)
     async def btn_autocollector(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_autocollector_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Аналитика", emoji="📈", style=discord.ButtonStyle.primary, row=0)
+    async def btn_analytics(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_analytics_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=AnalyticsView(self.author_id, return_to="profile")
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
