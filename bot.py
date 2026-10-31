@@ -2424,12 +2424,13 @@ class PetSwitchView(discord.ui.View):
         self.author_id = author_id
         self.add_item(make_select("Выбери питомца", options, self.select, row=0))
         back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-        back.callback = self.back; self.add_item(back)
+        back.callback = self.back
+        self.add_item(back)
 
-    async def interaction_check(self, interaction):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
 
-       async def select(self, interaction: discord.Interaction):
+    async def select(self, interaction: discord.Interaction):
         pet_id = interaction.data["values"][0]
         await interaction.response.defer()
         if pet_id == "none":
@@ -2444,7 +2445,14 @@ class PetSwitchView(discord.ui.View):
         )
         await bot.db.commit()
         ptype = PET_TYPES[pet_id]
-        await interaction.followup.send(f"✅ Активный питомец: {ptype['emoji']} {ptype['name']}.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Активный питомец: {ptype['emoji']} {ptype['name']}.", ephemeral=True
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_pets_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
 
 
 async def open_pets_shop(interaction: discord.Interaction, author_id: int):
