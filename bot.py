@@ -241,6 +241,7 @@ class CastleBot(commands.Bot):
                 "3": "<:cooper_gen3:1566161724942581770>",
                 "4": "<:cooper_gen4:1566161726448205855>",
                 "5": "<:cooper_gen5:1566161728025141430>",
+            },
             # ... для остальных 29 генераторов ...
         }
         for item_id, emoji_map in star_emojis.items():
