@@ -5579,7 +5579,7 @@ class StarEmojiPaginatedView(discord.ui.View):
 
     async def item_select(self, interaction: discord.Interaction):
         item_id = interaction.data["values"][0]
-        await interaction.response.send_modal(StarEmojiModal(self.author_id, item_id))
+        await interaction.response.send_modal(StarEmojiModal1(self.author_id, item_id))
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -5594,10 +5594,49 @@ class StarEmojiPaginatedView(discord.ui.View):
         embed = discord.Embed(title="🎨 Кастомные эмодзи", color=0x9b59b6)
         await interaction.edit_original_response(embed=embed, view=SettingsEmojisView(self.author_id))
 
-class StarEmojiModal(discord.ui.Modal, title="Эмодзи по звёздам"):
+class StarEmojiModal1(discord.ui.Modal, title="Эмодзи по звёздам (1/2)"):
     e0 = discord.ui.TextInput(label="0★", required=False, placeholder="<:basic_0:123>")
     e1 = discord.ui.TextInput(label="1★", required=False, placeholder="<:basic_1:123>")
     e2 = discord.ui.TextInput(label="2★", required=False, placeholder="<:basic_2:123>")
+
+    def __init__(self, author_id: int, item_id: str):
+        super().__init__()
+        self.author_id = author_id
+        self.item_id = item_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        # Сохраняем первую партию
+        async with bot.db.execute("SELECT emoji_by_star FROM items WHERE id = ?", (self.item_id,)) as c:
+            row = await c.fetchone()
+        emojis = json.loads(row[0] or "{}") if row else {}
+        
+        for star, field in enumerate([self.e0, self.e1, self.e2]):
+            val = field.value.strip() if field.value else ""
+            if val:
+                emojis[str(star)] = val
+        
+        await bot.db.execute(
+            "UPDATE items SET emoji_by_star = ? WHERE id = ?",
+            (json.dumps(emojis, ensure_ascii=False), self.item_id)
+        )
+        await bot.db.commit()
+
+        # Показываем кнопку для второй части
+        embed = discord.Embed(
+            title="Эмодзи по звёздам (1/2)",
+            description="Первая часть (0★–2★) сохранена. Теперь настрой 3★–5★.",
+            color=0xf1c40f
+        )
+        view = discord.ui.View()
+        nxt = discord.ui.Button(label="Далее (3★–5★)", emoji="➡️", style=discord.ButtonStyle.primary)
+        nxt.callback = lambda i: i.response.send_modal(StarEmojiModal2(self.author_id, self.item_id))
+        view.add_item(nxt)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+class StarEmojiModal2(discord.ui.Modal, title="Эмодзи по звёздам (2/2)"):
     e3 = discord.ui.TextInput(label="3★", required=False, placeholder="<:basic_3:123>")
     e4 = discord.ui.TextInput(label="4★", required=False, placeholder="<:basic_4:123>")
     e5 = discord.ui.TextInput(label="5★", required=False, placeholder="<:basic_5:123>")
@@ -5610,13 +5649,15 @@ class StarEmojiModal(discord.ui.Modal, title="Эмодзи по звёздам")
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        async with bot.db.execute("SELECT name FROM items WHERE id = ?", (self.item_id,)) as c:
+        async with bot.db.execute("SELECT name, emoji_by_star FROM items WHERE id = ?", (self.item_id,)) as c:
             row = await c.fetchone()
         if not row:
             return await interaction.followup.send("❌ Генератор не найден.", ephemeral=True)
 
-        emojis = {}
-        for star, field in enumerate([self.e0, self.e1, self.e2, self.e3, self.e4, self.e5]):
+        name, emoji_json = row
+        emojis = json.loads(emoji_json or "{}")
+
+        for star, field in enumerate([self.e3, self.e4, self.e5], start=3):
             val = field.value.strip() if field.value else ""
             if val:
                 emojis[str(star)] = val
@@ -5629,37 +5670,10 @@ class StarEmojiModal(discord.ui.Modal, title="Эмодзи по звёздам")
 
         count = len(emojis)
         await interaction.followup.send(
-            f"✅ Для **{row[0]}** сохранено {count} эмодзи: "
-            f"{', '.join(f'{k}★' for k in emojis.keys())}.",
+            f"✅ Для **{name}** сохранено {count} эмодзи: "
+            f"{', '.join(f'{k}★' for k in sorted(emojis.keys(), key=int))}.",
             ephemeral=True
         )
-
-class EditEmojiModal(discord.ui.Modal, title="Изменить эмодзи"):
-    emoji = discord.ui.TextInput(label="Новый эмодзи", required=True)
-
-    def __init__(self, author_id: int, key: str):
-        super().__init__()
-        self.author_id = author_id
-        self.key = key
-        name, _ = EMOJI_KEYS.get(key, (key, ""))
-        self.title = f"Изменить — {name}"
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        emoji_val = self.emoji.value.strip()
-        if not is_valid_emoji(emoji_val):
-            await interaction.followup.send(
-                "❌ Эмодзи должен быть юникод-символом (👑) или кастомным (`<:name:id>`).",
-                ephemeral=True
-            )
-            return
-        guild_id = interaction.guild_id
-        settings = await get_settings(guild_id)
-        custom = settings["custom_emojis"]
-        custom[self.key] = emoji_val
-        await save_setting(guild_id, "custom_emojis", custom)
-        name, _ = EMOJI_KEYS.get(self.key, (self.key, ""))
-        await interaction.followup.send(f"✅ {name}: {emoji_val}", ephemeral=True)
 
 
 # ============================================================
