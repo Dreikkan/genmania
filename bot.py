@@ -2116,8 +2116,6 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
 
     # --- Формируем строку бонусов ---
     bonus_line = await get_total_bonus_line(user_id)
-    bonus_str = " | ".join(bonus_lines) if bonus_lines else "нет"
-
     embed = discord.Embed(
         title=f"{castle} {settings['bot_name']} — Замок {interaction.user.name}",
         description="Выбери раздел кнопками ниже.",
@@ -2185,7 +2183,6 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     title_bonus = max(title_coins, title_gems)
 
     bonus_line = await get_total_bonus_line(user_id)
-    bonus_str = " | ".join(bonus_lines) if bonus_lines else "нет"
 
     width = int(grid_size ** 0.5)
     embed = discord.Embed(title=f"{castle} Замок {interaction.user.name}", color=0x00ff00)
