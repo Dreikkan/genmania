@@ -2502,9 +2502,10 @@ class PetsShopView(discord.ui.View):
         self.author_id = author_id
         self.add_item(make_select("Выбери питомца", options, self.select, row=0))
         back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-        back.callback = self.back; self.add_item(back)
+        back.callback = self.back
+        self.add_item(back)
 
-    async def interaction_check(self, interaction):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.author_id
 
     async def select(self, interaction: discord.Interaction):
@@ -2515,32 +2516,44 @@ class PetsShopView(discord.ui.View):
             await interaction.followup.send("❌ Питомец не найден.", ephemeral=True)
             return
 
-        async with bot.db.execute("SELECT 1 FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?", (self.author_id, pet_id)) as c:
+        async with bot.db.execute(
+            "SELECT 1 FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?",
+            (self.author_id, pet_id)
+        ) as c:
             if await c.fetchone():
                 await interaction.followup.send("❌ Этот питомец уже есть.", ephemeral=True)
                 return
 
-        async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (self.author_id,)) as c:
+        async with bot.db.execute(
+            "SELECT gems FROM players WHERE user_id = ?", (self.author_id,)
+        ) as c:
             gems = (await c.fetchone())[0]
         if gems < ptype["price_gems"]:
-            await interaction.followup.send(f"❌ Нужно 💎 {ptype['price_gems']}, у тебя {gems}.", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Нужно 💎 {ptype['price_gems']}, у тебя {gems}.", ephemeral=True
+            )
             return
 
         await bot.db.execute(
-            "UPDATE players SET gems = gems - ? WHERE user_id = ?", (ptype["price_gems"], self.author_id)
+            "UPDATE players SET gems = gems - ? WHERE user_id = ?",
+            (ptype["price_gems"], self.author_id)
         )
         await bot.db.execute(
             "INSERT INTO user_pets_v2 (user_id, pet_id, level, last_fed) VALUES (?, ?, 1, NULL)",
             (self.author_id, pet_id)
         )
-        # если активного нет — сделать активным
-        async with bot.db.execute("SELECT active_pet FROM players WHERE user_id = ?", (self.author_id,)) as c:
+        async with bot.db.execute(
+            "SELECT active_pet FROM players WHERE user_id = ?", (self.author_id,)
+        ) as c:
             active = (await c.fetchone())[0]
         if not active:
-            await bot.db.execute("UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, self.author_id))
+            await bot.db.execute(
+                "UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, self.author_id)
+            )
         await bot.db.commit()
         await interaction.followup.send(
-            f"✅ Куплен {ptype['emoji']} **{ptype['name']}** за 💎 {ptype['price_gems']}!", ephemeral=True
+            f"✅ Куплен {ptype['emoji']} **{ptype['name']}** за 💎 {ptype['price_gems']}!",
+            ephemeral=True
         )
 
     async def back(self, interaction: discord.Interaction):
