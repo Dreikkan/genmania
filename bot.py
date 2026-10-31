@@ -4466,6 +4466,15 @@ class AdminPanelView(discord.ui.View):
         await interaction.response.defer()
         await open_admin_logs(interaction, self.author_id, page=0)
 
+@bot.tree.command(name="debug_emoji", description="Проверить эмодзи по звёздам")
+async def debug_emoji(interaction: discord.Interaction, item_id: str):
+    await interaction.response.defer(ephemeral=True)
+    async with bot.db.execute("SELECT emoji_by_star FROM items WHERE id = ?", (item_id,)) as c:
+        row = await c.fetchone()
+    if not row:
+        return await interaction.followup.send("❌ Генератор не найден.", ephemeral=True)
+    await interaction.followup.send(f"`{item_id}`: `{row[0]}`", ephemeral=True)
+
 
 class AdminGrantView(discord.ui.View):
     def __init__(self, author_id: int, timeout: int = 120):
@@ -5516,10 +5525,8 @@ class SettingsEmojisView(discord.ui.View):
         await interaction.response.send_modal(EditEmojiModal(self.author_id, key))
 
     async def star_emoji_select(self, interaction: discord.Interaction):
-        # Показываем Select с выбором генератора
         await interaction.response.defer()
-        async with bot.db.execute("SELECT id, name FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
-            items = await c.fetchall()
+        await open_star_emoji_select(interaction, self.author_id, page=0)
 
         options = [discord.SelectOption(label=name, value=item_id) for item_id, name in items]
         embed = discord.Embed(
@@ -5529,6 +5536,65 @@ class SettingsEmojisView(discord.ui.View):
         )
         view = StarEmojiSelectView(self.author_id, options)
         await interaction.edit_original_response(embed=embed, view=view)
+
+    async def open_star_emoji_select(interaction: discord.Interaction, author_id: int, page: int = 0):
+    async with bot.db.execute("SELECT id, name FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
+        items = await c.fetchall()
+
+    total_pages = max(1, (len(items) + 9) // 10)  # по 10 на страницу
+    page = max(0, min(page, total_pages - 1))
+    chunk = items[page * 10: page * 10 + 10]
+
+    options = [discord.SelectOption(label=name, value=item_id) for item_id, name in chunk]
+
+    embed = discord.Embed(
+        title="⭐ Эмодзи по звёздам",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери генератор, для которого настроить эмодзи 0★–5★.",
+        color=0xf1c40f
+    )
+    view = StarEmojiPaginatedView(author_id, options, page, total_pages)
+    await interaction.edit_original_response(embed=embed, view=view)
+
+
+class StarEmojiPaginatedView(discord.ui.View):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self.add_item(make_select("Выбери генератор", options, self.item_select, row=0))
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    async def item_select(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        await interaction.response.send_modal(StarEmojiModal(self.author_id, item_id))
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_star_emoji_select(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_star_emoji_select(interaction, self.author_id, self.page + 1)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(title="🎨 Кастомные эмодзи", color=0x9b59b6)
+        await interaction.edit_original_response(embed=embed, view=SettingsEmojisView(self.author_id))
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
