@@ -224,33 +224,6 @@ class CastleBot(commands.Bot):
         except Exception:
             pass
 
-                # Пример для basic_gen (замени ID на свои)
-        star_emojis = {
-            "basic_gen": {
-                "0": "<:basic_gen:1565443870773215404>",
-                "1": "<:basic_gen1:1566161008270114816>",
-                "2": "<:basic_gen2:1566161041824555129>",
-                "3": "<:basic_gen3:1566161043191758878>",
-                "4": "<:basic_gen4:1566161044546650183>",
-                "5": "<:basic_gen5:1566161045842821221>",
-            },
-            "cooper_gen": {
-                "0": "<:cooper_gen:1566139443939647620>",
-                "1": "<:cooper_gen1:1566161721855447221>",
-                "2": "<:cooper_gen2:1566161723340357803>",
-                "3": "<:cooper_gen3:1566161724942581770>",
-                "4": "<:cooper_gen4:1566161726448205855>",
-                "5": "<:cooper_gen5:1566161728025141430>",
-            },
-            # ... для остальных 29 генераторов ...
-        }
-        for item_id, emoji_map in star_emojis.items():
-            await self.db.execute(
-                "UPDATE items SET emoji_by_star = ? WHERE id = ?",
-                (json.dumps(emoji_map, ensure_ascii=False), item_id)
-            )
-        await self.db.commit()
-
         for column, definition in [
             ("catalysts", "INTEGER DEFAULT 0"),
             ("last_gem_collected", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
@@ -418,6 +391,32 @@ class CastleBot(commands.Bot):
             ("divine_gen",    "Божественный генератор",   "<:divine_gen:1566147767296987146>", "mythic",    True),
             ("legendary_gen", "Легендарный генератор",    "<:legendary_gen:1566149699679813713>", "mythic",    True),
         ]
+
+        star_emojis = {
+            "basic_gen": {
+                "0": "<:basic_gen:1565443870773215404>",
+                "1": "<:basic_gen1:1566161008270114816>",
+                "2": "<:basic_gen2:1566161041824555129>",
+                "3": "<:basic_gen3:1566161043191758878>",
+                "4": "<:basic_gen4:1566161044546650183>",
+                "5": "<:basic_gen5:1566161045842821221>",
+            },
+            "cooper_gen": {
+                "0": "<:cooper_gen:1566139443939647620>",
+                "1": "<:cooper_gen1:1566161721855447221>",
+                "2": "<:cooper_gen2:1566161723340357803>",
+                "3": "<:cooper_gen3:1566161724942581770>",
+                "4": "<:cooper_gen4:1566161726448205855>",
+                "5": "<:cooper_gen5:1566161728025141430>",
+            },
+            # ... для остальных 29 генераторов ...
+        }
+        for item_id, emoji_map in star_emojis.items():
+            await self.db.execute(
+                "UPDATE items SET emoji_by_star = ? WHERE id = ?",
+                (json.dumps(emoji_map, ensure_ascii=False), item_id)
+            )
+        await self.db.commit()
 
         GEM_INCOME = {
             "space_gen":     0.02,
