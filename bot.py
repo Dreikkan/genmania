@@ -2048,10 +2048,43 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
 
     parts = []
     if per_sec_coins > 0:
-        parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час ({per_sec_coins:.4f}/сек)")
+        parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
     if per_sec_gems > 0:
-        parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час ({per_sec_gems:.5f}/сек)")
+        parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
     income_str = " | ".join(parts) if parts else "нет генераторов"
+
+    # --- Собираем все бонусы ---
+    # статус (income_bonus из players)
+    status_bonus = bonus or 0.0
+
+    # клан
+    clan_bonus = 0.0
+    clan = await get_clan(user_id)
+    if clan:
+        clan_bonus = clan[4] or 0.0
+
+    # питомец
+    pet_coins = await get_pet_bonus(user_id, "income_coins")
+    pet_gems = await get_pet_bonus(user_id, "income_gems")
+    pet_bonus = max(pet_coins, pet_gems)  # для отображения общего
+
+    # титул
+    title_coins = await get_title_bonus(user_id, "income_coins")
+    title_gems = await get_title_bonus(user_id, "income_gems")
+    title_bonus = max(title_coins, title_gems)
+
+    # --- Формируем строку бонусов ---
+    bonus_lines = []
+    if status_bonus > 0:
+        bonus_lines.append(f"Статус: +{int(status_bonus*100)}%")
+    if clan_bonus > 0:
+        bonus_lines.append(f"Клан: +{int(clan_bonus*100)}%")
+    if pet_bonus > 0:
+        bonus_lines.append(f"Питомец: +{int(pet_bonus*100)}%")
+    if title_bonus > 0:
+        bonus_lines.append(f"Титул: +{int(title_bonus*100)}%")
+
+    bonus_str = " | ".join(bonus_lines) if bonus_lines else "нет"
 
     embed = discord.Embed(
         title=f"{castle} {settings['bot_name']} — Замок {interaction.user.name}",
@@ -2065,7 +2098,7 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
         inline=False
     )
     embed.add_field(name="Доход", value=income_str, inline=False)
-    embed.add_field(name="Бонус", value=f"+{int(bonus * 100)}%", inline=True)
+    embed.add_field(name="Бонусы", value=bonus_str, inline=True)
     embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
     return embed
 
@@ -2098,27 +2131,52 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
     parts = []
     if per_sec_coins > 0:
-        parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час ({per_sec_coins:.4f}/сек)")
+        parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
     if per_sec_gems > 0:
-        parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час ({per_sec_gems:.5f}/сек)")
+        parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
     income_str = " | ".join(parts) if parts else "нет генераторов"
+
+    # --- Бонусы ---
+    status_bonus = bonus or 0.0
+
+    clan_bonus = 0.0
+    clan = await get_clan(user_id)
+    if clan:
+        clan_bonus = clan[4] or 0.0
+
+    pet_coins = await get_pet_bonus(user_id, "income_coins")
+    pet_gems = await get_pet_bonus(user_id, "income_gems")
+    pet_bonus = max(pet_coins, pet_gems)
+
+    title_coins = await get_title_bonus(user_id, "income_coins")
+    title_gems = await get_title_bonus(user_id, "income_gems")
+    title_bonus = max(title_coins, title_gems)
+
+    bonus_lines = []
+    if status_bonus > 0:
+        bonus_lines.append(f"Статус: +{int(status_bonus*100)}%")
+    if clan_bonus > 0:
+        bonus_lines.append(f"Клан: +{int(clan_bonus*100)}%")
+    if pet_bonus > 0:
+        bonus_lines.append(f"Питомец: +{int(pet_bonus*100)}%")
+    if title_bonus > 0:
+        bonus_lines.append(f"Титул: +{int(title_bonus*100)}%")
+    bonus_str = " | ".join(bonus_lines) if bonus_lines else "нет"
 
     width = int(grid_size ** 0.5)
     embed = discord.Embed(title=f"{castle} Замок {interaction.user.name}", color=0x00ff00)
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     embed.add_field(name="Кошелёк", value=f"{coin} {coins} | {gem} {gems}", inline=False)
     embed.add_field(name="Доход", value=income_str, inline=False)
-    embed.add_field(name="Бонус", value=f"+{int(bonus * 100)}%", inline=True)
+    embed.add_field(name="Бонусы", value=bonus_str, inline=False)
     embed.add_field(name="Сетка", value=f"{width}x{width}", inline=True)
 
-    # Выводим сетку по рядам (каждый ряд — отдельное Inline-поле)
+    # Выводим сетку по рядам
     for row_idx in range(width):
         row_items = []
         for col_idx in range(width):
             slot = row_idx * width + col_idx
             row_items.append(items.get(slot, "⬛"))
-        
-        # Соединяем ячейки пробелами
         row_str = "  ".join(row_items)
         embed.add_field(name="\u200b", value=row_str, inline=False)
 
