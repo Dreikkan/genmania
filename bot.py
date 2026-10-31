@@ -355,7 +355,7 @@ class CastleBot(commands.Bot):
         for g in grid_items:
             await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
 
-                gen_names = [
+        gen_names = [
             ("basic_gen",     "Базовый генератор",        "<:basic_gen:156544387073215404>", "common",    False),
             ("copper_gen",    "Медный генератор",         "<:copper_gen:1566139443939647620>", "common",    False),
             ("bronze_gen",    "Бронзовый генератор",      "<:bronze_gen:1566139498520121474>", "common",    False),
