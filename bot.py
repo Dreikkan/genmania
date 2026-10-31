@@ -2212,15 +2212,6 @@ class MainMenuView(BaseView):
         embed, _ = await build_achievements_page(interaction, 0)
         await interaction.edit_original_response(embed=embed, view=AchievementsView(self.author_id, 0))
 
-    @discord.ui.button(label="Задания", emoji="📅", style=discord.ButtonStyle.secondary, row=1)
-    async def tab_quests(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await is_command_disabled(interaction.guild_id, "quests"):
-            await interaction.response.send_message("❌ Задания отключены.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        embed = await build_quests_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=QuestsView(self.author_id))
-
     @discord.ui.button(label="Квесты", emoji="📋", style=discord.ButtonStyle.primary, row=4)
     async def tab_quests_hub(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
