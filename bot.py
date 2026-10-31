@@ -356,15 +356,15 @@ class CastleBot(commands.Bot):
             await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
 
         gen_names = [
-            ("basic_gen",     "Базовый генератор",        "<:basic_gen:156544387073215404>", "common",    False),
+            ("basic_gen",     "Базовый генератор",        "<:basic_gen:1565443870773215404>", "common",    False),
             ("copper_gen",    "Медный генератор",         "<:copper_gen:1566139443939647620>", "common",    False),
             ("bronze_gen",    "Бронзовый генератор",      "<:bronze_gen:1566139498520121474>", "common",    False),
             ("iron_gen",      "Железный генератор",       "<:iron_gen:1566139543026008237>", "uncommon",  False),
-            ("steel_gen",     "Стальной генератор",       "<:steel_gen:156613980842466987>", "uncommon",  False),
+            ("steel_gen",     "Стальной генератор",       "<:steel_gen:1566139809842466987>", "uncommon",  False),
             ("silver_gen",    "Серебряный генератор",     "<:silver_gen:1566139847138214021>", "uncommon",  False),
             ("gold_gen",      "Золотой генератор",        "<:gold_gen:1566139891526406335>", "rare",      False),
             ("platinum_gen",  "Платиновый генератор",     "<:platinum_gen:1566139968206667847>", "rare",      False),
-            ("emerald_gen",   "Изумрудный генератор",     "<:emerald_gen:156614001186115110>", "rare",      False),
+            ("emerald_gen",   "Изумрудный генератор",     "<:emerald_gen:1566140011861115110>", "rare",      False),
             ("ruby_gen",      "Рубиновый генератор",      "<:ruby_gen:1566140046841614478>", "epic",      False),
             ("sapphire_gen",  "Сапфировый генератор",     "<:sapphire_gen:1566140090718101625>", "epic",      False),
             ("diamond_gen",   "Алмазный генератор",       "<:diamond_gen:1566140148830175333>", "epic",      False),
