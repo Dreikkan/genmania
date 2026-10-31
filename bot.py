@@ -2338,30 +2338,38 @@ class PetsView(BaseView):
         pet_id, level = pet
         ptype = PET_TYPES.get(pet_id)
         if level >= PET_MAX_LEVEL:
-            await interaction.followup.send(f"❌ {ptype['emoji']} {ptype['name']} уже максимального уровня.", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ {ptype['emoji']} {ptype['name']} уже максимального уровня.",
+                ephemeral=True
+            )
             return
 
-        # проверка кулдауна
         async with bot.db.execute(
             "SELECT last_fed FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?",
             (self.author_id, pet_id)
         ) as c:
             last_fed = (await c.fetchone())[0]
+
         now = datetime.datetime.now()
         if last_fed:
             last = datetime.datetime.fromisoformat(last_fed)
             if (now - last).total_seconds() < PET_FEED_COOLDOWN_HOURS * 3600:
                 left = PET_FEED_COOLDOWN_HOURS * 3600 - (now - last).total_seconds()
-                h = int(left // 3600); m = int((left % 3600) // 60)
-                await interaction.followup.send(f"⏳ Питомец не голоден. Подожди {h}ч {m}м.", ephemeral=True)
+                h = int(left // 3600)
+                m = int((left % 3600) // 60)
+                await interaction.followup.send(
+                    f"⏳ Питомец не голоден. Подожди {h}ч {m}м.", ephemeral=True
+                )
                 return
 
-        # проверка стоимости
-        async with bot.db.execute("SELECT coins, gems FROM players WHERE user_id = ?", (self.author_id,)) as c:
+        async with bot.db.execute(
+            "SELECT coins, gems FROM players WHERE user_id = ?", (self.author_id,)
+        ) as c:
             coins, gems = await c.fetchone()
         if coins < PET_FEED_COST_COINS or gems < PET_FEED_COST_GEMS:
             await interaction.followup.send(
-                f"❌ Нужно 🪙 {PET_FEED_COST_COINS} и 💎 {PET_FEED_COST_GEMS}.", ephemeral=True
+                f"❌ Нужно 🪙 {PET_FEED_COST_COINS} и 💎 {PET_FEED_COST_GEMS}.",
+                ephemeral=True
             )
             return
 
@@ -2370,16 +2378,18 @@ class PetsView(BaseView):
             (PET_FEED_COST_COINS, PET_FEED_COST_GEMS, self.author_id)
         )
         await bot.db.execute(
-            "UPDATE user_pets_v2 SET level = level + ?, last_fed = ? WHERE user_id = ? AND pet_id = ?",
+            "UPDATE user_pets_v2 SET level = level + ?, last_fed = ? "
+            "WHERE user_id = ? AND pet_id = ?",
             (PET_FEED_XP, now.isoformat(), self.author_id, pet_id)
         )
         await bot.db.commit()
         await interaction.followup.send(
-            f"🍖 {ptype['emoji']} {ptype['name']} покормлен! Уровень: **{level + PET_FEED_XP}/{PET_MAX_LEVEL}**.",
+            f"🍖 {ptype['emoji']} {ptype['name']} покормлен! "
+            f"Уровень: **{level + PET_FEED_XP}/{PET_MAX_LEVEL}**.",
             ephemeral=True
         )
 
-        @discord.ui.button(label="Сменить активного", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Сменить активного", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
     async def btn_switch(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         pets = await get_user_pets(self.author_id)
@@ -2396,14 +2406,17 @@ class PetsView(BaseView):
                 value=pet_id
             ))
         embed = discord.Embed(title="🔄 Выбери активного питомца", color=0x9b59b6)
-        await interaction.edit_original_response(embed=embed, view=PetSwitchView(self.author_id, options))
+        await interaction.edit_original_response(
+            embed=embed, view=PetSwitchView(self.author_id, options)
+        )
 
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_user_profile_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
-
+        await interaction.edit_original_response(
+            embed=embed, view=UserProfileView(self.author_id)
+        )
 
 class PetSwitchView(discord.ui.View):
     def __init__(self, author_id: int, options: list):
