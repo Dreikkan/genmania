@@ -178,6 +178,11 @@ STORY_QUESTS = {
     "q_stars_1": ("Звездочёт", "Улучши любой генератор до 1★", 1, "stars", 20),
     "q_gold": ("Золотая лихорадка", "Накопи 1000 монет", 1000, "coins", 25),
     "q_raid_1": ("Завоеватель", "Соверши успешный рейд", 1, "raid_win", 30),
+    "q_synth_10":  ("Мастер-алхимик", "Сделай 10 синтезов", 10, "synthesize", 40),
+    "q_duel_1":    ("Дуэлянт", "Выиграй первую дуэль", 1, "duel_win", 50),
+    "q_pet_1":     ("Питомец", "Купи любого питомца", 1, "pet_buy", 60),
+    "q_clan_1":    ("Клановый", "Вступи в клан или создай его", 1, "clan_join", 70),
+    "q_ach_5":     ("Коллекционер достижений", "Открой 5 достижений", 5, "achievements", 100),
 }
 
 # Титулы: id -> (название, требование для открытия)
@@ -190,6 +195,53 @@ TITLES = {
     "raider": ("Рейдер", "Выиграй 5 рейдов"),
     "duelist": ("Дуэлянт", "Выиграй 10 дуэлей"),
     "collector": ("Коллекционер", "Собери 20 разных генераторов"),
+    "pet_lover":  ("Любитель животных", "Купи 3 питомцев"),
+    "pet_master": ("Мастер питомцев", "Прокачай любого питомца до 10 ур."),
+    "clan_leader":("Клановый лидер", "Создай или возглавь клан"),
+    "clan_warrior":("Клановый воин", "Выиграй клановую войну"),
+    "banker":     ("Банкир", "Открой вклад в банке"),
+    "taxpayer":   ("Налогоплательщик", "Заплати налоги 3 раза"),
+    "auctioneer": ("Аукционист", "Выставь лот на аукцион"),
+    "trader":     ("Торговец", "Купи лот на аукционе"),
+    "gem_master": ("Гемовый магнат", "Накопи 100 гемов"),
+    "quest_hero": ("Герой сюжета", "Выполни 5 сюжетных квестов"),
+    "ach_hunter": ("Охотник за достижениями", "Открой 10 достижений"),
+    "grid_master":("Мастер сетки", "Расширь замок до 100 слотов"),
+}
+
+# Бонусы титулов: id -> (тип эффекта, значение)
+# Типы: income_coins, income_gems, craft_chance, combat_power, raid_loot, gem_bonus
+TITLE_BONUSES = {
+    "novice":      (None, 0.0),                       # без бонуса
+    "builder":     ("income_coins", 0.01),            # +1% доход монет
+    "alchemist":   ("craft_chance", 0.01),            # +1% шанс синтеза
+    "star_lord":   ("combat_power", 0.02),            # +2% мощь
+    "rich":        ("income_coins", 0.02),            # +2% доход монет
+    "raider":      ("raid_loot", 0.02),               # +2% добыча в рейдах
+    "duelist":     ("combat_power", 0.01),            # +1% мощь
+    "collector":   ("income_coins", 0.01),            # +1% доход монет
+
+    "pet_lover":   ("income_gems", 0.01),             # +1% доход гемов
+    "pet_master":  ("income_gems", 0.02),             # +2% доход гемов
+    "clan_leader": ("income_coins", 0.01),            # +1% доход монет
+    "clan_warrior":("combat_power", 0.02),            # +2% мощь
+    "banker":      ("income_coins", 0.01),            # +1% доход монет
+    "taxpayer":    ("income_coins", 0.01),            # +1% доход монет
+    "auctioneer":  ("income_gems", 0.01),             # +1% доход гемов
+    "trader":      ("income_coins", 0.01),            # +1% доход монет
+    "gem_master":  ("income_gems", 0.02),             # +2% доход гемов
+    "quest_hero":  ("craft_chance", 0.02),            # +2% шанс синтеза
+    "ach_hunter":  ("combat_power", 0.01),            # +1% мощь
+    "grid_master": ("income_coins", 0.02),            # +2% доход монет
+}
+
+BTYPE_NAMES = {
+    "income_coins": "доход монет",
+    "income_gems":  "доход гемов",
+    "craft_chance": "шанс синтеза",
+    "combat_power": "мощь",
+    "raid_loot":    "добыча в рейдах",
+    "gem_bonus":    "гемы",
 }
 
 TITLES_PER_PAGE = 25
@@ -1213,7 +1265,8 @@ async def get_combat_power(user_id: int) -> int:
         power = (await c.fetchone())[0] or 0
 
     pet_bonus = await get_pet_bonus(user_id, "combat_power")
-    return int(power * (1 + pet_bonus))
+    title_bonus = await get_title_bonus(user_id, "combat_power")
+    return int(power * (1 + pet_bonus + title_bonus))
 
 async def get_clan(user_id: int):
     async with bot.db.execute(
@@ -1306,8 +1359,12 @@ async def get_per_second_income(user_id: int) -> tuple[float, float]:
     # бонус питомца
     pet_coins = await get_pet_bonus(user_id, "income_coins")
     pet_gems = await get_pet_bonus(user_id, "income_gems")
-    multiplier_coins = multiplier * (1 + pet_coins)
-    multiplier_gems = multiplier * (1 + pet_gems)
+    # бонус титула
+    title_coins = await get_title_bonus(user_id, "income_coins")
+    title_gems = await get_title_bonus(user_id, "income_gems")
+
+    multiplier_coins = multiplier * (1 + pet_coins + title_coins)
+    multiplier_gems = multiplier * (1 + pet_gems + title_gems)
 
     async with bot.db.execute("""
         SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
@@ -1591,6 +1648,47 @@ async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
             await bot.db.execute("UPDATE players SET gems = gems + ? WHERE user_id = ?", (reward, user_id))
     await bot.db.commit()
 
+async def sync_story_achievements(user_id: int):
+    """Синхронизирует прогресс квестов типа 'achievements' с реальным количеством достижений."""
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
+    ) as c:
+        count = (await c.fetchone())[0]
+
+    # Находим все квесты типа 'achievements'
+    for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
+        if q_type != "achievements":
+            continue
+
+        async with bot.db.execute(
+            "SELECT progress, completed FROM player_quests WHERE user_id = ? AND quest_id = ?",
+            (user_id, qid)
+        ) as c:
+            row = await c.fetchone()
+
+        current_progress = row[0] if row else 0
+        already_completed = row[1] if row else 0
+
+        if already_completed:
+            continue
+
+        new_progress = min(count, target)
+        completed = int(new_progress >= target)
+
+        await bot.db.execute(
+            "INSERT INTO player_quests (user_id, quest_id, progress, completed) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, quest_id) DO UPDATE SET progress = ?, completed = ?",
+            (user_id, qid, new_progress, completed, new_progress, completed)
+        )
+
+        # Награда при первом выполнении
+        if completed and current_progress < target:
+            await bot.db.execute(
+                "UPDATE players SET gems = gems + ? WHERE user_id = ?", (reward, user_id)
+            )
+
+    await bot.db.commit()
+
 async def claim_daily(user_id: int) -> dict:
     async with bot.db.execute(
         "SELECT last_daily, streak_days FROM players WHERE user_id = ?", (user_id,)
@@ -1636,28 +1734,84 @@ async def claim_daily(user_id: int) -> dict:
 
 
 async def get_unlocked_titles(user_id: int) -> set:
+    # --- Базовые данные ---
     async with bot.db.execute("""
         SELECT 
             (SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile') AS gens,
             (SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile' AND stars >= 5) AS five_star,
             (SELECT COUNT(DISTINCT item_id) FROM inventory WHERE user_id = ? AND location = 'profile') AS distinct_gens,
             (SELECT total_crafts FROM players WHERE user_id = ?) AS crafts,
-            (SELECT coins FROM players WHERE user_id = ?) AS coins
-    """, (user_id, user_id, user_id, user_id, user_id)) as c:
+            (SELECT coins FROM players WHERE user_id = ?) AS coins,
+            (SELECT gems FROM players WHERE user_id = ?) AS gems,
+            (SELECT grid_size FROM players WHERE user_id = ?) AS grid_size
+    """, (user_id,)*7) as c:
         row = await c.fetchone()
-    gens, five_star, distinct_gens, crafts, coins = row or (0,)*5
+    gens, five_star, distinct_gens, crafts, coins, gems, grid_size = row or (0,)*7
 
+    # --- Рейды (из player_quests q_raid_1) ---
     async with bot.db.execute(
         "SELECT progress FROM player_quests WHERE user_id = ? AND quest_id = 'q_raid_1'", (user_id,)
     ) as c:
         r = await c.fetchone()
         raid_wins = r[0] if r else 0
 
+    # --- Дуэли ---
     async with bot.db.execute(
         "SELECT COUNT(*) FROM duel_history WHERE winner_id = ?", (user_id,)
     ) as c:
         duel_wins = (await c.fetchone())[0] or 0
 
+    # --- Питомцы ---
+    async with bot.db.execute(
+        "SELECT COUNT(*), MAX(level) FROM user_pets_v2 WHERE user_id = ?", (user_id,)
+    ) as c:
+        pet_count, pet_max_level = await c.fetchone()
+    pet_count = pet_count or 0
+    pet_max_level = pet_max_level or 0
+
+    # --- Клан ---
+    clan = await get_clan(user_id)
+    is_clan_leader = bool(clan and clan[2] == user_id)
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM clan_wars WHERE winner_id = ?", (clan[0] if clan else -1,)
+    ) as c:
+        clan_wars_won = (await c.fetchone())[0] or 0
+
+    # --- Банк ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM bank_deposits WHERE user_id = ?", (user_id,)
+    ) as c:
+        bank_deposits = (await c.fetchone())[0] or 0
+
+    # --- Налоги ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM tax_log WHERE user_id = ?", (user_id,)
+    ) as c:
+        tax_count = (await c.fetchone())[0] or 0
+
+    # --- Аукцион ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM auctions WHERE seller_id = ?", (user_id,)
+    ) as c:
+        auction_sold = (await c.fetchone())[0] or 0
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM auctions WHERE current_bidder = ? AND status = 'finished'", (user_id,)
+    ) as c:
+        auction_bought = (await c.fetchone())[0] or 0
+
+    # --- Сюжетные квесты ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM player_quests WHERE user_id = ? AND completed = 1", (user_id,)
+    ) as c:
+        story_done = (await c.fetchone())[0] or 0
+
+    # --- Достижения ---
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
+    ) as c:
+        ach_count = (await c.fetchone())[0] or 0
+
+    # --- Формируем set ---
     unlocked = {"novice"}
     if gens >= 10: unlocked.add("builder")
     if crafts >= 10: unlocked.add("alchemist")
@@ -1666,6 +1820,20 @@ async def get_unlocked_titles(user_id: int) -> set:
     if raid_wins >= 5: unlocked.add("raider")
     if duel_wins >= 10: unlocked.add("duelist")
     if distinct_gens >= 20: unlocked.add("collector")
+
+    if pet_count >= 3: unlocked.add("pet_lover")
+    if pet_max_level >= 10: unlocked.add("pet_master")
+    if is_clan_leader: unlocked.add("clan_leader")
+    if clan_wars_won >= 1: unlocked.add("clan_warrior")
+    if bank_deposits >= 1: unlocked.add("banker")
+    if tax_count >= 3: unlocked.add("taxpayer")
+    if auction_sold >= 1: unlocked.add("auctioneer")
+    if auction_bought >= 1: unlocked.add("trader")
+    if gems >= 100: unlocked.add("gem_master")
+    if story_done >= 5: unlocked.add("quest_hero")
+    if ach_count >= 10: unlocked.add("ach_hunter")
+    if grid_size >= 100: unlocked.add("grid_master")
+
     return unlocked
 
 async def get_active_pet(user_id: int):
@@ -1704,6 +1872,30 @@ async def get_user_pets(user_id: int) -> list:
         "SELECT pet_id, level, last_fed FROM user_pets_v2 WHERE user_id = ?", (user_id,)
     ) as c:
         return await c.fetchall()
+
+async def get_title_bonus(user_id: int, effect_type: str) -> float:
+    """Бонус от активного титула игрока для указанного эффекта."""
+    async with bot.db.execute(
+        "SELECT title FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    if not row or not row[0]:
+        return 0.0
+    title_name = row[0]
+
+    # Находим id титула по названию
+    title_id = None
+    for tid, (name, _req) in TITLES.items():
+        if name == title_name:
+            title_id = tid
+            break
+    if not title_id:
+        return 0.0
+
+    btype, bval = TITLE_BONUSES.get(title_id, (None, 0.0))
+    if btype == effect_type:
+        return bval
+    return 0.0
 # ============================================================
 #  🏆 ДОСТИЖЕНИЯ
 # ============================================================
@@ -1784,6 +1976,7 @@ async def check_achievements(user_id: int):
 
     if newly_unlocked:
         await bot.db.commit()
+        await sync_story_achievements(user_id)
     return newly_unlocked
 
 
@@ -2182,11 +2375,25 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
 
-    async with bot.db.execute("SELECT title FROM players WHERE user_id = ?", (user_id,)) as c:
-        title_row = await c.fetchone()
-    title = (title_row[0] if title_row else None) or "Новичок"
+    unlocked_titles = await get_unlocked_titles(user_id)
 
-    embed.add_field(name="🏅 Титул", value=title, inline=True)
+    # бонус активного титула
+    title_id = None
+    for tid, (name, _req) in TITLES.items():
+        if name == title:
+            title_id = tid
+            break
+    bonus_line = ""
+    if title_id:
+        btype, bval = TITLE_BONUSES.get(title_id, (None, 0.0))
+        if btype and bval > 0:
+            bonus_line = f"\n+{int(bval*100)}% {BTYPE_NAMES.get(btype, btype)}"
+
+    embed.add_field(
+        name="🏅 Титул",
+        value=f"{title}{bonus_line}\nОткрыто: **{len(unlocked_titles)}/{len(TITLES)}**",
+        inline=True
+    )
 
     pet = await get_active_pet(user_id)
     if pet:
@@ -2253,21 +2460,42 @@ async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
 
 async def build_story_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
+    await sync_story_achievements(user_id)
+
     async with bot.db.execute(
         "SELECT quest_id, progress, completed FROM player_quests WHERE user_id = ?", (user_id,)
     ) as c:
         rows = await c.fetchall()
     progress_map = {r[0]: (r[1], r[2]) for r in rows}
 
-    embed = discord.Embed(title="📜 Сюжетные квесты", color=0x9b59b6)
+    embed = discord.Embed(
+        title="📜 Сюжетные квесты",
+        description="10 глав твоего пути. Выполняй — получай гемы.",
+        color=0x9b59b6
+    )
+
+    completed_count = 0
     for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
         prog, done = progress_map.get(qid, (0, 0))
-        status = "✅ Выполнено" if done else f"⏳ {prog}/{target}"
+        if done:
+            completed_count += 1
+
+        if done:
+            status = "✅ Выполнено"
+            bar = "🟩" * 10
+        else:
+            pct = min(prog / target, 1.0) if target > 0 else 0
+            filled = int(pct * 10)
+            bar = "🟩" * filled + "⬛" * (10 - filled)
+            status = f"⏳ {prog}/{target}"
+
         embed.add_field(
-            name=name,
-            value=f"{desc}\n{status} | Награда: 💎 {reward}",
+            name=f"{name}",
+            value=f"{desc}\n{bar}\n{status} | Награда: 💎 {reward}",
             inline=False
         )
+
+    embed.set_footer(text=f"Выполнено: {completed_count}/{len(STORY_QUESTS)}")
     return embed
 
 
@@ -3010,6 +3238,7 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
             await interaction.followup.send(
                 f"✅ Клан **{clan_name}** создан за {cost} монет!", ephemeral=True
             )
+            await update_story_quests(self.author_id, "clan_join", 1)
         except Exception as e:
             await bot.db.rollback()
             await interaction.followup.send(f"❌ Ошибка: `{e}`", ephemeral=True)
@@ -3125,7 +3354,8 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
                 victim_coins = (await c.fetchone())[0]
             
             pet_loot = await get_pet_bonus(self.author_id, "raid_loot")
-            loot = int(victim_coins * (0.15 + pet_loot))
+            title_loot = await get_title_bonus(self.author_id, "raid_loot")
+            loot = int(victim_coins * (0.15 + pet_loot + title_loot))
             if loot > 0:
                 await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (loot, target))
                 await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id = ?", (loot, self.author_id))
@@ -3199,6 +3429,7 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
 
         if winner == self.author_id:
             msg = f"🏆 Ты победил в дуэли!\n{text}\nЗабрал банк: 🪙 {bet * 2}."
+            await update_story_quests(self.author_id, "duel_win", 1)
         else:
             msg = f"💥 Ты проиграл.\n{text}\nПотерял: 🪙 {bet}."
 
@@ -3326,12 +3557,19 @@ async def open_titles_view(interaction: discord.Interaction, author_id: int, pag
     chunk = all_titles[page*TITLES_PER_PAGE:(page+1)*TITLES_PER_PAGE]
 
     options = []
-    for tid, (name, req) in chunk:
+        for tid, (name, req) in chunk:
+        btype, bval = TITLE_BONUSES.get(tid, (None, 0.0))
+        if btype:
+            bonus_str = f" | +{int(bval*100)}% {BTYPE_NAMES.get(btype, btype)}"
+        else:
+            bonus_str = ""
+        desc_full = (req + bonus_str)[:100]
+
         if tid not in unlocked:
-            options.append(discord.SelectOption(label=f"🔒 {name}"[:100], value=tid, description=req[:100]))
+            options.append(discord.SelectOption(label=f"🔒 {name}"[:100], value=tid, description=desc_full))
         else:
             mark = "✅" if name == current else "•"
-            options.append(discord.SelectOption(label=f"{mark} {name}"[:100], value=tid, description=req[:100]))
+            options.append(discord.SelectOption(label=f"{mark} {name}"[:100], value=tid, description=desc_full))
 
     embed = discord.Embed(
         title="🏅 Титулы",
@@ -3577,6 +3815,7 @@ class PetsShopView(discord.ui.View):
             f"✅ Куплен {ptype['emoji']} **{ptype['name']}** за 💎 {ptype['price_gems']}!",
             ephemeral=True
         )
+        await update_story_quests(self.author_id, "pet_buy", 1)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -5032,7 +5271,8 @@ class CraftConfirmView(discord.ui.View):
             catalyst_used = 1
 
         pet_chance = await get_pet_bonus(user_id, "craft_chance")
-        final_chance = min(1.0, base_chance + (CATALYST_BONUS if use_cat else 0) + pet_chance)
+        title_chance = await get_title_bonus(user_id, "craft_chance")
+        final_chance = min(1.0, base_chance + (CATALYST_BONUS if use_cat else 0) + pet_chance + title_chance)
         success = random.random() < final_chance
 
         await bot.db.execute(
