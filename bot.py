@@ -3557,7 +3557,7 @@ async def open_titles_view(interaction: discord.Interaction, author_id: int, pag
     chunk = all_titles[page*TITLES_PER_PAGE:(page+1)*TITLES_PER_PAGE]
 
     options = []
-        for tid, (name, req) in chunk:
+    for tid, (name, req) in chunk:
         btype, bval = TITLE_BONUSES.get(tid, (None, 0.0))
         if btype:
             bonus_str = f" | +{int(bval*100)}% {BTYPE_NAMES.get(btype, btype)}"
@@ -3580,7 +3580,6 @@ async def open_titles_view(interaction: discord.Interaction, author_id: int, pag
         embed=embed,
         view=TitlesView(author_id, options, page, total_pages, return_to)
     )
-
 
 class PetsView(BaseView):
     @discord.ui.button(label="Магазин", emoji="🛒", style=discord.ButtonStyle.success, row=0)
