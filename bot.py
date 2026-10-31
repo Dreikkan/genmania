@@ -184,135 +184,26 @@ class CastleBot(commands.Bot):
         self.db = None
 
     async def setup_hook(self):
-        # Создаём папку data, если её нет
+        # 1. Создаём папку data (если её нет)
         DATA_DIR = Path("/app/data")
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Путь к базе в персистентной папке
+        # 2. Путь к базе в персистентной папке
         DB_PATH = DATA_DIR / "castle.db"
 
-        self.db = await aiosqlite.connect("castle.db")
-        # Ждать до 10 секунд, если база занята
+        # 3. Подключаемся к базе в /app/data
+        self.db = await aiosqlite.connect(str(DB_PATH))
         await self.db.execute("PRAGMA busy_timeout = 10000")
-        # WAL-режим: чтение не блокирует запись, и наоборот
         await self.db.execute("PRAGMA journal_mode = WAL")
+
+        # 4. Инициализируем таблицы
         await self.init_db()
         await self.tree.sync()
-    self.loop.create_task(self.auction_closer())
 
-       # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
-
-    async def auction_closer(self):
-        await self.wait_until_ready()
-        while not self.is_closed():
-            try:
-                await asyncio.sleep(300)  # 5 минут
-                now = datetime.datetime.now().isoformat()
-                async with self.db.execute(
-                    "SELECT id, seller_id, item_id, stars, current_bid, current_bidder "
-                    "FROM auctions WHERE status = 'active' AND end_time < ?",
-                    (now,)
-                ) as c:
-                    lots = await c.fetchall()
-
-                for lot in lots:
-                    aid, seller_id, item_id, stars, current_bid, bidder = lot
-                    if bidder:
-                        # Передаём предмет победителю
-                        async with self.db.execute(
-                            "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'",
-                            (bidder,)
-                        ) as c:
-                            used = {r[0] for r in await c.fetchall()}
-                        free = [s for s in range(36) if s not in used]
-                        if free:
-                            await self.db.execute(
-                                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
-                                "VALUES (?, ?, ?, 'profile', ?)",
-                                (bidder, free[0], item_id, stars)
-                            )
-                        # Продавцу — деньги с комиссией 5%
-                        fee = int(current_bid * 0.05)
-                        await self.db.execute(
-                            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-                            (current_bid - fee, seller_id)
-                        )
-                    else:
-                        # Никто не купил — возвращаем предмет
-                        async with self.db.execute(
-                            "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'",
-                            (seller_id,)
-                        ) as c:
-                            used = {r[0] for r in await c.fetchall()}
-                        free = [s for s in range(36) if s not in used]
-                        if free:
-                            await self.db.execute(
-                                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
-                                "VALUES (?, ?, ?, 'profile', ?)",
-                                (seller_id, free[0], item_id, stars)
-                            )
-                    await self.db.execute(
-                        "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
-                    )
-                await self.db.commit()
-            except Exception as e:
-                print(f"[AUCTION_CLOSER] Ошибка: {e}")
-                await asyncio.sleep(60)
-
-
-    async def market_updater(self):
-        await self.wait_until_ready()
-        while not self.is_closed():
-            try:
-                await asyncio.sleep(21600)  # 6 часов
-                async with self.db.execute(
-                    "SELECT item_id, base_price, demand, supply FROM market_prices"
-                ) as c:
-                    rows = await c.fetchall()
-
-                for item_id, base, demand, supply in rows:
-                    ratio = 1.0 + (demand - supply) / max(1, demand + supply) * 0.5
-                    new_price = int(base * ratio)
-                    new_price = max(int(base * 0.5), min(int(base * 2.0), new_price))
-                    await self.db.execute(
-                        "UPDATE market_prices SET current_price = ?, demand = 0, supply = 0, "
-                        "last_update = ? WHERE item_id = ?",
-                        (new_price, datetime.datetime.now().isoformat(), item_id)
-                    )
-                await self.db.commit()
-            except Exception as e:
-                print(f"[MARKET_UPDATER] Ошибка: {e}")
-                await asyncio.sleep(300)
-
-
-    async def tax_collector(self):
-        await self.wait_until_ready()
-        while not self.is_closed():
-            try:
-                await asyncio.sleep(86400)  # 24 часа
-                async with self.db.execute(
-                    "SELECT user_id, coins, last_tax_time FROM players"
-                ) as c:
-                    players = await c.fetchall()
-
-                now = datetime.datetime.now()
-                for uid, coins, last_tax in players:
-                    last = datetime.datetime.fromisoformat(last_tax) if last_tax else now
-                    if (now - last).total_seconds() >= 86400:
-                        tax = int(coins * 0.02)
-                        if tax > 0:
-                            await self.db.execute(
-                                "UPDATE players SET coins = coins - ?, last_tax_time = ? WHERE user_id = ?",
-                                (tax, now.isoformat(), uid)
-                            )
-                            await self.db.execute(
-                                "INSERT INTO tax_log (user_id, amount, tax_type) VALUES (?, ?, 'daily')",
-                                (uid, tax)
-                            )
-                await self.db.commit()
-            except Exception as e:
-                print(f"[TAX_COLLECTOR] Ошибка: {e}")
-                await asyncio.sleep(600)
+        # 5. Запускаем фоновые задачи (asyncio, а не self.loop)
+        asyncio.create_task(self.auction_closer())
+        asyncio.create_task(self.market_updater())
+        asyncio.create_task(self.tax_collector())
 
     async def init_db(self):
         await self.db.execute("""
@@ -895,6 +786,120 @@ class CastleBot(commands.Bot):
                 (item_id, base_price, base_price)
             )
         await self.db.commit()
+
+# ---------- ФОНОВЫЕ ЗАДАЧИ ----------
+
+    async def auction_closer(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(300)  # 5 минут
+                now = datetime.datetime.now().isoformat()
+                async with self.db.execute(
+                    "SELECT id, seller_id, item_id, stars, current_bid, current_bidder "
+                    "FROM auctions WHERE status = 'active' AND end_time < ?",
+                    (now,)
+                ) as c:
+                    lots = await c.fetchall()
+
+                for lot in lots:
+                    aid, seller_id, item_id, stars, current_bid, bidder = lot
+                    if bidder:
+                        # Передаём предмет победителю
+                        async with self.db.execute(
+                            "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'",
+                            (bidder,)
+                        ) as c:
+                            used = {r[0] for r in await c.fetchall()}
+                        free = [s for s in range(36) if s not in used]
+                        if free:
+                            await self.db.execute(
+                                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                                "VALUES (?, ?, ?, 'profile', ?)",
+                                (bidder, free[0], item_id, stars)
+                            )
+                        # Продавцу — деньги с комиссией 5%
+                        fee = int(current_bid * 0.05)
+                        await self.db.execute(
+                            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                            (current_bid - fee, seller_id)
+                        )
+                    else:
+                        # Никто не купил — возвращаем предмет
+                        async with self.db.execute(
+                            "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'",
+                            (seller_id,)
+                        ) as c:
+                            used = {r[0] for r in await c.fetchall()}
+                        free = [s for s in range(36) if s not in used]
+                        if free:
+                            await self.db.execute(
+                                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                                "VALUES (?, ?, ?, 'profile', ?)",
+                                (seller_id, free[0], item_id, stars)
+                            )
+                    await self.db.execute(
+                        "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
+                    )
+                await self.db.commit()
+            except Exception as e:
+                print(f"[AUCTION_CLOSER] Ошибка: {e}")
+                await asyncio.sleep(60)
+
+
+    async def market_updater(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(21600)  # 6 часов
+                async with self.db.execute(
+                    "SELECT item_id, base_price, demand, supply FROM market_prices"
+                ) as c:
+                    rows = await c.fetchall()
+
+                for item_id, base, demand, supply in rows:
+                    ratio = 1.0 + (demand - supply) / max(1, demand + supply) * 0.5
+                    new_price = int(base * ratio)
+                    new_price = max(int(base * 0.5), min(int(base * 2.0), new_price))
+                    await self.db.execute(
+                        "UPDATE market_prices SET current_price = ?, demand = 0, supply = 0, "
+                        "last_update = ? WHERE item_id = ?",
+                        (new_price, datetime.datetime.now().isoformat(), item_id)
+                    )
+                await self.db.commit()
+            except Exception as e:
+                print(f"[MARKET_UPDATER] Ошибка: {e}")
+                await asyncio.sleep(300)
+
+
+    async def tax_collector(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(86400)  # 24 часа
+                async with self.db.execute(
+                    "SELECT user_id, coins, last_tax_time FROM players"
+                ) as c:
+                    players = await c.fetchall()
+
+                now = datetime.datetime.now()
+                for uid, coins, last_tax in players:
+                    last = datetime.datetime.fromisoformat(last_tax) if last_tax else now
+                    if (now - last).total_seconds() >= 86400:
+                        tax = int(coins * 0.02)
+                        if tax > 0:
+                            await self.db.execute(
+                                "UPDATE players SET coins = coins - ?, last_tax_time = ? WHERE user_id = ?",
+                                (tax, now.isoformat(), uid)
+                            )
+                            await self.db.execute(
+                                "INSERT INTO tax_log (user_id, amount, tax_type) VALUES (?, ?, 'daily')",
+                                (uid, tax)
+                            )
+                await self.db.commit()
+            except Exception as e:
+                print(f"[TAX_COLLECTOR] Ошибка: {e}")
+                await asyncio.sleep(600)
 
 
 
