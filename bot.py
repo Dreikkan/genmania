@@ -7024,7 +7024,7 @@ async def debug_emoji(interaction: discord.Interaction, item_id: str):
         return await interaction.followup.send("❌ Генератор не найден.", ephemeral=True)
     await interaction.followup.send(f"`{item_id}`: `{row[0]}`", ephemeral=True)
 
-@bot.tree.command(name="тест уведомление", description="Отправить тестовое ЛС (проверка уведомлений)")
+@bot.tree.command(name="test_notification", description="Отправить тестовое ЛС (проверка уведомлений)")
 async def test_notification(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(
