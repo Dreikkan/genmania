@@ -5538,22 +5538,22 @@ class SettingsEmojisView(discord.ui.View):
         await interaction.edit_original_response(embed=embed, view=view)
 
     async def open_star_emoji_select(interaction: discord.Interaction, author_id: int, page: int = 0):
-    async with bot.db.execute("SELECT id, name FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
-        items = await c.fetchall()
+        async with bot.db.execute("SELECT id, name FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
+            items = await c.fetchall()
 
-    total_pages = max(1, (len(items) + 9) // 10)  # по 10 на страницу
-    page = max(0, min(page, total_pages - 1))
-    chunk = items[page * 10: page * 10 + 10]
+        total_pages = max(1, (len(items) + 9) // 10)
+        page = max(0, min(page, total_pages - 1))
+        chunk = items[page * 10: page * 10 + 10]
 
-    options = [discord.SelectOption(label=name, value=item_id) for item_id, name in chunk]
+        options = [discord.SelectOption(label=name, value=item_id) for item_id, name in chunk]
 
-    embed = discord.Embed(
-        title="⭐ Эмодзи по звёздам",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери генератор, для которого настроить эмодзи 0★–5★.",
-        color=0xf1c40f
-    )
-    view = StarEmojiPaginatedView(author_id, options, page, total_pages)
-    await interaction.edit_original_response(embed=embed, view=view)
+        embed = discord.Embed(
+            title="⭐ Эмодзи по звёздам",
+            description=f"Страница {page + 1}/{total_pages}\nВыбери генератор, для которого настроить эмодзи 0★–5★.",
+            color=0xf1c40f
+        )
+        view = StarEmojiPaginatedView(author_id, options, page, total_pages)
+        await interaction.edit_original_response(embed=embed, view=view)
 
 
 class StarEmojiPaginatedView(discord.ui.View):
