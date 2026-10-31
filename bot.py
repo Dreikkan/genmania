@@ -228,6 +228,59 @@ DAILY_REWARDS = {
 }
 
 # ============================================================
+#  🐾 ПИТОМЦЫ
+# ============================================================
+
+PET_TYPES = {
+    "cat": {
+        "name": "Кот",
+        "emoji": "🐱",
+        "price_gems": 50,
+        "desc": "+2.5% к доходу монет за уровень",
+        "effect": "income_coins",
+        "per_level": 0.025,
+    },
+    "dog": {
+        "name": "Пёс",
+        "emoji": "🐶",
+        "price_gems": 60,
+        "desc": "+3% к шансу синтеза за уровень",
+        "effect": "craft_chance",
+        "per_level": 0.03,
+    },
+    "dragon": {
+        "name": "Дракончик",
+        "emoji": "🐲",
+        "price_gems": 120,
+        "desc": "+4% к боевой мощи за уровень",
+        "effect": "combat_power",
+        "per_level": 0.04,
+    },
+    "phoenix": {
+        "name": "Феникс",
+        "emoji": "🔥",
+        "price_gems": 150,
+        "desc": "+3% к доходу гемов за уровень",
+        "effect": "income_gems",
+        "per_level": 0.015,
+    },
+    "wolf": {
+        "name": "Волк",
+        "emoji": "🐺",
+        "price_gems": 90,
+        "desc": "+2% к добыче в рейдах за уровень",
+        "effect": "raid_loot",
+        "per_level": 0.02,
+    },
+}
+
+PET_MAX_LEVEL = 10
+PET_FEED_COOLDOWN_HOURS = 6
+PET_FEED_COST_COINS = 100          # кормление стоит монет
+PET_FEED_COST_GEMS = 1             # и немного гемов
+PET_FEED_XP = 1                    # +1 уровень за кормление (упрощённо)
+
+# ============================================================
 #  🤖 БОТ
 # ============================================================
 
@@ -645,11 +698,6 @@ class CastleBot(commands.Bot):
         """)
 
         # --- ПРОГРЕССИЯ И КОСМЕТИКА ---
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS user_pets (
-                user_id INTEGER PRIMARY KEY, pet_id TEXT, level INTEGER DEFAULT 1, last_fed TIMESTAMP
-            )
-        """)
         
         # Ежедневный вход
         try: await self.db.execute("ALTER TABLE players ADD COLUMN streak_days INTEGER DEFAULT 0")
@@ -873,6 +921,34 @@ class CastleBot(commands.Bot):
                 (item_id, base_price, base_price)
             )
         await self.db.commit()
+
+            # --- pets (пересоздаём с составным ключом) ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS user_pets_v2 (
+                user_id INTEGER,
+                pet_id TEXT,
+                level INTEGER DEFAULT 1,
+                last_fed TIMESTAMP DEFAULT NULL,
+                PRIMARY KEY (user_id, pet_id)
+            )
+        """)
+        # миграция старой user_pets (если есть данные)
+        try:
+            async with self.db.execute("SELECT user_id, pet_id, level, last_fed FROM user_pets") as c:
+                old_rows = await c.fetchall()
+            for uid, pid, lvl, lf in old_rows:
+                await self.db.execute(
+                    "INSERT OR IGNORE INTO user_pets_v2 (user_id, pet_id, level, last_fed) VALUES (?, ?, ?, ?)",
+                    (uid, pid, lvl, lf)
+                )
+        except Exception:
+            pass
+
+        # активный питомец
+        try:
+            await self.db.execute("ALTER TABLE players ADD COLUMN active_pet TEXT DEFAULT NULL")
+        except Exception:
+            pass
 
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 
@@ -1135,7 +1211,9 @@ async def get_combat_power(user_id: int) -> int:
         WHERE inv.user_id = ? AND inv.location = 'profile'
     """, (user_id,)) as c:
         power = (await c.fetchone())[0] or 0
-    return int(power)
+
+    pet_bonus = await get_pet_bonus(user_id, "combat_power")
+    return int(power * (1 + pet_bonus))
 
 async def get_clan(user_id: int):
     async with bot.db.execute(
@@ -1218,11 +1296,18 @@ async def get_per_second_income(user_id: int) -> tuple[float, float]:
         row = await c.fetchone()
     bonus = (row[0] if row else 0.0) or 0.0
     multiplier = 1 + bonus
-        # Клановый бонус
+
+    # клановый бонус
     clan = await get_clan(user_id)
     if clan:
         clan_bonus = clan[4] or 0.0
         multiplier *= (1 + clan_bonus)
+
+    # бонус питомца
+    pet_coins = await get_pet_bonus(user_id, "income_coins")
+    pet_gems = await get_pet_bonus(user_id, "income_gems")
+    multiplier_coins = multiplier * (1 + pet_coins)
+    multiplier_gems = multiplier * (1 + pet_gems)
 
     async with bot.db.execute("""
         SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
@@ -1239,40 +1324,55 @@ async def get_per_second_income(user_id: int) -> tuple[float, float]:
         per_sec_coins_raw += inc_coins * star_mult
         per_sec_gems_raw += inc_gems * star_mult
 
-    return per_sec_coins_raw * multiplier, per_sec_gems_raw * multiplier
+    return per_sec_coins_raw * multiplier_coins, per_sec_gems_raw * multiplier_gems
+
+
 
 
 async def calculate_passive_income(user_id: int, guild_id: int = None):
     async with bot.db.execute(
-        "SELECT last_collected, last_gem_collected, income_bonus FROM players WHERE user_id = ?",
+        "SELECT last_collected, last_gem_collected FROM players WHERE user_id = ?",
         (user_id,)
     ) as c:
         row = await c.fetchone()
     if not row:
         return 0, 0
-    last_coins_str, last_gems_str, bonus = row
-    multiplier = 1 + (bonus or 0)
+    last_coins_str, last_gems_str = row
 
-    settings = await get_settings(guild_id) if guild_id else {"gem_cap": DEFAULT_GEM_CAP, "passive_limit": DEFAULT_PASSIVE_LIMIT}
+    settings = await get_settings(guild_id) if guild_id else {
+        "gem_cap": DEFAULT_GEM_CAP, "passive_limit": DEFAULT_PASSIVE_LIMIT
+    }
     gem_cap = settings["gem_cap"]
     passive_limit = settings["passive_limit"]
 
-    async with bot.db.execute("""
-        SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'profile'
-    """, (user_id,)) as c:
-        rows = await c.fetchall()
-
-    per_sec_coins = 0.0
-    per_sec_gems = 0.0
-    for stars, inc_coins, inc_gems in rows:
-        star_mult = 1 + STAR_BONUS.get(stars, 0)
-        per_sec_coins += inc_coins * star_mult
-        per_sec_gems += inc_gems * star_mult
+    # Все бонусы (статус + клан + питомцы) уже учтены в get_per_second_income
+    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
 
     now = datetime.datetime.now()
+
+    def apply_offline_penalty(seconds: float) -> float:
+        if seconds <= 7200:
+            return 1.0
+        offline_seconds = seconds - 7200
+        effective_seconds = 7200 + offline_seconds * 0.7
+        return effective_seconds / seconds
+
+    coins = 0
+    if per_sec_coins > 0:
+        last = datetime.datetime.fromisoformat(last_coins_str)
+        seconds = (now - last).total_seconds()
+        penalty = apply_offline_penalty(seconds)
+        coins = min(int(seconds * per_sec_coins * penalty), passive_limit)
+
+    gems = 0
+    if per_sec_gems > 0:
+        last = datetime.datetime.fromisoformat(last_gems_str)
+        seconds = (now - last).total_seconds()
+        penalty = apply_offline_penalty(seconds)
+        raw = seconds * per_sec_gems * penalty
+        gems = min(int(raw), gem_cap)
+
+    return coins, gems
 
     # --- ШТРАФ ЗА ОФЛАЙН ---
     # Если игрок не заходил больше 2 часов, доход за время сверх 2 часов
@@ -1567,6 +1667,43 @@ async def get_unlocked_titles(user_id: int) -> set:
     if duel_wins >= 10: unlocked.add("duelist")
     if distinct_gens >= 20: unlocked.add("collector")
     return unlocked
+
+async def get_active_pet(user_id: int):
+    """Возвращает (pet_id, level) активного питомца или None."""
+    async with bot.db.execute(
+        "SELECT active_pet FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    if not row or not row[0]:
+        return None
+    pet_id = row[0]
+    async with bot.db.execute(
+        "SELECT level FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?", (user_id, pet_id)
+    ) as c:
+        r = await c.fetchone()
+    if not r:
+        return None
+    return pet_id, r[0]
+
+
+async def get_pet_bonus(user_id: int, effect_type: str) -> float:
+    """Суммарный бонус от активного питомца для указанного эффекта."""
+    pet = await get_active_pet(user_id)
+    if not pet:
+        return 0.0
+    pet_id, level = pet
+    ptype = PET_TYPES.get(pet_id)
+    if not ptype or ptype["effect"] != effect_type:
+        return 0.0
+    return ptype["per_level"] * level
+
+
+async def get_user_pets(user_id: int) -> list:
+    """Список (pet_id, level, last_fed) всех питомцев игрока."""
+    async with bot.db.execute(
+        "SELECT pet_id, level, last_fed FROM user_pets_v2 WHERE user_id = ?", (user_id,)
+    ) as c:
+        return await c.fetchall()
 # ============================================================
 #  🏆 ДОСТИЖЕНИЯ
 # ============================================================
@@ -2050,6 +2187,17 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
     title = (title_row[0] if title_row else None) or "Новичок"
 
     embed.add_field(name="🏅 Титул", value=title, inline=True)
+
+    pet = await get_active_pet(user_id)
+    if pet:
+        pid, lvl = pet
+        pt = PET_TYPES.get(pid)
+        if pt:
+            embed.add_field(
+                name=f"{pt['emoji']} Питомец",
+                value=f"{pt['name']} (ур. {lvl})",
+                inline=True
+            )
     embed.add_field(name="🪙 Кошелёк", value=f"Монеты: **{coins}**\nГемы: **{gems}**\nКатализаторы: **{catalysts}**", inline=True)
     embed.add_field(name="📈 Статистика", value=f"Синтезов: **{crafts}**\nУспешных: **{successes}**\nВинрейт: **{winrate:.1f}%**", inline=True)
     
@@ -2143,6 +2291,241 @@ async def build_cosmetics_embed(interaction: discord.Interaction) -> discord.Emb
     embed.add_field(name="Фон (URL)", value=bg or "не задан", inline=True)
     embed.add_field(name="Иконка замка", value=icon or "не задана", inline=True)
     return embed
+
+async def build_pets_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    pets = await get_user_pets(user_id)
+    active = await get_active_pet(user_id)
+
+    embed = discord.Embed(
+        title="🐾 Питомцы",
+        description="Купи питомца, корми его и получай бонусы. Активный питомец даёт эффект.",
+        color=0x9b59b6
+    )
+
+    if not pets:
+        embed.add_field(name="У тебя пока нет питомцев", value="Загляни в магазин питомцев!", inline=False)
+    else:
+        for pet_id, level, last_fed in pets:
+            ptype = PET_TYPES.get(pet_id)
+            if not ptype:
+                continue
+            is_active = "✅ " if active and active[0] == pet_id else ""
+            bonus = ptype["per_level"] * level
+            embed.add_field(
+                name=f"{is_active}{ptype['emoji']} {ptype['name']} (ур. {level}/{PET_MAX_LEVEL})",
+                value=f"{ptype['desc']} → сейчас: **+{int(bonus*100)}%**",
+                inline=False
+            )
+
+    embed.set_footer(text="Купить питомца — /питомцы_магазин или кнопка ниже.")
+    return embed
+
+
+class PetsView(BaseView):
+    @discord.ui.button(label="Магазин", emoji="🛒", style=discord.ButtonStyle.success, row=0)
+    async def btn_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_pets_shop(interaction, self.author_id)
+
+    @discord.ui.button(label="Покормить", emoji="🍖", style=discord.ButtonStyle.primary, row=0)
+    async def btn_feed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        pet = await get_active_pet(self.author_id)
+        if not pet:
+            await interaction.followup.send("❌ У тебя нет активного питомца.", ephemeral=True)
+            return
+        pet_id, level = pet
+        ptype = PET_TYPES.get(pet_id)
+        if level >= PET_MAX_LEVEL:
+            await interaction.followup.send(f"❌ {ptype['emoji']} {ptype['name']} уже максимального уровня.", ephemeral=True)
+            return
+
+        # проверка кулдауна
+        async with bot.db.execute(
+            "SELECT last_fed FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?",
+            (self.author_id, pet_id)
+        ) as c:
+            last_fed = (await c.fetchone())[0]
+        now = datetime.datetime.now()
+        if last_fed:
+            last = datetime.datetime.fromisoformat(last_fed)
+            if (now - last).total_seconds() < PET_FEED_COOLDOWN_HOURS * 3600:
+                left = PET_FEED_COOLDOWN_HOURS * 3600 - (now - last).total_seconds()
+                h = int(left // 3600); m = int((left % 3600) // 60)
+                await interaction.followup.send(f"⏳ Питомец не голоден. Подожди {h}ч {m}м.", ephemeral=True)
+                return
+
+        # проверка стоимости
+        async with bot.db.execute("SELECT coins, gems FROM players WHERE user_id = ?", (self.author_id,)) as c:
+            coins, gems = await c.fetchone()
+        if coins < PET_FEED_COST_COINS or gems < PET_FEED_COST_GEMS:
+            await interaction.followup.send(
+                f"❌ Нужно 🪙 {PET_FEED_COST_COINS} и 💎 {PET_FEED_COST_GEMS}.", ephemeral=True
+            )
+            return
+
+        await bot.db.execute(
+            "UPDATE players SET coins = coins - ?, gems = gems - ? WHERE user_id = ?",
+            (PET_FEED_COST_COINS, PET_FEED_COST_GEMS, self.author_id)
+        )
+        await bot.db.execute(
+            "UPDATE user_pets_v2 SET level = level + ?, last_fed = ? WHERE user_id = ? AND pet_id = ?",
+            (PET_FEED_XP, now.isoformat(), self.author_id, pet_id)
+        )
+        await bot.db.commit()
+        await interaction.followup.send(
+            f"🍖 {ptype['emoji']} {ptype['name']} покормлен! Уровень: **{level + PET_FEED_XP}/{PET_MAX_LEVEL}**.",
+            ephemeral=True
+        )
+
+        @discord.ui.button(label="Сменить активного", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_switch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        pets = await get_user_pets(self.author_id)
+        if not pets:
+            await interaction.followup.send("❌ У тебя нет питомцев.", ephemeral=True)
+            return
+        options = [discord.SelectOption(label="🚫 Без питомца (снять бонус)", value="none")]
+        for pet_id, level, _ in pets:
+            ptype = PET_TYPES.get(pet_id)
+            if not ptype:
+                continue
+            options.append(discord.SelectOption(
+                label=f"{ptype['emoji']} {ptype['name']} (ур. {level})",
+                value=pet_id
+            ))
+        embed = discord.Embed(title="🔄 Выбери активного питомца", color=0x9b59b6)
+        await interaction.edit_original_response(embed=embed, view=PetSwitchView(self.author_id, options))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
+
+
+class PetSwitchView(discord.ui.View):
+    def __init__(self, author_id: int, options: list):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.add_item(make_select("Выбери питомца", options, self.select, row=0))
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back; self.add_item(back)
+
+    async def interaction_check(self, interaction):
+        return interaction.user.id == self.author_id
+
+       async def select(self, interaction: discord.Interaction):
+        pet_id = interaction.data["values"][0]
+        await interaction.response.defer()
+        if pet_id == "none":
+            await bot.db.execute(
+                "UPDATE players SET active_pet = NULL WHERE user_id = ?", (self.author_id,)
+            )
+            await bot.db.commit()
+            await interaction.followup.send("✅ Активный питомец снят.", ephemeral=True)
+            return
+        await bot.db.execute(
+            "UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, self.author_id)
+        )
+        await bot.db.commit()
+        ptype = PET_TYPES[pet_id]
+        await interaction.followup.send(f"✅ Активный питомец: {ptype['emoji']} {ptype['name']}.", ephemeral=True)
+
+
+async def open_pets_shop(interaction: discord.Interaction, author_id: int):
+    async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (author_id,)) as c:
+        gems = (await c.fetchone())[0]
+
+    async with bot.db.execute("SELECT pet_id FROM user_pets_v2 WHERE user_id = ?", (author_id,)) as c:
+        owned = {r[0] for r in await c.fetchall()}
+
+    options = []
+    for pid, pt in PET_TYPES.items():
+        if pid in owned:
+            continue  # купленных не показываем
+        options.append(discord.SelectOption(
+            label=f"{pt['emoji']} {pt['name']} — 💎 {pt['price_gems']}",
+            value=pid, description=pt["desc"][:100]
+        ))
+
+    if not options:
+        embed = discord.Embed(
+            title="🛒 Магазин питомцев",
+            description="Ты уже купил всех питомцев! 🎉\nСмени активного в меню «Питомцы».",
+            color=0x9b59b6
+        )
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+        async def _back(i: discord.Interaction):
+            await i.response.defer()
+            embed2 = await build_pets_embed(i)
+            await i.edit_original_response(embed=embed2, view=PetsView(author_id))
+        back.callback = _back
+        view = discord.ui.View()
+        view.add_item(back)
+        await interaction.edit_original_response(embed=embed, view=view)
+        return
+
+    embed = discord.Embed(
+        title="🛒 Магазин питомцев",
+        description=f"У тебя 💎 {gems}. Выбери питомца:",
+        color=0x9b59b6
+    )
+    await interaction.edit_original_response(embed=embed, view=PetsShopView(author_id, options))
+
+
+class PetsShopView(discord.ui.View):
+    def __init__(self, author_id: int, options: list):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.add_item(make_select("Выбери питомца", options, self.select, row=0))
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back; self.add_item(back)
+
+    async def interaction_check(self, interaction):
+        return interaction.user.id == self.author_id
+
+    async def select(self, interaction: discord.Interaction):
+        pet_id = interaction.data["values"][0]
+        await interaction.response.defer()
+        ptype = PET_TYPES.get(pet_id)
+        if not ptype:
+            await interaction.followup.send("❌ Питомец не найден.", ephemeral=True)
+            return
+
+        async with bot.db.execute("SELECT 1 FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?", (self.author_id, pet_id)) as c:
+            if await c.fetchone():
+                await interaction.followup.send("❌ Этот питомец уже есть.", ephemeral=True)
+                return
+
+        async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (self.author_id,)) as c:
+            gems = (await c.fetchone())[0]
+        if gems < ptype["price_gems"]:
+            await interaction.followup.send(f"❌ Нужно 💎 {ptype['price_gems']}, у тебя {gems}.", ephemeral=True)
+            return
+
+        await bot.db.execute(
+            "UPDATE players SET gems = gems - ? WHERE user_id = ?", (ptype["price_gems"], self.author_id)
+        )
+        await bot.db.execute(
+            "INSERT INTO user_pets_v2 (user_id, pet_id, level, last_fed) VALUES (?, ?, 1, NULL)",
+            (self.author_id, pet_id)
+        )
+        # если активного нет — сделать активным
+        async with bot.db.execute("SELECT active_pet FROM players WHERE user_id = ?", (self.author_id,)) as c:
+            active = (await c.fetchone())[0]
+        if not active:
+            await bot.db.execute("UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, self.author_id))
+        await bot.db.commit()
+        await interaction.followup.send(
+            f"✅ Куплен {ptype['emoji']} **{ptype['name']}** за 💎 {ptype['price_gems']}!", ephemeral=True
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_pets_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
 
 
 # ============================================================
@@ -2920,7 +3303,8 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
             async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (target,)) as c:
                 victim_coins = (await c.fetchone())[0]
             
-            loot = int(victim_coins * 0.15)
+            pet_loot = await get_pet_bonus(self.author_id, "raid_loot")
+            loot = int(victim_coins * (0.15 + pet_loot))
             if loot > 0:
                 await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (loot, target))
                 await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id = ?", (loot, self.author_id))
@@ -4586,7 +4970,8 @@ class CraftConfirmView(discord.ui.View):
             await bot.db.execute("UPDATE players SET catalysts = catalysts - 1 WHERE user_id = ?", (user_id,))
             catalyst_used = 1
 
-        final_chance = min(1.0, base_chance + (CATALYST_BONUS if use_cat else 0))
+        pet_chance = await get_pet_bonus(user_id, "craft_chance")
+        final_chance = min(1.0, base_chance + (CATALYST_BONUS if use_cat else 0) + pet_chance)
         success = random.random() < final_chance
 
         await bot.db.execute(
@@ -5494,6 +5879,12 @@ class UserProfileView(BaseView):
             color=0x9b59b6
         )
         await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
+
+    @discord.ui.button(label="Питомцы", emoji="🐾", style=discord.ButtonStyle.primary, row=1)
+    async def btn_pets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_pets_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
 
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
