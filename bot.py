@@ -401,22 +401,16 @@ class CastleBot(commands.Bot):
                 "4": "<:basic_gen4:1566161044546650183>",
                 "5": "<:basic_gen5:1566161045842821221>",
             },
-            "cooper_gen": {
-                "0": "<:cooper_gen:1566139443939647620>",
-                "1": "<:cooper_gen1:1566161721855447221>",
-                "2": "<:cooper_gen2:1566161723340357803>",
-                "3": "<:cooper_gen3:1566161724942581770>",
-                "4": "<:cooper_gen4:1566161726448205855>",
-                "5": "<:cooper_gen5:1566161728025141430>",
+            "copper_gen": {
+                "0": "<:copper_gen:1566139443939647620>",
+                "1": "<:copper_gen1:1566161721855447221>",
+                "2": "<:copper_gen2:1566161723340357803>",
+                "3": "<:copper_gen3:1566161724942581770>",
+                "4": "<:copper_gen4:1566161726448205855>",
+                "5": "<:copper_gen5:1566161728025141430>",
             },
             # ... для остальных 29 генераторов ...
         }
-        for item_id, emoji_map in star_emojis.items():
-            await self.db.execute(
-                "UPDATE items SET emoji_by_star = ? WHERE id = ?",
-                (json.dumps(emoji_map, ensure_ascii=False), item_id)
-            )
-        await self.db.commit()
 
         GEM_INCOME = {
             "space_gen":     0.02,
@@ -457,6 +451,13 @@ class CastleBot(commands.Bot):
                 item
             )
 
+        for item_id, emoji_map in star_emojis.items():
+            await self.db.execute(
+                "UPDATE items SET emoji_by_star = ? WHERE id = ?",
+                (json.dumps(emoji_map, ensure_ascii=False), item_id)
+            )
+        await self.db.commit()
+
         achievements_data = [
             ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  "⚗️"),
             ("star_1", "Первая звезда", "Улучши любой генератор до 1★", 10, "⭐"),
@@ -483,8 +484,8 @@ class CastleBot(commands.Bot):
             ("grid_9x9",   "Сетка 9×9",   "Увеличивает замок до 81 слота",   400,  "📐", "upgrade", 1),
             ("grid_10x10", "Сетка 10×10", "Увеличивает замок до 100 слотов",1000,  "📐", "upgrade", 1),
             ("vip",        "VIP",         "+15% к доходу навсегда",             100,  "⭐", "status", 1),
-            ("gold",       "Gold",        "+35% к доходу навсегда",             300,  "🥇", "status", 1),
-            ("platinum",   "Platinum",    "+25% к доходу навсегда",             700,  "💠", "status", 1),
+            ("gold",       "Gold",        "+25% к доходу навсегда",             300,  "🥇", "status", 1),
+            ("platinum",   "Platinum",    "+35% к доходу навсегда",             700,  "💠", "status", 1),
             ("diamond",    "Diamond",     "+45% к доходу навсегда",            1500,  "💎", "status", 1),
         ]
         for g in gem_items:
