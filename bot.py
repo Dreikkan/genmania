@@ -3288,13 +3288,11 @@ class AutocollectorView(BaseView):
 class NotificationsView(BaseView):
     def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(author_id, timeout)
-        # 5 кнопок-переключателей + «Назад»
         for ntype, (name, _desc) in NOTIFICATION_TYPES.items():
             btn = discord.ui.Button(
                 label=name[:80],
                 style=discord.ButtonStyle.secondary,
                 row=0 if ntype in ("pet_hungry", "daily_ready") else 1,
-                custom_id=f"notif_{ntype}"
             )
             btn.callback = self._make_toggle(ntype)
             self.add_item(btn)
@@ -3311,10 +3309,12 @@ class NotificationsView(BaseView):
             new_enabled = not current_enabled
             await set_notification(self.author_id, ntype, bool(new_enabled))
             embed = await build_notifications_embed(interaction)
-            await interaction.edit_original_response(embed=embed, view=NotificationsView(self.author_id))
+            await interaction.edit_original_response(
+                embed=embed, view=NotificationsView(self.author_id)
+            )
         return toggle
 
-       async def btn_back(self, interaction: discord.Interaction):
+    async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = discord.Embed(
             title="⚙️ Личные настройки",
