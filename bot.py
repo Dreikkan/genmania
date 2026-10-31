@@ -2222,6 +2222,24 @@ class MainMenuView(BaseView):
         embed = await build_quests_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=QuestsView(self.author_id))
 
+    @discord.ui.button(label="Квесты", emoji="📋", style=discord.ButtonStyle.primary, row=4)
+    async def tab_quests_hub(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="📋 Квесты",
+            description="Выбери раздел: сюжетные квесты или ежедневные задания.",
+            color=0x3498db
+        )
+        await interaction.edit_original_response(embed=embed, view=QuestsHubView(self.author_id))
+
+    @discord.ui.button(label="Ежедневная награда", emoji="📅", style=discord.ButtonStyle.success, row=4)
+    async def tab_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_daily_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=DailyView(self.author_id, return_to="main")
+        )
+
     @discord.ui.button(label="Статистика", emoji="📊", style=discord.ButtonStyle.secondary, row=1)
     async def tab_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await is_command_disabled(interaction.guild_id, "stats"):
@@ -2264,6 +2282,29 @@ class MainMenuView(BaseView):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+class QuestsHubView(BaseView):
+    @discord.ui.button(label="Сюжетные", emoji="📜", style=discord.ButtonStyle.primary, row=0)
+    async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_story_quests_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=StoryQuestsView(self.author_id, return_to="quests")
+        )
+
+    @discord.ui.button(label="Ежедневные задания", emoji="📅", style=discord.ButtonStyle.success, row=0)
+    async def btn_daily_tasks(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_quests_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=QuestsView(self.author_id, return_to="quests")
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
 class SocialView(BaseView):
     @discord.ui.button(label="Рейд", emoji="🏰", style=discord.ButtonStyle.primary)
@@ -4896,7 +4937,11 @@ class AuctionBidModal(discord.ui.Modal, title="Сделать ставку"):
 #  📅 ЗАДАНИЯ
 # ============================================================
 
-class QuestsView(BackOnlyView):
+class QuestsView(BaseView):
+    def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
+        super().__init__(author_id, timeout)
+        self.return_to = return_to
+
     @discord.ui.button(label="Забрать награду", emoji="🎁", style=discord.ButtonStyle.success, row=1)
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -4914,7 +4959,22 @@ class QuestsView(BackOnlyView):
             await interaction.followup.send("❌ Нет доступных заданий.", ephemeral=True)
             return
         embed = discord.Embed(title="🎁 Забрать награду", description="Выбери задание:", color=0x3498db)
-        await interaction.edit_original_response(embed=embed, view=ClaimQuestSelectView(self.author_id, options))
+        await interaction.edit_original_response(
+            embed=embed, view=ClaimQuestSelectView(self.author_id, options)
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.return_to == "quests":
+            embed = discord.Embed(
+                title="📋 Квесты",
+                description="Выбери раздел: сюжетные квесты или ежедневные задания.",
+                color=0x3498db
+            )
+            await interaction.edit_original_response(embed=embed, view=QuestsHubView(self.author_id))
+        else:
+            await self.back_to_main(interaction)
 
 
 class ClaimQuestSelectView(discord.ui.View):
@@ -5458,23 +5518,13 @@ class CustomizationHubView(BaseView):
         await interaction.response.defer()
         await open_titles_view(interaction, self.author_id, 0, return_to="hub")
 
-    @discord.ui.button(label="Ежедневный вход", emoji="📅", style=discord.ButtonStyle.success, row=0)
-    async def btn_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_daily_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, return_to="hub"))
-
     @discord.ui.button(label="Косметика", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
     async def btn_cosmetics(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_cosmetics_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=CosmeticsView(self.author_id, return_to="hub"))
-
-    @discord.ui.button(label="Сюжетные квесты", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_story_quests_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=StoryQuestsView(self.author_id, return_to="hub"))
+        await interaction.edit_original_response(
+            embed=embed, view=CosmeticsView(self.author_id, return_to="hub")
+        )
 
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
