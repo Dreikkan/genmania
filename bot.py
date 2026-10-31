@@ -681,18 +681,21 @@ class CastleBot(commands.Bot):
         """)
 
         # Добавляем эксклюзивные генераторы для 30-го дня (если их нет)
+        
         daily_gens = [
-            ("daily_common", "Ежедневный лист", "🍃", "common", 0),
-            ("daily_uncommon", "Ежедневный камень", "🪨", "uncommon", 0),
-            ("daily_rare", "Ежедневный кристалл", "💠", "rare", 0),
-            ("daily_epic", "Ежедневная сфера", "🔮", "epic", 0),
+            ("daily_common",    "Ежедневный лист",   "🍃", "common",    0),
+            ("daily_uncommon",  "Ежедневный камень", "🪨", "uncommon",  0),
+            ("daily_rare",      "Ежедневный кристалл","💠", "rare",      0),
+            ("daily_epic",      "Ежедневная сфера",  "🔮", "epic",      0),
             ("daily_legendary", "Ежедневная корона", "👑", "legendary", 0),
-            ("daily_mythic", "Ежедневный феникс", "🔥", "mythic", 0),
+            ("daily_mythic",    "Ежедневный феникс", "🔥", "mythic",    0),
         ]
-        for g in daily_gens:
+        for item_id, name, emoji, rarity, price in daily_gens:
             await self.db.execute(
-                "INSERT OR IGNORE INTO items (id, name, emoji, rarity, price, buyable, income_per_hour) "
-                "VALUES (?, ?, ?, ?, 0, 0, 1.5)", g
+                "INSERT OR IGNORE INTO items "
+                "(id, name, emoji, rarity, price, buyable, income_per_hour) "
+                "VALUES (?, ?, ?, ?, ?, 0, 1.5)",
+                (item_id, name, emoji, rarity, price)
             )
 
         # --- КЛАНЫ ---
