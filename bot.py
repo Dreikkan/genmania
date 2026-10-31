@@ -566,6 +566,18 @@ class CastleBot(commands.Bot):
                 user_id INTEGER PRIMARY KEY, amount INTEGER, interest_rate REAL, end_time TIMESTAMP
             )
         """)
+
+                # Миграция для bank_deposits
+        for column, definition in [
+            ("start_time", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("end_time", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("interest_rate", "REAL DEFAULT 0.05"),
+        ]:
+            try:
+                await self.db.execute(f"ALTER TABLE bank_deposits ADD COLUMN {column} {definition}")
+            except Exception:
+                pass
+                
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS market_listings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, item_id TEXT, stars INTEGER, price INTEGER, expires_at TIMESTAMP
