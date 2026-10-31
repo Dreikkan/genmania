@@ -219,6 +219,36 @@ class CastleBot(commands.Bot):
                 income_gems_per_hour REAL DEFAULT 0
             )
         """)
+        try:
+            await self.db.execute("ALTER TABLE items ADD COLUMN emoji_by_star TEXT DEFAULT '{}'")
+        except Exception:
+            pass
+
+                # Пример для basic_gen (замени ID на свои)
+        star_emojis = {
+            "basic_gen": {
+                "0": "<:basic_gen:1565443870773215404>",
+                "1": "<:basic_gen1:1566161008270114816>",
+                "2": "<:basic_gen2:1566161041824555129>",
+                "3": "<:basic_gen3:1566161043191758878>",
+                "4": "<:basic_gen4:1566161044546650183>",
+                "5": "<:basic_gen5:1566161045842821221>",
+            },
+            "cooper_gen": {
+                "0": "<:cooper_gen:1566139443939647620>",
+                "1": "<:cooper_gen1:1566161721855447221>",
+                "2": "<:cooper_gen2:1566161723340357803>",
+                "3": "<:cooper_gen3:1566161724942581770>",
+                "4": "<:cooper_gen4:1566161726448205855>",
+                "5": "<:cooper_gen5:1566161728025141430>",
+            # ... для остальных 29 генераторов ...
+        }
+        for item_id, emoji_map in star_emojis.items():
+            await self.db.execute(
+                "UPDATE items SET emoji_by_star = ? WHERE id = ?",
+                (json.dumps(emoji_map, ensure_ascii=False), item_id)
+            )
+        await self.db.commit()
 
         for column, definition in [
             ("catalysts", "INTEGER DEFAULT 0"),
@@ -692,6 +722,22 @@ async def get_settings(guild_id: int) -> dict:
         "admin_role_id": row[10],
     }
 
+async def get_star_emoji(item_id: str, stars: int, default_emoji: str) -> str:
+    """Возвращает эмодзи для генератора с учётом звёздности.
+    Если в БД настроен emoji_by_star, берём оттуда. Иначе — default + звёзды."""
+    async with bot.db.execute("SELECT emoji_by_star FROM items WHERE id = ?", (item_id,)) as c:
+        row = await c.fetchone()
+    if row and row[0]:
+        try:
+            emoji_map = json.loads(row[0])
+            if str(stars) in emoji_map and emoji_map[str(stars)]:
+                return emoji_map[str(stars)]
+        except Exception:
+            pass
+    # Fallback: базовый эмодзи + звёзды
+    if stars > 0:
+        return f"{default_emoji}({stars}⭐)"
+    return default_emoji
 
 async def save_setting(guild_id: int, key: str, value):
     if isinstance(value, (dict, list)):
@@ -1238,11 +1284,8 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     items = {}
     for slot, item_id, default_emoji, stars in rows:
         emoji = custom.get(item_id, default_emoji)
-        # Убираем format_slot, оставляем чистый эмодзи и звезды
-        if stars > 0:
-            items[slot] = f"{emoji}({stars}⭐)"
-        else:
-            items[slot] = emoji
+        emoji = await get_star_emoji(item_id, stars, emoji)
+        items[slot] = emoji
 
     coin = custom.get("_coin", "🪙")
     gem = custom.get("_gem", "💎")
@@ -1295,10 +1338,8 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     items = {}
     for slot, item_id, default_emoji, stars in rows:
         emoji = custom.get(item_id, default_emoji)
-        if stars > 0:
-            items[slot] = f"{emoji}({stars}⭐)"
-        else:
-            items[slot] = emoji
+        emoji = await get_star_emoji(item_id, stars, emoji)
+        items[slot] = emoji
 
     storage_emoji = custom.get("_storage", "🎒")
     width = int(grid_size ** 0.5)
@@ -1729,10 +1770,8 @@ async def build_clan_inventory_embed(interaction: discord.Interaction, clan_id: 
 
     items = {}
     for slot, item_id, default_emoji, stars in rows:
-        if stars > 0:
-            items[slot] = f"{default_emoji}({stars}⭐)"
-        else:
-            items[slot] = default_emoji
+        emoji = await get_star_emoji(item_id, stars, default_emoji)
+        items[slot] = emoji
 
     width = 6  # Сетка клана — 6x6
     embed = discord.Embed(title=f"🏗️ Клановая сетка", color=0x9b59b6)
@@ -5460,6 +5499,11 @@ class SettingsEmojisView(discord.ui.View):
         back.callback = self.back
         self.add_item(back)
 
+        # Новая кнопка для эмодзи по звёздам
+        stars = discord.ui.Button(label="Эмодзи по звёздам", emoji="⭐", style=discord.ButtonStyle.primary, row=1)
+        stars.callback = self.star_emoji_select
+        self.add_item(stars)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
@@ -5470,11 +5514,87 @@ class SettingsEmojisView(discord.ui.View):
         key = interaction.data["values"][0]
         await interaction.response.send_modal(EditEmojiModal(self.author_id, key))
 
+    async def star_emoji_select(self, interaction: discord.Interaction):
+        # Показываем Select с выбором генератора
+        await interaction.response.defer()
+        async with bot.db.execute("SELECT id, name FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
+            items = await c.fetchall()
+
+        options = [discord.SelectOption(label=name, value=item_id) for item_id, name in items]
+        embed = discord.Embed(
+            title="⭐ Эмодзи по звёздам",
+            description="Выбери генератор, для которого настроить эмодзи 0★–5★.",
+            color=0xf1c40f
+        )
+        view = StarEmojiSelectView(self.author_id, options)
+        await interaction.edit_original_response(embed=embed, view=view)
+
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = discord.Embed(title="🔧 Настройки сервера", color=0x808080)
         await interaction.edit_original_response(embed=embed, view=SettingsView(self.author_id))
 
+class StarEmojiSelectView(discord.ui.View):
+    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.add_item(make_select("Выбери генератор", options, self.item_select, row=0))
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    async def item_select(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        await interaction.response.send_modal(StarEmojiModal(self.author_id, item_id))
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(title="🎨 Кастомные эмодзи", color=0x9b59b6)
+        await interaction.edit_original_response(embed=embed, view=SettingsEmojisView(self.author_id))
+
+
+class StarEmojiModal(discord.ui.Modal, title="Эмодзи по звёздам"):
+    e0 = discord.ui.TextInput(label="0★", required=False, placeholder="<:basic_0:123>")
+    e1 = discord.ui.TextInput(label="1★", required=False, placeholder="<:basic_1:123>")
+    e2 = discord.ui.TextInput(label="2★", required=False, placeholder="<:basic_2:123>")
+    e3 = discord.ui.TextInput(label="3★", required=False, placeholder="<:basic_3:123>")
+    e4 = discord.ui.TextInput(label="4★", required=False, placeholder="<:basic_4:123>")
+    e5 = discord.ui.TextInput(label="5★", required=False, placeholder="<:basic_5:123>")
+
+    def __init__(self, author_id: int, item_id: str):
+        super().__init__()
+        self.author_id = author_id
+        self.item_id = item_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        async with bot.db.execute("SELECT name FROM items WHERE id = ?", (self.item_id,)) as c:
+            row = await c.fetchone()
+        if not row:
+            return await interaction.followup.send("❌ Генератор не найден.", ephemeral=True)
+
+        emojis = {}
+        for star, field in enumerate([self.e0, self.e1, self.e2, self.e3, self.e4, self.e5]):
+            val = field.value.strip() if field.value else ""
+            if val:
+                emojis[str(star)] = val
+
+        await bot.db.execute(
+            "UPDATE items SET emoji_by_star = ? WHERE id = ?",
+            (json.dumps(emojis, ensure_ascii=False), self.item_id)
+        )
+        await bot.db.commit()
+
+        count = len(emojis)
+        await interaction.followup.send(
+            f"✅ Для **{row[0]}** сохранено {count} эмодзи: "
+            f"{', '.join(f'{k}★' for k in emojis.keys())}.",
+            ephemeral=True
+        )
 
 class EditEmojiModal(discord.ui.Modal, title="Изменить эмодзи"):
     emoji = discord.ui.TextInput(label="Новый эмодзи", required=True)
