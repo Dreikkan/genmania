@@ -2803,37 +2803,6 @@ async def build_autocollector_embed(interaction: discord.Interaction) -> discord
 
     return embed
 
-
-class AutocollectorView(BaseView):
-    @discord.ui.button(label="Купить", emoji="🛒", style=discord.ButtonStyle.success, row=0)
-    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        ok, msg = await buy_autocollector(self.author_id)
-        if not ok:
-            await interaction.followup.send(msg, ephemeral=True)
-            return
-        embed = await build_autocollector_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
-
-    @discord.ui.button(label="Улучшить", emoji="⬆️", style=discord.ButtonStyle.primary, row=0)
-    async def btn_upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        ok, msg = await upgrade_autocollector(self.author_id)
-        if not ok:
-            await interaction.followup.send(msg, ephemeral=True)
-            return
-        embed = await build_autocollector_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
-
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_user_profile_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
-
-
-
-
 # ============================================================
 #  🎛️ БАЗОВЫЙ VIEW
 # ============================================================
@@ -3009,6 +2978,33 @@ class QuestsHubView(BaseView):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+class AutocollectorView(BaseView):
+    @discord.ui.button(label="Купить", emoji="🛒", style=discord.ButtonStyle.success, row=0)
+    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, msg = await buy_autocollector(self.author_id)
+        if not ok:
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+        embed = await build_autocollector_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
+
+    @discord.ui.button(label="Улучшить", emoji="⬆️", style=discord.ButtonStyle.primary, row=0)
+    async def btn_upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, msg = await upgrade_autocollector(self.author_id)
+        if not ok:
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+        embed = await build_autocollector_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
 class SocialView(BaseView):
     @discord.ui.button(label="Рейд", emoji="🏰", style=discord.ButtonStyle.primary)
