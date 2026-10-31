@@ -348,6 +348,20 @@ AUTOCOLLECT_LEVELS = {
 }
 
 # ============================================================
+#  📬 УВЕДОМЛЕНИЯ В ЛС
+# ============================================================
+
+NOTIFICATION_TYPES = {
+    "pet_hungry":   ("🐾 Питомец голоден", "Когда питомца можно покормить"),
+    "daily_ready":  ("📅 Дейли доступен", "Когда можно забрать ежедневную награду"),
+    "auction_soon": ("🏛️ Аукцион скоро закончится", "За 1 час до конца лота, где ты участник/продавец"),
+    "autocollect":  ("🤖 Автосборщик собрал доход", "Раз в сутки, если автосборщик активен"),
+    "clan_war":     ("⚔️ Клановая война", "Когда твой клан начинает или заканчивает войну"),
+}
+
+NOTIFICATION_COOLDOWN_HOURS = 24   # не чаще 1 раза в сутки на каждый тип
+
+# ============================================================
 #  🤖 БОТ
 # ============================================================
 
@@ -380,7 +394,8 @@ class CastleBot(commands.Bot):
         asyncio.create_task(self.auction_closer())
         asyncio.create_task(self.market_updater())
         asyncio.create_task(self.tax_collector())
-        asyncio.create_task(self.autocollector_task())   # ← добавь
+        asyncio.create_task(self.autocollector_task())
+        asyncio.create_task(self.notification_task())
       
 
     async def init_db(self):
@@ -1028,6 +1043,17 @@ class CastleBot(commands.Bot):
             )
         """)
 
+            # --- уведомления ---
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS user_notifications (
+                user_id INTEGER,
+                notif_type TEXT,
+                enabled INTEGER DEFAULT 1,
+                last_sent TIMESTAMP DEFAULT NULL,
+                PRIMARY KEY (user_id, notif_type)
+            )
+        """)
+
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 
     async def auction_closer(self):
@@ -1184,6 +1210,152 @@ class CastleBot(commands.Bot):
             except Exception as e:
                 print(f"[AUTOCOLLECTOR] Ошибка: {e}")
                 await asyncio.sleep(60)
+
+    async def notification_task(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(3600)  # раз в час
+                now = datetime.datetime.now()
+
+                # ============ 1. ПИТОМЕЦ ГОЛОДЕН ============
+                async with self.db.execute("""
+                    SELECT up.user_id, up.pet_id, up.last_fed, up.level
+                    FROM user_pets_v2 up
+                    JOIN players p ON p.user_id = up.user_id
+                    WHERE p.active_pet = up.pet_id
+                """) as c:
+                    active_pets = await c.fetchall()
+
+                for uid, pet_id, last_fed, level in active_pets:
+                    if level >= PET_MAX_LEVEL:
+                        continue
+                    if not last_fed:
+                        continue
+                    last = datetime.datetime.fromisoformat(last_fed)
+                    if (now - last).total_seconds() < PET_FEED_COOLDOWN_HOURS * 3600:
+                        continue
+                    if not await can_send_notification(uid, "pet_hungry"):
+                        continue
+
+                    ptype = PET_TYPES.get(pet_id, {})
+                    embed = discord.Embed(
+                        title="🐾 Питомец голоден",
+                        description=(
+                            f"{ptype.get('emoji', '🐾')} **{ptype.get('name', pet_id)}** (ур. {level}) "
+                            f"хочет есть!\nПокорми его в меню «Питомцы»."
+                        ),
+                        color=0x9b59b6
+                    )
+                    await send_dm_notification(uid, "pet_hungry", "", embed)
+
+                # ============ 2. ДЕЙЛИ ДОСТУПЕН ============
+                async with self.db.execute("""
+                    SELECT user_id, last_daily, streak_days FROM players
+                """) as c:
+                    players = await c.fetchall()
+
+                for uid, last_daily, streak in players:
+                    if last_daily:
+                        last = datetime.datetime.fromisoformat(last_daily).date()
+                        if (now.date() - last).days < 1:
+                            continue
+                    if not await can_send_notification(uid, "daily_ready"):
+                        continue
+
+                    embed = discord.Embed(
+                        title="📅 Ежедневная награда доступна",
+                        description=f"Забери награду за день! Твой стрик: **{streak or 0}**.",
+                        color=0x3498db
+                    )
+                    await send_dm_notification(uid, "daily_ready", "", embed)
+
+                # ============ 3. АУКЦИОН СКОРО ЗАКОНЧИТСЯ ============
+                async with self.db.execute("""
+                    SELECT id, seller_id, item_id, current_bidder, current_bid, end_time
+                    FROM auctions WHERE status = 'active'
+                """) as c:
+                    lots = await c.fetchall()
+
+                for aid, seller_id, item_id, bidder, bid, end_time in lots:
+                    end = datetime.datetime.fromisoformat(end_time)
+                    seconds_left = (end - now).total_seconds()
+                    if not (0 < seconds_left <= 3600):
+                        continue
+
+                    async with self.db.execute("SELECT name FROM items WHERE id = ?", (item_id,)) as c:
+                        item_row = await c.fetchone()
+                    item_name = item_row[0] if item_row else item_id
+
+                    targets = set()
+                    if seller_id:
+                        targets.add(seller_id)
+                    if bidder:
+                        targets.add(bidder)
+
+                    for uid in targets:
+                        if not await can_send_notification(uid, "auction_soon"):
+                            continue
+                        role = "продавец" if uid == seller_id else "лидер ставки"
+                        embed = discord.Embed(
+                            title="🏛️ Аукцион скоро закончится",
+                            description=(
+                                f"Лот #{aid}: **{item_name}**\n"
+                                f"Текущая ставка: 🪙 {bid}\n"
+                                f"До конца: **{int(seconds_left // 60)} мин**\n"
+                                f"Ты {role}."
+                            ),
+                            color=0xf1c40f
+                        )
+                        await send_dm_notification(uid, "auction_soon", "", embed)
+
+                # ============ 4. АВТОСБОРЩИК СОБРАЛ ДОХОД (раз в сутки) ============
+                async with self.db.execute("""
+                    SELECT user_id, level, last_auto FROM autocollectors
+                """) as c:
+                    autocols = await c.fetchall()
+
+                for uid, level, last_auto in autocols:
+                    if not await can_send_notification(uid, "autocollect"):
+                        continue
+                    embed = discord.Embed(
+                        title="🤖 Автосборщик работает",
+                        description=(
+                            f"Твой автосборщик (ур. {level}) собирает доход "
+                            f"раз в {AUTOCOLLECT_LEVELS.get(level, (0, 4))[1]} ч.\n"
+                            f"Последний сбор: `{last_auto or '—'}`."
+                        ),
+                        color=0x2ecc71
+                    )
+                    await send_dm_notification(uid, "autocollect", "", embed)
+
+                # ============ 5. КЛАНОВАЯ ВОЙНА ============
+                async with self.db.execute("""
+                    SELECT id, clan1_id, clan2_id FROM clan_wars WHERE status = 'active'
+                """) as c:
+                    wars = await c.fetchall()
+
+                for war_id, c1, c2 in wars:
+                    async with self.db.execute("""
+                        SELECT cm.user_id, cl.name FROM clan_members cm
+                        JOIN clans cl ON cl.id = cm.clan_id
+                        WHERE cm.clan_id IN (?, ?)
+                    """, (c1, c2)) as c:
+                        members = await c.fetchall()
+
+                    for uid, clan_name in members:
+                        if not await can_send_notification(uid, "clan_war"):
+                            continue
+                        embed = discord.Embed(
+                            title="⚔️ Клановая война",
+                            description=f"Твой клан **{clan_name}** участвует в войне #{war_id}.",
+                            color=0xe74c3c
+                        )
+                        await send_dm_notification(uid, "clan_war", "", embed)
+
+            except Exception as e:
+                print(f"[NOTIFICATION_TASK] Ошибка: {e}")
+                await asyncio.sleep(600)
 
 
 
@@ -1940,6 +2112,88 @@ async def get_autocollector(user_id: int):
         "SELECT level, last_auto FROM autocollectors WHERE user_id = ?", (user_id,)
     ) as c:
         return await c.fetchone()
+
+async def get_notifications(user_id: int) -> dict:
+    """Возвращает {notif_type: (enabled, last_sent)} для всех типов. Если записи нет — enabled=True по умолчанию."""
+    async with bot.db.execute(
+        "SELECT notif_type, enabled, last_sent FROM user_notifications WHERE user_id = ?", (user_id,)
+    ) as c:
+        rows = await c.fetchall()
+
+    result = {t: (1, None) for t in NOTIFICATION_TYPES}  # по умолчанию включено
+    for ntype, enabled, last_sent in rows:
+        result[ntype] = (enabled, last_sent)
+    return result
+
+
+async def set_notification(user_id: int, notif_type: str, enabled: bool):
+    """Включает/выключает уведомление. Создаёт запись, если её нет."""
+    if notif_type not in NOTIFICATION_TYPES:
+        return
+    await bot.db.execute("""
+        INSERT INTO user_notifications (user_id, notif_type, enabled)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, notif_type) DO UPDATE SET enabled = ?
+    """, (user_id, notif_type, int(enabled), int(enabled)))
+    await bot.db.commit()
+
+
+async def can_send_notification(user_id: int, notif_type: str) -> bool:
+    """Проверяет, включено ли уведомление и прошёл ли кулдаун."""
+    async with bot.db.execute(
+        "SELECT enabled, last_sent FROM user_notifications WHERE user_id = ? AND notif_type = ?",
+        (user_id, notif_type)
+    ) as c:
+        row = await c.fetchone()
+
+    if not row:
+        return True  # по умолчанию включено, ещё не слали
+
+    enabled, last_sent = row
+    if not enabled:
+        return False
+
+    if last_sent:
+        last = datetime.datetime.fromisoformat(last_sent)
+        if (datetime.datetime.now() - last).total_seconds() < NOTIFICATION_COOLDOWN_HOURS * 3600:
+            return False
+    return True
+
+
+async def mark_notification_sent(user_id: int, notif_type: str):
+    """Отмечает, что уведомление отправлено (обновляет last_sent)."""
+    now_iso = datetime.datetime.now().isoformat()
+    await bot.db.execute("""
+        INSERT INTO user_notifications (user_id, notif_type, enabled, last_sent)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(user_id, notif_type) DO UPDATE SET last_sent = ?
+    """, (user_id, notif_type, now_iso, now_iso))
+    await bot.db.commit()
+
+
+async def send_dm_notification(user_id: int, notif_type: str, text: str, embed: discord.Embed = None) -> bool:
+    """Пытается отправить ЛС. Возвращает True при успехе, False при Forbidden/NotFound."""
+    try:
+        user = bot.get_user(user_id)
+        if user is None:
+            user = await bot.fetch_user(user_id)
+        if user is None:
+            return False
+
+        if embed:
+            await user.send(embed=embed)
+        else:
+            await user.send(text)
+        await mark_notification_sent(user_id, notif_type)
+        return True
+    except discord.Forbidden:
+        # ЛС закрыты — отключаем тип, чтобы не спамить
+        await set_notification(user_id, notif_type, False)
+        return False
+    except discord.NotFound:
+        return False
+    except discord.HTTPException:
+        return False
 
 
 async def buy_autocollector(user_id: int) -> tuple[bool, str]:
@@ -2803,6 +3057,31 @@ async def build_autocollector_embed(interaction: discord.Interaction) -> discord
 
     return embed
 
+async def build_notifications_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    notifs = await get_notifications(user_id)
+
+    embed = discord.Embed(
+        title="📬 Уведомления в ЛС",
+        description=(
+            "Выбери, какие уведомления хочешь получать в личные сообщения.\n"
+            f"Кулдаун: не чаще 1 раза в {NOTIFICATION_COOLDOWN_HOURS} ч на каждый тип.\n"
+            "⚠️ Если у тебя закрыты ЛС, бот не сможет писать — открой их в настройках Discord."
+        ),
+        color=0x3498db
+    )
+
+    for ntype, (name, desc) in NOTIFICATION_TYPES.items():
+        enabled, last_sent = notifs.get(ntype, (1, None))
+        status = "✅ Вкл" if enabled else "❌ Выкл"
+        last_str = f"\nПоследнее: `{last_sent}`" if last_sent else ""
+        embed.add_field(
+            name=f"{name} — {status}",
+            value=f"{desc}{last_str}",
+            inline=False
+        )
+    return embed
+
 # ============================================================
 #  🎛️ БАЗОВЫЙ VIEW
 # ============================================================
@@ -3005,6 +3284,46 @@ class AutocollectorView(BaseView):
         await interaction.response.defer()
         embed = await build_user_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
+
+class NotificationsView(BaseView):
+    def __init__(self, author_id: int, timeout: int = 600):
+        super().__init__(author_id, timeout)
+        # 5 кнопок-переключателей + «Назад»
+        for ntype, (name, _desc) in NOTIFICATION_TYPES.items():
+            btn = discord.ui.Button(
+                label=name[:80],
+                style=discord.ButtonStyle.secondary,
+                row=0 if ntype in ("pet_hungry", "daily_ready") else 1,
+                custom_id=f"notif_{ntype}"
+            )
+            btn.callback = self._make_toggle(ntype)
+            self.add_item(btn)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
+        back.callback = self.btn_back
+        self.add_item(back)
+
+    def _make_toggle(self, ntype: str):
+        async def toggle(interaction: discord.Interaction):
+            await interaction.response.defer()
+            notifs = await get_notifications(self.author_id)
+            current_enabled = notifs.get(ntype, (1, None))[0]
+            new_enabled = not current_enabled
+            await set_notification(self.author_id, ntype, bool(new_enabled))
+            embed = await build_notifications_embed(interaction)
+            await interaction.edit_original_response(embed=embed, view=NotificationsView(self.author_id))
+        return toggle
+
+       async def btn_back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="⚙️ Личные настройки",
+            description="Здесь ты можешь управлять своим профилем.",
+            color=0x808080
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=UserSettingsView(self.author_id)
+        )
 
 class SocialView(BaseView):
     @discord.ui.button(label="Рейд", emoji="🏰", style=discord.ButtonStyle.primary)
@@ -6504,30 +6823,39 @@ class UserSettingsView(BaseView):
 
     @discord.ui.button(label="Сменить цвет", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
     async def btn_color(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Просто отправляем модалку с вводом HEX-кода
         await interaction.response.send_modal(UserColorModal(self.author_id))
 
     @discord.ui.button(label="Экспорт данных", emoji="📤", style=discord.ButtonStyle.success, row=1)
     async def btn_export(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        
         async with bot.db.execute("""
             SELECT inv.slot, i.name, inv.stars, inv.location 
             FROM inventory inv JOIN items i ON inv.item_id = i.id 
             WHERE inv.user_id = ?
         """, (interaction.user.id,)) as c:
             inv_rows = await c.fetchall()
-            
+
         data = {
             "user_id": interaction.user.id,
             "inventory": [{"slot": r[0], "name": r[1], "stars": r[2], "loc": r[3]} for r in inv_rows]
         }
-        
+
         import io
-        file = discord.File(io.BytesIO(json.dumps(data, ensure_ascii=False, indent=4).encode()), filename="my_profile.json")
+        file = discord.File(
+            io.BytesIO(json.dumps(data, ensure_ascii=False, indent=4).encode()),
+            filename="my_profile.json"
+        )
         await interaction.followup.send("Вот твои данные:", file=file, ephemeral=True)
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Уведомления", emoji="📬", style=discord.ButtonStyle.primary, row=1)
+    async def btn_notifications(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_notifications_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=NotificationsView(self.author_id)
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_user_profile_embed(interaction)
@@ -6695,6 +7023,24 @@ async def debug_emoji(interaction: discord.Interaction, item_id: str):
     if not row:
         return await interaction.followup.send("❌ Генератор не найден.", ephemeral=True)
     await interaction.followup.send(f"`{item_id}`: `{row[0]}`", ephemeral=True)
+
+@bot.tree.command(name="тест уведомление", description="Отправить тестовое ЛС (проверка уведомлений)")
+async def test_notification(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    embed = discord.Embed(
+        title="📬 Тест уведомлений",
+        description="Если ты видишь это сообщение — уведомления работают!",
+        color=0x2ecc71
+    )
+    ok = await send_dm_notification(interaction.user.id, "pet_hungry", "", embed)
+    if ok:
+        await interaction.followup.send("✅ Тестовое ЛС отправлено. Проверь личку.", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            "❌ Не удалось отправить ЛС. Возможно, у тебя закрыты личные сообщения от участников сервера.\n"
+            "Открой: Настройки Discord → Конфиденциальность → «Личные сообщения от участников сервера».",
+            ephemeral=True
+        )
 
 
 class AdminGrantView(discord.ui.View):
