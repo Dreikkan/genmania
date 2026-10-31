@@ -2161,7 +2161,6 @@ class BaseView(discord.ui.View):
         return True
 
     async def back_to_main(self, interaction: discord.Interaction):
-        await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
