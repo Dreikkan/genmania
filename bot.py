@@ -192,9 +192,12 @@ class CastleBot(commands.Bot):
         DB_PATH = DATA_DIR / "castle.db"
 
         self.db = await aiosqlite.connect("castle.db")
+        # Ждать до 10 секунд, если база занята
+        await self.db.execute("PRAGMA busy_timeout = 10000")
+        # WAL-режим: чтение не блокирует запись, и наоборот
+        await self.db.execute("PRAGMA journal_mode = WAL")
         await self.init_db()
         await self.tree.sync()
-
     self.loop.create_task(self.auction_closer())
 
        # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
