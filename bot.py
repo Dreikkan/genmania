@@ -3422,7 +3422,7 @@ class MoveConfirmView(discord.ui.View):
             return False
         return True
 
-        @discord.ui.button(label="Переместить", emoji="✅", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Переместить", emoji="✅", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         user_id = interaction.user.id
@@ -3475,71 +3475,6 @@ class MoveConfirmView(discord.ui.View):
         await bot.db.commit()
 
         await update_quest_progress(user_id, "move_2")
-        await sort_inventory(user_id, "profile")
-        await sort_inventory(user_id, "storage")
-
-        if self.source == "profile":
-            embed = await build_profile_embed(interaction)
-            view = ProfileView(self.author_id)
-        else:
-            embed = await build_storage_embed(interaction)
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
-
-                # Проверяем, свободен ли целевой слот
-        async with bot.db.execute(
-            "SELECT 1 FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, target, self.slot)
-        ) as c:
-            target_busy = await c.fetchone() is not None
-
-        if target_busy:
-            # Ищем первый свободный слот в целевой локации
-            if target == "storage":
-                target_size = await get_storage_size(user_id)
-            else:
-                target_size = await get_grid_size(user_id)
-
-            async with bot.db.execute(
-                "SELECT slot FROM inventory WHERE user_id = ? AND location = ?",
-                (user_id, target)
-            ) as c:
-                used = {r[0] for r in await c.fetchall()}
-            free = [s for s in range(target_size) if s not in used]
-
-            if not free:
-                await self.fail(interaction, f"❌ В целевой локации нет свободных слотов.")
-                return
-
-            # Ставим предмет в первый свободный слот
-            new_slot = free[0]
-        else:
-            new_slot = self.slot
-
-        # Удаляем из исходной локации
-        await bot.db.execute(
-            "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.source, self.slot)
-        )
-        # Вставляем в целевой слот (или первый свободный)
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (user_id, new_slot, item_id, target, stars)
-        )
-        await bot.db.commit()
-
-        await bot.db.execute(
-            "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.source, self.slot)
-        )
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (user_id, self.slot, item_id, target, stars)
-        )
-        await bot.db.commit()
-
-        await update_quest_progress(user_id, "move_2")
-
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
 
