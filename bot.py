@@ -5505,14 +5505,16 @@ class SettingsEmojisView(discord.ui.View):
         self.author_id = author_id
         options = [discord.SelectOption(label=name, value=key, emoji=default) for key, (name, default) in EMOJI_KEYS.items()]
         self.add_item(make_select("Что изменить?", options, self.emoji_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-        back.callback = self.back
-        self.add_item(back)
 
-        # Новая кнопка для эмодзи по звёздам
+        # Кнопка "Эмодзи по звёздам"
         stars = discord.ui.Button(label="Эмодзи по звёздам", emoji="⭐", style=discord.ButtonStyle.primary, row=1)
         stars.callback = self.star_emoji_select
         self.add_item(stars)
+
+        # Кнопка "Назад"
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back
+        self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -5528,32 +5530,10 @@ class SettingsEmojisView(discord.ui.View):
         await interaction.response.defer()
         await open_star_emoji_select(interaction, self.author_id, page=0)
 
-        options = [discord.SelectOption(label=name, value=item_id) for item_id, name in items]
-        embed = discord.Embed(
-            title="⭐ Эмодзи по звёздам",
-            description="Выбери генератор, для которого настроить эмодзи 0★–5★.",
-            color=0xf1c40f
-        )
-        view = StarEmojiSelectView(self.author_id, options)
-        await interaction.edit_original_response(embed=embed, view=view)
-
-    async def open_star_emoji_select(interaction: discord.Interaction, author_id: int, page: int = 0):
-        async with bot.db.execute("SELECT id, name FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
-            items = await c.fetchall()
-
-        total_pages = max(1, (len(items) + 9) // 10)
-        page = max(0, min(page, total_pages - 1))
-        chunk = items[page * 10: page * 10 + 10]
-
-        options = [discord.SelectOption(label=name, value=item_id) for item_id, name in chunk]
-
-        embed = discord.Embed(
-            title="⭐ Эмодзи по звёздам",
-            description=f"Страница {page + 1}/{total_pages}\nВыбери генератор, для которого настроить эмодзи 0★–5★.",
-            color=0xf1c40f
-        )
-        view = StarEmojiPaginatedView(author_id, options, page, total_pages)
-        await interaction.edit_original_response(embed=embed, view=view)
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(title="🔧 Настройки сервера", color=0x808080)
+        await interaction.edit_original_response(embed=embed, view=SettingsView(self.author_id))
 
 
 class StarEmojiPaginatedView(discord.ui.View):
