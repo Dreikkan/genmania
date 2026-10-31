@@ -2341,7 +2341,32 @@ class BaseView(discord.ui.View):
 
     async def back_to_main(self, interaction: discord.Interaction):
         embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+        view = MainMenuView(self.author_id)
+
+        # 1. Если interaction ещё не отвечен — defer, чтобы можно было edit/followup
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer()
+            except discord.InteractionResponded:
+                pass
+
+        # 2. Пытаемся отредактировать исходное сообщение
+        try:
+            await interaction.edit_original_response(embed=embed, view=view)
+            return
+        except discord.NotFound:
+            # Вебхук мёртв (бот перезапускался) — шлём новое сообщение
+            pass
+        except discord.HTTPException:
+            # Прочие ошибки Discord — тоже пробуем followup
+            pass
+
+        # 3. Fallback: новое ephemeral-сообщение
+        try:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except discord.HTTPException:
+            # Совсем не удалось — молча выходим, чтобы не крашить View
+            pass
 
 
 # ============================================================
