@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+from pathlib import Path
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -182,6 +183,13 @@ class CastleBot(commands.Bot):
         self.db = None
 
     async def setup_hook(self):
+        # Создаём папку data, если её нет
+        DATA_DIR = Path("/app/data")
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Путь к базе в персистентной папке
+        DB_PATH = DATA_DIR / "castle.db"
+
         self.db = await aiosqlite.connect("castle.db")
         await self.init_db()
         await self.tree.sync()
