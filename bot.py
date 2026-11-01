@@ -16,6 +16,7 @@ import sqlite3
 from pathlib import Path
 import asyncio
 import io
+from contextlib import asynccontextmanager
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -127,7 +128,11 @@ STAR_BONUS = {
 
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
-SELL_RATE = 0.35
+SELL_RATE = 0.10  # 10% от цены (было 35%)
+SELL_ALLOWED_RARITIES = {"common", "uncommon", "rare"}  # epic+ — только синтез/аукцион
+BANK_MAX_DEPOSIT = 50000       # максимум монет на вклад
+BANK_DAILY_RATE = 0.02         # 2% в день (было 5%)
+BANK_MAX_DAYS = 30
 START_GRID = 9
 STORAGE_SIZE = 36
 PAGE_SIZE = 10
@@ -470,8 +475,20 @@ class CastleBot(commands.Bot):
                     wars = await c.fetchall()
 
                 for war_id, c1, c2, start_time in wars:
+                    # проверяем, что оба клана ещё существуют
+                    async with self.db.execute(
+                        "SELECT 1 FROM clans WHERE id IN (?, ?)", (c1, c2)
+                    ) as c:
+                        existing = await c.fetchall()
+                    if len(existing) < 2:
+                        # один из кланов распущен — закрываем войну без победителя
+                        await self.db.execute(
+                            "UPDATE clan_wars SET status = 'finished', winner_id = NULL, end_time = ? WHERE id = ?",
+                            (now.isoformat(), war_id)
+                        )
+                        continue
+
                     start = datetime.datetime.fromisoformat(start_time)
-                    # война длится 24 часа
                     if (now - start).total_seconds() < 86400:
                         continue
 
@@ -1175,6 +1192,26 @@ class CastleBot(commands.Bot):
             )
         """)
 
+        for column, definition in [
+            ("total_coins_earned", "INTEGER DEFAULT 0"),
+            ("total_gems_earned", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await self.db.execute(f"ALTER TABLE players ADD COLUMN {column} {definition}")
+            except Exception:
+                pass
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS raid_loot_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                target_id INTEGER,
+                amount INTEGER,
+                date TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 
     async def auction_closer(self):
@@ -1212,20 +1249,43 @@ class CastleBot(commands.Bot):
                             "UPDATE players SET coins = coins + ? WHERE user_id = ?",
                             (current_bid - fee, seller_id)
                         )
-                    else:
+                                       else:
                         # Никто не купил — возвращаем предмет
+                        # сначала в профиль, если нет места — в хранилище
                         async with self.db.execute(
                             "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'",
                             (seller_id,)
                         ) as c:
-                            used = {r[0] for r in await c.fetchall()}
-                        free = [s for s in range(36) if s not in used]
-                        if free:
+                            used_profile = {r[0] for r in await c.fetchall()}
+                        free_profile = [s for s in range(36) if s not in used_profile]
+
+                        if free_profile:
                             await self.db.execute(
                                 "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
                                 "VALUES (?, ?, ?, 'profile', ?)",
-                                (seller_id, free[0], item_id, stars)
+                                (seller_id, free_profile[0], item_id, stars)
                             )
+                        else:
+                            # профиль полон — в хранилище
+                            async with self.db.execute(
+                                "SELECT slot FROM inventory WHERE user_id = ? AND location = 'storage'",
+                                (seller_id,)
+                            ) as c:
+                                used_storage = {r[0] for r in await c.fetchall()}
+                            free_storage = [s for s in range(36) if s not in used_storage]
+                            if free_storage:
+                                await self.db.execute(
+                                    "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                                    "VALUES (?, ?, ?, 'storage', ?)",
+                                    (seller_id, free_storage[0], item_id, stars)
+                                )
+                            else:
+                                # оба полны — пишем в лог, предмет теряется
+                                await self.db.execute(
+                                    "INSERT INTO admin_log (admin_id, target_id, action, details) "
+                                    "VALUES (0, ?, 'auction_lost', ?)",
+                                    (seller_id, f"item={item_id}, stars={stars}, lot={aid}")
+                                )
                     await self.db.execute(
                         "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
                     )
@@ -1332,12 +1392,14 @@ class CastleBot(commands.Bot):
                 print(f"[AUTOCOLLECTOR] Ошибка: {e}")
                 await asyncio.sleep(60)
 
-    async def notification_task(self):
+        async def notification_task(self):
         await self.wait_until_ready()
         while not self.is_closed():
             try:
                 await asyncio.sleep(3600)  # раз в час
                 now = datetime.datetime.now()
+                sent_count = 0
+                MAX_SENT_PER_CYCLE = 100  # не более 100 ЛС за цикл
 
                 # ============ 1. ПИТОМЕЦ ГОЛОДЕН ============
                 async with self.db.execute("""
@@ -1349,13 +1411,25 @@ class CastleBot(commands.Bot):
                     active_pets = await c.fetchall()
 
                 for uid, pet_id, last_fed, level in active_pets:
-                    if level >= PET_MAX_LEVEL:
-                        continue
-                    if not last_fed:
+                    if sent_count >= MAX_SENT_PER_CYCLE:
+                        break
+                    if level >= PET_MAX_LEVEL or not last_fed:
                         continue
                     last = datetime.datetime.fromisoformat(last_fed)
                     if (now - last).total_seconds() < PET_FEED_COOLDOWN_HOURS * 3600:
                         continue
+
+                    # проверка: не отправляли ли уже после последнего кормления
+                    async with self.db.execute(
+                        "SELECT last_sent FROM user_notifications "
+                        "WHERE user_id = ? AND notif_type = 'pet_hungry'", (uid,)
+                    ) as c:
+                        row = await c.fetchone()
+                    if row and row[0]:
+                        last_sent = datetime.datetime.fromisoformat(row[0])
+                        if last_sent > last:
+                            continue  # уже напоминали после этого кормления
+
                     if not await can_send_notification(uid, "pet_hungry"):
                         continue
 
@@ -1368,7 +1442,8 @@ class CastleBot(commands.Bot):
                         ),
                         color=0x9b59b6
                     )
-                    await send_dm_notification(uid, "pet_hungry", "", embed)
+                    if await send_dm_notification(uid, "pet_hungry", "", embed):
+                        sent_count += 1
 
                 # ============ 2. ДЕЙЛИ ДОСТУПЕН ============
                 async with self.db.execute("""
@@ -1377,6 +1452,8 @@ class CastleBot(commands.Bot):
                     players = await c.fetchall()
 
                 for uid, last_daily, streak in players:
+                    if sent_count >= MAX_SENT_PER_CYCLE:
+                        break
                     if last_daily:
                         last = datetime.datetime.fromisoformat(last_daily).date()
                         if (now.date() - last).days < 1:
@@ -1389,7 +1466,8 @@ class CastleBot(commands.Bot):
                         description=f"Забери награду за день! Твой стрик: **{streak or 0}**.",
                         color=0x3498db
                     )
-                    await send_dm_notification(uid, "daily_ready", "", embed)
+                    if await send_dm_notification(uid, "daily_ready", "", embed):
+                        sent_count += 1
 
                 # ============ 3. АУКЦИОН СКОРО ЗАКОНЧИТСЯ ============
                 async with self.db.execute("""
@@ -1399,6 +1477,8 @@ class CastleBot(commands.Bot):
                     lots = await c.fetchall()
 
                 for aid, seller_id, item_id, bidder, bid, end_time in lots:
+                    if sent_count >= MAX_SENT_PER_CYCLE:
+                        break
                     end = datetime.datetime.fromisoformat(end_time)
                     seconds_left = (end - now).total_seconds()
                     if not (0 < seconds_left <= 3600):
@@ -1415,6 +1495,8 @@ class CastleBot(commands.Bot):
                         targets.add(bidder)
 
                     for uid in targets:
+                        if sent_count >= MAX_SENT_PER_CYCLE:
+                            break
                         if not await can_send_notification(uid, "auction_soon"):
                             continue
                         role = "продавец" if uid == seller_id else "лидер ставки"
@@ -1428,27 +1510,47 @@ class CastleBot(commands.Bot):
                             ),
                             color=0xf1c40f
                         )
-                        await send_dm_notification(uid, "auction_soon", "", embed)
+                        if await send_dm_notification(uid, "auction_soon", "", embed):
+                            sent_count += 1
 
-                # ============ 4. АВТОСБОРЩИК СОБРАЛ ДОХОД (раз в сутки) ============
+                # ============ 4. АВТОСБОРЩИК СОБРАЛ ДОХОД ============
                 async with self.db.execute("""
                     SELECT user_id, level, last_auto FROM autocollectors
                 """) as c:
                     autocols = await c.fetchall()
 
                 for uid, level, last_auto in autocols:
+                    if sent_count >= MAX_SENT_PER_CYCLE:
+                        break
+                    if not last_auto:
+                        continue
+
+                    # проверка: был ли сбор после последнего уведомления
+                    async with self.db.execute(
+                        "SELECT last_sent FROM user_notifications "
+                        "WHERE user_id = ? AND notif_type = 'autocollect'", (uid,)
+                    ) as c:
+                        row = await c.fetchone()
+                    if row and row[0]:
+                        last_sent = datetime.datetime.fromisoformat(row[0])
+                        last_auto_dt = datetime.datetime.fromisoformat(last_auto)
+                        if last_auto_dt <= last_sent:
+                            continue  # сбора не было
+
                     if not await can_send_notification(uid, "autocollect"):
                         continue
+
                     embed = discord.Embed(
-                        title="🤖 Автосборщик работает",
+                        title="🤖 Автосборщик собрал доход",
                         description=(
-                            f"Твой автосборщик (ур. {level}) собирает доход "
+                            f"Твой автосборщик (ур. {level}) собрал доход "
                             f"раз в {AUTOCOLLECT_LEVELS.get(level, (0, 4))[1]} ч.\n"
-                            f"Последний сбор: `{last_auto or '—'}`."
+                            f"Последний сбор: `{last_auto}`."
                         ),
                         color=0x2ecc71
                     )
-                    await send_dm_notification(uid, "autocollect", "", embed)
+                    if await send_dm_notification(uid, "autocollect", "", embed):
+                        sent_count += 1
 
                 # ============ 5. КЛАНОВАЯ ВОЙНА ============
                 async with self.db.execute("""
@@ -1457,6 +1559,8 @@ class CastleBot(commands.Bot):
                     wars = await c.fetchall()
 
                 for war_id, c1, c2 in wars:
+                    if sent_count >= MAX_SENT_PER_CYCLE:
+                        break
                     async with self.db.execute("""
                         SELECT cm.user_id, cl.name FROM clan_members cm
                         JOIN clans cl ON cl.id = cm.clan_id
@@ -1465,6 +1569,8 @@ class CastleBot(commands.Bot):
                         members = await c.fetchall()
 
                     for uid, clan_name in members:
+                        if sent_count >= MAX_SENT_PER_CYCLE:
+                            break
                         if not await can_send_notification(uid, "clan_war"):
                             continue
                         embed = discord.Embed(
@@ -1472,12 +1578,12 @@ class CastleBot(commands.Bot):
                             description=f"Твой клан **{clan_name}** участвует в войне #{war_id}.",
                             color=0xe74c3c
                         )
-                        await send_dm_notification(uid, "clan_war", "", embed)
+                        if await send_dm_notification(uid, "clan_war", "", embed):
+                            sent_count += 1
 
             except Exception as e:
                 print(f"[NOTIFICATION_TASK] Ошибка: {e}")
                 await asyncio.sleep(600)
-
 
 
 bot = CastleBot()
@@ -1615,6 +1721,17 @@ async def get_player_stats(user_id: int, guild_id: int = None):
         return START_GRID, 0.0, 0, start
 
     return row[0] or START_GRID, row[1] or 0.0, row[2] or 0, row[3] or 0
+
+@asynccontextmanager
+async def db_transaction():
+    """Контекстный менеджер для транзакций SQLite. Откатывает при ошибке."""
+    await bot.db.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        await bot.db.commit()
+    except Exception:
+        await bot.db.rollback()
+        raise
 
 async def get_combat_power(user_id: int) -> int:
     """Считает боевую мощь на основе цены и звезд генераторов в замке."""
@@ -1832,19 +1949,28 @@ async def collect_income(user_id: int, guild_id: int = None):
     now_iso = datetime.datetime.now().isoformat()
     if coins_earned > 0:
         await bot.db.execute(
-            "UPDATE players SET coins = coins + ?, last_collected = ? WHERE user_id = ?",
-            (coins_earned, now_iso, user_id)
+            "UPDATE players SET coins = coins + ?, "
+            "total_coins_earned = total_coins_earned + ?, "
+            "last_collected = ? WHERE user_id = ?",
+            (coins_earned, coins_earned, now_iso, user_id)
         )
     if gems_earned > 0:
         await bot.db.execute(
-            "UPDATE players SET gems = gems + ?, last_gem_collected = ? WHERE user_id = ?",
-            (gems_earned, now_iso, user_id)
+            "UPDATE players SET gems = gems + ?, "
+            "total_gems_earned = total_gems_earned + ?, "
+            "last_gem_collected = ? WHERE user_id = ?",
+            (gems_earned, gems_earned, now_iso, user_id)
         )
     await bot.db.commit()
+
+    # ежедневные задания
     await update_quest_progress(user_id, "collect_income")
-    return coins_earned, gems_earned
+
+    # сюжетные квесты
     await update_story_quests(user_id, "coins", coins_earned)
     await update_story_quests(user_id, "collect_income", 1)
+
+    return coins_earned, gems_earned
 
 
 async def place_items(user_id: int, item_id: str, quantity: int) -> tuple[int, int]:
@@ -2076,8 +2202,10 @@ async def claim_daily(user_id: int) -> dict:
 
     await bot.db.execute(
         "UPDATE players SET coins = coins + ?, gems = gems + ?, "
+        "total_coins_earned = total_coins_earned + ?, "
+        "total_gems_earned = total_gems_earned + ?, "
         "last_daily = ?, streak_days = ? WHERE user_id = ?",
-        (coins, gems, now.isoformat(), new_streak, user_id)
+        (coins, gems, coins, gems, now.isoformat(), new_streak, user_id)
     )
     await bot.db.commit()
 
@@ -2299,6 +2427,23 @@ async def get_top_players(top_type: str, limit: int = 10) -> list:
 
     return []
 
+_top_cache = {}  # {top_type: (timestamp, rows)}
+TOP_CACHE_TTL = 300  # 5 минут
+
+
+async def get_top_players_cached(top_type: str, limit: int = 10) -> list:
+    """Кэширует результаты топов на 5 минут."""
+    now = datetime.datetime.now().timestamp()
+    cache_key = f"{top_type}:{limit}"
+    if cache_key in _top_cache:
+        ts, rows = _top_cache[cache_key]
+        if now - ts < TOP_CACHE_TTL:
+            return rows
+
+    rows = await get_top_players(top_type, limit)
+    _top_cache[cache_key] = (now, rows)
+    return rows
+
 async def get_advent_state(user_id: int) -> tuple:
     """Возвращает (last_opened_day, last_opened_date) или (0, None), если ещё не открывал."""
     async with bot.db.execute(
@@ -2398,7 +2543,7 @@ async def build_top_embed(interaction: discord.Interaction, top_type: str, limit
         top_type = "coins"
     title, _ = TOP_TYPES[top_type]
 
-    rows = await get_top_players(top_type, limit)
+    rows = await get_top_players_cached(top_type, limit)
 
     embed = discord.Embed(
         title=f"📊 Топ — {title}",
@@ -2504,6 +2649,27 @@ async def build_advent_embed(interaction: discord.Interaction, page: int = 0) ->
     embed.set_footer(text=f"Страница {page + 1}/{total_pages}")
     return embed
 
+    # история последних 5 открытых
+    async with bot.db.execute(
+        "SELECT day FROM advent_progress WHERE user_id = ? ORDER BY day DESC LIMIT 5",
+        (user_id,)
+    ) as c:
+        recent = [r[0] for r in await c.fetchall()]
+
+    if recent:
+        history_lines = []
+        for d in recent:
+            coins_, gems_, item_ = ADVENT_REWARDS[d]
+            line = f"**{d}:** 🪙 {coins_} | 💎 {gems_}"
+            if item_:
+                line += f" | 🎁 {item_}"
+            history_lines.append(line)
+        embed.add_field(
+            name="📜 Последние открытые",
+            value="\n".join(history_lines),
+            inline=False
+        )
+
 async def build_analytics_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
 
@@ -2604,6 +2770,16 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
     ) as c:
         ach_count = (await c.fetchone())[0] or 0
+
+    async with bot.db.execute(
+        "SELECT total_coins_earned, total_gems_earned FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        tce, tge = await c.fetchone()
+    embed.add_field(
+        name="📊 Всего заработано",
+        value=f"🪙 {tce or 0}\n💎 {tge or 0}",
+        inline=True
+    )
 
     # --- Строим embed ---
     embed = discord.Embed(
@@ -3221,6 +3397,81 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
 
     return embed
 
+async def build_generator_details_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, inv.stars, i.name, i.income_per_hour,
+               i.income_gems_per_hour, i.price, i.rarity
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = 'profile'
+        ORDER BY inv.slot ASC
+    """, (user_id,)) as c:
+        rows = await c.fetchall()
+
+    embed = discord.Embed(
+        title="📋 Детали генераторов",
+        description="Доход указан с учётом звёзд и всех бонусов (статус, клан, питомец, титул).",
+        color=0x3498db
+    )
+
+    if not rows:
+        embed.description = "У тебя нет генераторов в замке."
+        return embed
+
+    # получаем множители
+    async with bot.db.execute(
+        "SELECT income_bonus FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        bonus = (await c.fetchone())[0] or 0.0
+    clan = await get_clan(user_id)
+    clan_bonus = (clan[4] or 0.0) if clan else 0.0
+    pet_coins = await get_pet_bonus(user_id, "income_coins")
+    pet_gems = await get_pet_bonus(user_id, "income_gems")
+    title_coins = await get_title_bonus(user_id, "income_coins")
+    title_gems = await get_title_bonus(user_id, "income_gems")
+
+    mult_coins = (1 + bonus) * (1 + clan_bonus) * (1 + pet_coins + title_coins)
+    mult_gems = (1 + bonus) * (1 + clan_bonus) * (1 + pet_gems + title_gems)
+
+    lines = []
+    total_coins = 0.0
+    total_gems = 0.0
+    for slot, item_id, stars, name, inc_coins, inc_gems, price, rarity in rows:
+        star_mult = 1 + STAR_BONUS.get(stars, 0)
+        eff_coins = inc_coins * star_mult * 3600 * mult_coins
+        eff_gems = inc_gems * star_mult * 3600 * mult_gems
+        total_coins += eff_coins
+        total_gems += eff_gems
+
+        star_str = f"{stars}★" if stars > 0 else "—"
+        inc_str = f"🪙 {eff_coins:.2f}/час"
+        if eff_gems > 0:
+            inc_str += f" | 💎 {eff_gems:.4f}/час"
+        lines.append(
+            f"**Слот {slot}:** {name} ({star_str}, {RARITY_NAMES.get(rarity, rarity)})\n"
+            f"  {inc_str}"
+        )
+
+    # разбиваем по 10, чтобы не превысить 1024 символа в поле
+    chunk_size = 10
+    for i in range(0, len(lines), chunk_size):
+        chunk = lines[i:i+chunk_size]
+        start = i + 1
+        end = i + len(chunk)
+        embed.add_field(
+            name=f"Генераторы {start}–{end}",
+            value="\n".join(chunk),
+            inline=False
+        )
+
+    embed.add_field(
+        name="💰 Итого",
+        value=f"🪙 {total_coins:.2f}/час | 💎 {total_gems:.4f}/час",
+        inline=False
+    )
+    return embed
 
 async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
@@ -3256,6 +3507,25 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
         row_str = "  ".join(row_items)
         embed.add_field(name="\u200b", value=row_str, inline=False)
 
+    return embed
+
+async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Embed:
+    # clan = (id, name, leader_id, treasury, bonus, created_at)
+    c_id = clan[0]
+    name = clan[1]
+    leader_id = clan[2]
+    treasury = clan[3]
+    bonus = clan[4] if len(clan) > 4 else 0.0
+
+    members = await get_clan_members(c_id)
+    power = await get_clan_power(c_id)
+
+    embed = discord.Embed(title=f"🏰 Клан «{name}»", color=0x9b59b6)
+    embed.add_field(name="Лидер", value=f"<@{leader_id}>", inline=True)
+    embed.add_field(name="Участников", value=str(len(members)), inline=True)
+    embed.add_field(name="Мощь клана", value=str(power), inline=True)
+    embed.add_field(name="Сундук", value=f"🪙 {treasury}", inline=True)
+    embed.add_field(name="Бонус к доходу", value=f"+{int(bonus*100)}%", inline=True)
     return embed
 
 
@@ -3821,6 +4091,15 @@ class MainMenuView(BaseView):
         embed = await build_daily_embed(interaction)
         await interaction.edit_original_response(
             embed=embed, view=DailyView(self.author_id, return_to="main")
+        )
+
+class GeneratorDetailView(BaseView):
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=ProfileView(self.author_id)
         )
 
 class ShopHubView(BaseView):
@@ -4574,22 +4853,46 @@ class ClanTransferModal(discord.ui.Modal, title="Передать лидерст
 
 class ClanDisbandModal(discord.ui.Modal, title="Распустить клан"):
     confirm = discord.ui.TextInput(label="Введите УДАЛИТЬ", required=True)
+
     def __init__(self, author_id: int, clan_id: int):
         super().__init__()
         self.author_id, self.clan_id = author_id, clan_id
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         if self.confirm.value.strip() != "УДАЛИТЬ":
             return await interaction.followup.send("❌ Отменено.", ephemeral=True)
+
+        # 1. Закрываем активные войны клана (до удаления)
+        await bot.db.execute(
+            "UPDATE clan_wars SET status = 'finished', winner_id = NULL, end_time = ? "
+            "WHERE (clan1_id = ? OR clan2_id = ?) AND status = 'active'",
+            (datetime.datetime.now().isoformat(), self.clan_id, self.clan_id)
+        )
+
+        # 2. Возвращаем сундук участникам (поровну)
         async with bot.db.execute("SELECT treasury FROM clans WHERE id = ?", (self.clan_id,)) as c:
-            treasury = (await c.fetchone())[0]
-        await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id IN (SELECT user_id FROM clan_members WHERE clan_id = ?)", (treasury // max(1, len(await get_clan_members(self.clan_id))), self.clan_id))
+            row = await c.fetchone()
+        treasury = row[0] if row else 0
+        members = await get_clan_members(self.clan_id)
+        if members and treasury > 0:
+            share = treasury // len(members)
+            if share > 0:
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ? WHERE user_id IN "
+                    "(SELECT user_id FROM clan_members WHERE clan_id = ?)",
+                    (share, self.clan_id)
+                )
+
+        # 3. Удаляем всё, что связано с кланом
         await bot.db.execute("DELETE FROM clan_inventory WHERE clan_id = ?", (self.clan_id,))
         await bot.db.execute("DELETE FROM clan_members WHERE clan_id = ?", (self.clan_id,))
         await bot.db.execute("DELETE FROM clan_invites WHERE clan_id = ?", (self.clan_id,))
         await bot.db.execute("DELETE FROM clan_quests WHERE clan_id = ?", (self.clan_id,))
+        # войны уже закрыты, но удаляем и их записи (или оставляем как историю — на твой выбор)
         await bot.db.execute("DELETE FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?", (self.clan_id, self.clan_id))
         await bot.db.execute("DELETE FROM clans WHERE id = ?", (self.clan_id,))
+
         await bot.db.commit()
         await interaction.followup.send("💀 Клан распущен.", ephemeral=True)
 
@@ -4819,7 +5122,6 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
             )
             
         # 4. Расчёт (рандом с учётом мощи)
-        import random
         roll_atk = random.randint(1, power_atk)
         roll_def = random.randint(1, power_def)
         
@@ -4839,20 +5141,84 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
         await bot.db.commit()
 
         if success:
-            # Забираем 15% баланса
-            async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (target,)) as c:
-                victim_coins = (await c.fetchone())[0]
+            today = datetime.date.today().isoformat()
 
-            pet_loot = await get_pet_bonus(self.author_id, "raid_loot")
-            title_loot = await get_title_bonus(self.author_id, "raid_loot")
-            loot = int(victim_coins * (0.15 + pet_loot + title_loot))
-            if loot > 0:
-                await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (loot, target))
-                await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id = ?", (loot, self.author_id))
-                await bot.db.commit()
-                msg = f"🏆 **Успешный рейд!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nВы украли 🪙 **{loot}** монет!"
+            # дневной лимит краж: не более 50% от своего баланса, минимум 1000
+            async with bot.db.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log WHERE user_id = ? AND date = ?",
+                (self.author_id, today)
+            ) as c:
+                today_loot = (await c.fetchone())[0] or 0
+
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (self.author_id,)
+            ) as c:
+                my_coins = (await c.fetchone())[0]
+
+            daily_limit = max(1000, my_coins // 2)
+
+            if today_loot >= daily_limit:
+                msg = (
+                    f"🏆 Победа, но дневной лимит краж исчерпан "
+                    f"({today_loot}/{daily_limit} 🪙). Возвращайся завтра."
+                )
             else:
-                msg = "🏆 Победа, но у врага пустой кошелёк."
+                async with bot.db.execute(
+                    "SELECT coins FROM players WHERE user_id = ?", (target,)
+                ) as c:
+                    victim_coins = (await c.fetchone())[0]
+
+                pet_loot = await get_pet_bonus(self.author_id, "raid_loot")
+                title_loot = await get_title_bonus(self.author_id, "raid_loot")
+                loot = int(victim_coins * (0.15 + pet_loot + title_loot))
+
+                # ограничиваем остатком лимита
+                remaining_limit = daily_limit - today_loot
+                loot = min(loot, remaining_limit)
+
+                if loot > 0:
+                    cursor = await bot.db.execute(
+                        "UPDATE players SET coins = coins - ? WHERE user_id = ? AND coins >= ?",
+                        (loot, target, loot)
+                    )
+                    if cursor.rowcount == 0:
+                        async with bot.db.execute(
+                            "SELECT coins FROM players WHERE user_id = ?", (target,)
+                        ) as c:
+                            real_coins = (await c.fetchone())[0]
+                        loot = min(real_coins, remaining_limit)
+                        if loot > 0:
+                            await bot.db.execute(
+                                "UPDATE players SET coins = 0 WHERE user_id = ?", (target,)
+                            )
+                            await bot.db.execute(
+                                "UPDATE players SET coins = coins + ?, "
+                                "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                                (loot, loot, self.author_id)
+                            )
+                    else:
+                        await bot.db.execute(
+                            "UPDATE players SET coins = coins + ?, "
+                            "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                            (loot, loot, self.author_id)
+                        )
+
+                    # записываем в лог
+                    await bot.db.execute(
+                        "INSERT INTO raid_loot_log (user_id, target_id, amount, date) "
+                        "VALUES (?, ?, ?, ?)",
+                        (self.author_id, target, loot, today)
+                    )
+                    await bot.db.commit()
+                    msg = (
+                        f"🏆 **Успешный рейд!**\n"
+                        f"Твоя мощь: {power_atk} (бросок {roll_atk})\n"
+                        f"Защита врага: {power_def} (бросок {roll_def})\n"
+                        f"Вы украли 🪙 **{loot}** монет!\n"
+                        f"Дневной лимит: {today_loot + loot}/{daily_limit}"
+                    )
+                else:
+                    msg = "🏆 Победа, но у врага пустой кошелёк."
 
             # клановый квест
             clan = await get_clan(self.author_id)
@@ -4914,10 +5280,25 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
             winner = self.author_id if p1 > p2 else target
             text = f"⚔️ Мощь: {p1} против {p2}"
 
-        # Перевод монет
-        await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (bet, self.author_id))
-        await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (bet, target))
-        await bot.db.execute("UPDATE players SET coins = coins + ? WHERE user_id = ?", (bet * 2, winner))
+               # списываем с обоих
+        cursor1 = await bot.db.execute(
+            "UPDATE players SET coins = coins - ? WHERE user_id = ? AND coins >= ?",
+            (bet, self.author_id, bet)
+        )
+        cursor2 = await bot.db.execute(
+            "UPDATE players SET coins = coins - ? WHERE user_id = ? AND coins >= ?",
+            (bet, target, bet)
+        )
+        if cursor1.rowcount == 0 or cursor2.rowcount == 0:
+            await bot.db.rollback()
+            return await interaction.followup.send(
+                "❌ У кого-то не хватает монет на ставку.", ephemeral=True
+            )
+        # начисляем победителю
+        await bot.db.execute(
+            "UPDATE players SET coins = coins + ? WHERE user_id = ?", (bet * 2, winner)
+        )
+        await bot.db.commit()
         
         # История
         loser = target if winner == self.author_id else self.author_id
@@ -5575,36 +5956,43 @@ class CoinsToGemsModal(discord.ui.Modal, title="Обмен монет на ге�
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         user_id = interaction.user.id
+
         try:
             coins = int(self.amount.value)
             if coins < COIN_EXCHANGE_MIN:
                 raise ValueError
         except ValueError:
-            await interaction.followup.send(f"❌ Минимум {COIN_EXCHANGE_MIN} монет.", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Минимум {COIN_EXCHANGE_MIN} монет.", ephemeral=True
+            )
             return
 
         gems = coins // COINS_PER_GEM
         if gems < 1:
-            await interaction.followup.send(f"❌ Нужно минимум {COINS_PER_GEM} монет для 1 гема.", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Нужно минимум {COINS_PER_GEM} монет для 1 гема.", ephemeral=True
+            )
             return
+
         spent_coins = gems * COINS_PER_GEM
-        remainder = coins - spent_coins
+        remainder = coins - spent_coins  # сколько не обменялось
 
-        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (user_id,)) as c:
-            balance = (await c.fetchone())[0]
-        if balance < spent_coins:
-            await interaction.followup.send(f"❌ Нужно 🪙 {spent_coins}, у тебя {balance}.", ephemeral=True)
-            return
-
-        await bot.db.execute(
-            "UPDATE players SET coins = coins - ?, gems = gems + ? WHERE user_id = ?",
-            (spent_coins, gems, user_id)
+        # атомарное списание (один раз!)
+        cursor = await bot.db.execute(
+            "UPDATE players SET coins = coins - ?, gems = gems + ? "
+            "WHERE user_id = ? AND coins >= ?",
+            (spent_coins, gems, user_id, spent_coins)
         )
+        if cursor.rowcount == 0:
+            await interaction.followup.send(
+                f"❌ Не хватает монет (нужно 🪙 {spent_coins}).", ephemeral=True
+            )
+            return
         await bot.db.commit()
 
         msg = f"✅ Обменяно 🪙 {spent_coins} → 💎 {gems}."
         if remainder > 0:
-            msg += f"\nОстаток {remainder} монет не обменян (нужно кратно {COINS_PER_GEM})."
+            msg += f"\n⚠️ Остаток 🪙 {remainder} не обменян (нужно кратно {COINS_PER_GEM})."
         await interaction.followup.send(msg, ephemeral=True)
 
 
@@ -5632,19 +6020,28 @@ class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на мо�
 
         coins = gems * GEMS_PER_COIN_RATE
 
-        async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (user_id,)) as c:
-            balance = (await c.fetchone())[0]
-        if balance < gems:
-            await interaction.followup.send(f"❌ Нужно 💎 {gems}, у тебя {balance}.", ephemeral=True)
-            return
-
-        await bot.db.execute(
-            "UPDATE players SET gems = gems - ?, coins = coins + ? WHERE user_id = ?",
-            (gems, coins, user_id)
+        # атомарное списание: обновится только если gems >= нужного
+        cursor = await bot.db.execute(
+            "UPDATE players SET gems = gems - ?, coins = coins + ? "
+            "WHERE user_id = ? AND gems >= ?",
+            (gems, coins, user_id, gems)
         )
+        if cursor.rowcount == 0:
+            # не хватило гемов (или race condition)
+            async with bot.db.execute(
+                "SELECT gems FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                row = await c.fetchone()
+            balance = row[0] if row else 0
+            await interaction.followup.send(
+                f"❌ Нужно 💎 {gems}, у тебя {balance}.", ephemeral=True
+            )
+            return
         await bot.db.commit()
 
-        await interaction.followup.send(f"✅ Обменяно 💎 {gems} → 🪙 {coins}.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Обменяно 💎 {gems} → 🪙 {coins}.", ephemeral=True
+        )
 
 
 # ============================================================
@@ -5698,7 +6095,15 @@ class ProfileView(BaseView):
         )
         await interaction.edit_original_response(embed=embed, view=SortMenuView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Детали", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
+    async def details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_generator_details_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=GeneratorDetailView(self.author_id)
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
@@ -5744,6 +6149,46 @@ class SortMenuView(BaseView):
         embed = await build_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
+class StorageSortMenuView(BaseView):
+    def __init__(self, author_id: int):
+        super().__init__(author_id)
+
+    async def _do_sort(self, interaction: discord.Interaction, sort_type: str):
+        await interaction.response.defer()
+        await sort_inventory_by(self.author_id, "storage", sort_type)
+        embed = await build_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
+
+    @discord.ui.button(label="По цене (убыв.)", emoji="💰", style=discord.ButtonStyle.primary, row=0)
+    async def sort_price_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "price_desc")
+
+    @discord.ui.button(label="По цене (возр.)", emoji="💸", style=discord.ButtonStyle.secondary, row=0)
+    async def sort_price_asc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "price_asc")
+
+    @discord.ui.button(label="По звёздам (убыв.)", emoji="⭐", style=discord.ButtonStyle.success, row=1)
+    async def sort_stars_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "stars_desc")
+
+    @discord.ui.button(label="По звёздам (возр.)", emoji="✨", style=discord.ButtonStyle.secondary, row=1)
+    async def sort_stars_asc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "stars_asc")
+
+    @discord.ui.button(label="По редкости", emoji="🏆", style=discord.ButtonStyle.secondary, row=2)
+    async def sort_rarity_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._do_sort(interaction, "rarity_desc")
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
+
 
 class StorageView(BaseView):
     def __init__(self, author_id: int, return_to: str = "profile", timeout: int = 600):
@@ -5764,6 +6209,18 @@ class StorageView(BaseView):
     async def sell_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_sell_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Сортировка", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+    async def sort_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="🔄 Сортировка хранилища",
+            description="Выбери, как упорядочить предметы:",
+            color=0x3498db
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=StorageSortMenuView(self.author_id)
+        )
 
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5805,7 +6262,7 @@ class SellSelectView(discord.ui.View):
         await interaction.response.defer()
 
         async with bot.db.execute(
-            "SELECT i.name, i.price, inv.stars FROM inventory inv "
+            "SELECT i.name, i.price, inv.stars, i.rarity FROM inventory inv "
             "JOIN items i ON inv.item_id = i.id "
             "WHERE inv.user_id = ? AND inv.location = 'storage' AND inv.slot = ?",
             (interaction.user.id, slot)
@@ -5815,14 +6272,23 @@ class SellSelectView(discord.ui.View):
             await interaction.followup.send("❌ Предмет не найден.", ephemeral=True)
             return
 
-        name, price, stars = row
-        sell_price = int(price * SELL_RATE)
+        name, price, stars, rarity = row
+        if rarity not in SELL_ALLOWED_RARITIES:
+            await interaction.followup.send(
+                f"❌ Предметы редкости **{RARITY_NAMES.get(rarity, rarity)}** не продаются. "
+                f"Используй синтез или аукцион.",
+                ephemeral=True
+            )
+            return
+
+        sell_price = max(1, int(price * SELL_RATE))
 
         embed = discord.Embed(
             title="💰 Подтверждение продажи",
             description=(
                 f"**{name}** {'⭐' * stars if stars > 0 else ''}\n"
-                f"Цена продажи: 🪙 {sell_price}\n\n"
+                f"Редкость: {RARITY_NAMES.get(rarity, rarity)}\n"
+                f"Цена продажи: 🪙 {sell_price} ({int(SELL_RATE*100)}% от магазина)\n\n"
                 f"Продать этот предмет?"
             ),
             color=0x2ecc71
@@ -5843,8 +6309,9 @@ class SellSelectView(discord.ui.View):
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_storage_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=StorageView(self.author_id))
-
+        await interaction.edit_original_response(
+            embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
 
 class SellConfirmView(discord.ui.View):
     def __init__(self, author_id: int, slot: int, item_id: str, price: int, page: int):
@@ -5852,7 +6319,7 @@ class SellConfirmView(discord.ui.View):
         self.author_id = author_id
         self.slot = slot
         self.item_id = item_id
-        self.price = price
+        self.price = price  # уже посчитанная цена продажи (10%)
         self.page = page
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -5863,39 +6330,70 @@ class SellConfirmView(discord.ui.View):
         await interaction.response.defer()
         user_id = interaction.user.id
 
+        # повторная проверка: предмет ещё есть, редкость разрешена
         async with bot.db.execute(
-            "SELECT 1 FROM inventory WHERE user_id = ? AND location = 'storage' AND slot = ?",
+            "SELECT i.price, i.rarity FROM inventory inv "
+            "JOIN items i ON inv.item_id = i.id "
+            "WHERE inv.user_id = ? AND inv.location = 'storage' AND inv.slot = ?",
             (user_id, self.slot)
         ) as c:
-            if not await c.fetchone():
-                await interaction.edit_original_response(
-                    embed=discord.Embed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c),
-                    view=StorageView(self.author_id)
-                )
-                return
+            row = await c.fetchone()
 
-        await bot.db.execute(
+        if not row:
+            await interaction.edit_original_response(
+                embed=discord.Embed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c),
+                view=StorageView(self.author_id, return_to="profile")
+            )
+            return
+
+        price, rarity = row
+        if rarity not in SELL_ALLOWED_RARITIES:
+            await interaction.edit_original_response(
+                embed=discord.Embed(
+                    title="❌ Нельзя продать",
+                    description=f"Предметы редкости **{RARITY_NAMES.get(rarity, rarity)}** не продаются.",
+                    color=0xe74c3c
+                ),
+                view=StorageView(self.author_id, return_to="profile")
+            )
+            return
+
+        sell_price = max(1, int(price * SELL_RATE))
+
+        cursor = await bot.db.execute(
             "DELETE FROM inventory WHERE user_id = ? AND location = 'storage' AND slot = ?",
             (user_id, self.slot)
         )
+        if cursor.rowcount == 0:
+            await interaction.edit_original_response(
+                embed=discord.Embed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c),
+                view=StorageView(self.author_id, return_to="profile")
+            )
+            return
+
         await bot.db.execute(
-            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-            (self.price, user_id)
+            "UPDATE players SET coins = coins + ?, total_coins_earned = total_coins_earned + ? "
+            "WHERE user_id = ?",
+            (sell_price, sell_price, user_id)
         )
         await bot.db.commit()
 
         embed = discord.Embed(
             title="✅ Продано",
-            description=f"Ты получил 🪙 **{self.price}** за предмет.",
+            description=f"Ты получил 🪙 **{sell_price}** за предмет ({int(SELL_RATE*100)}% от магазина).",
             color=0x2ecc71
         )
-        await interaction.edit_original_response(embed=embed, view=StorageView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
 
     @discord.ui.button(label="Отмена", emoji="❌", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_storage_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=StorageView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
 
 
 # ============================================================
@@ -6903,11 +7401,17 @@ class BankDepositModal(discord.ui.Modal, title="Открыть вклад"):
         try:
             amt = int(self.amount.value)
             days = int(self.days.value)
-            if amt <= 0 or days < 1 or days > 30:
+            if amt <= 0 or days < 1 or days > BANK_MAX_DAYS:
                 raise ValueError
         except ValueError:
-            return await interaction.followup.send("❌ Сумма > 0, срок 1–30 дней.", ephemeral=True)
+            return await interaction.followup.send(
+                f"❌ Сумма > 0, срок 1–{BANK_MAX_DAYS} дней.", ephemeral=True
+            )
 
+        if amt > BANK_MAX_DEPOSIT:
+            return await interaction.followup.send(
+                f"❌ Максимум {BANK_MAX_DEPOSIT} монет на вклад.", ephemeral=True
+            )
         # Проверка, что нет активного вклада
         if await get_deposit(self.author_id):
             return await interaction.followup.send("❌ У тебя уже есть вклад. Сначала забери его.", ephemeral=True)
@@ -6919,7 +7423,7 @@ class BankDepositModal(discord.ui.Modal, title="Открыть вклад"):
 
         now = datetime.datetime.now()
         end = now + datetime.timedelta(days=days)
-        rate = 0.05 * days  # 5% за каждый день (максимум 150% за 30 дней — это много, но капнем)
+        rate = BANK_DAILY_RATE * days 
 
         await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (amt, self.author_id))
         await bot.db.execute("""
@@ -7350,11 +7854,31 @@ class BuyItemQuantityView(discord.ui.View):
             return
 
         total_cost = price * qty
+
+        # проверка (вне транзакции)
         async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (user_id,)) as c:
             balance = (await c.fetchone())[0]
         if balance < total_cost:
             await self.fail(interaction, f"❌ Нужно {total_cost} монет, у тебя {balance}.")
             return
+
+        # транзакция (списание + выдача)
+        async with db_transaction():
+            # повторная проверка (на случай race condition)
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                balance = (await c.fetchone())[0]
+            if balance < total_cost:
+                raise ValueError("Недостаточно монет (race condition)")
+            await bot.db.execute(
+                "UPDATE players SET coins = coins - ? WHERE user_id = ?",
+                (total_cost, user_id)
+            )
+            try:
+                await place_items(user_id, self.item_id, qty)
+            except ValueError as e:
+                raise ValueError(str(e))
 
         try:
             to_profile, to_storage = await place_items(user_id, self.item_id, qty)
@@ -7562,9 +8086,13 @@ class UpgradesBuySelectView(discord.ui.View):
         await bot.db.execute(
             f"UPDATE players SET {currency} = {currency} - ? WHERE user_id = ?", (price, user_id)
         )
-        await bot.db.execute(
-            "INSERT INTO player_upgrades (user_id, upgrade_id) VALUES (?, ?)", (user_id, upgrade_id)
+        cursor = await bot.db.execute(
+            "INSERT OR IGNORE INTO player_upgrades (user_id, upgrade_id) VALUES (?, ?)",
+            (user_id, upgrade_id)
         )
+        if cursor.rowcount == 0:
+            await interaction.followup.send("❌ Уже куплено (двойная покупка).", ephemeral=True)
+            return
 
         if category == "grid":
             await bot.db.execute(
@@ -7741,7 +8269,11 @@ class UserSettingsView(BaseView):
         await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
 class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
-    confirm = discord.ui.TextInput(label="Введите 'УДАЛИТЬ' для сброса", required=True)
+    confirm = discord.ui.TextInput(
+        label="Введите 'УДАЛИТЬ' для сброса",
+        placeholder="⚠️ Будут удалены: питомцы, автосборщик, адвент, вклады, достижения, квесты, косметика",
+        required=True
+    )
 
     def __init__(self, author_id: int):
         super().__init__()
@@ -7775,40 +8307,12 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
 
         # остальные таблицы
         for table in (
-            "inventory", "player_achievements", "player_upgrades", "craft_log",
+            "inventory", "player_upgrades", "craft_log",
             "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
             "bank_deposits", "bank_history", "user_notifications",
             "player_quests", "user_cosmetics",
         ):
             await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
-
-                # выход из клана
-        async with bot.db.execute("SELECT clan_id FROM clan_members WHERE user_id = ?", (uid,)) as c:
-            row = await c.fetchone()
-        if row:
-            clan_id = row[0]
-            await bot.db.execute("DELETE FROM clan_members WHERE user_id = ?", (uid,))
-            # если был лидером — передать лидерство или распустить
-            async with bot.db.execute("SELECT leader_id FROM clans WHERE id = ?", (clan_id,)) as c:
-                leader = (await c.fetchone())[0]
-            if leader == uid:
-                async with bot.db.execute(
-                    "SELECT user_id FROM clan_members WHERE clan_id = ? LIMIT 1", (clan_id,)
-                ) as c:
-                    new_leader = await c.fetchone()
-                if new_leader:
-                    await bot.db.execute(
-                        "UPDATE clans SET leader_id = ? WHERE id = ?", (new_leader[0], clan_id)
-                    )
-                    await bot.db.execute(
-                        "UPDATE clan_members SET role = 'leader' WHERE user_id = ? AND clan_id = ?",
-                        (new_leader[0], clan_id)
-                    )
-                else:
-                    # никого не осталось — распустить
-                    await bot.db.execute("DELETE FROM clans WHERE id = ?", (clan_id,))
-                    await bot.db.execute("DELETE FROM clan_inventory WHERE clan_id = ?", (clan_id,))
-                    await bot.db.execute("DELETE FROM clan_quests WHERE clan_id = ?", (clan_id,))
 
         await bot.db.commit()
         await interaction.followup.send(
@@ -8713,7 +9217,8 @@ class AdminGiveDepositModal(discord.ui.Modal, title="Выдать вклад"):
 
         now = datetime.datetime.now()
         end = now + datetime.timedelta(days=days)
-        rate = 0.05 * days
+        rate = BANK_DAILY_RATE * days
+        amt > BANK_MAX_DEPOSIT
 
         await bot.db.execute("""
             INSERT INTO bank_deposits (user_id, amount, interest_rate, start_time, end_time)
