@@ -167,22 +167,19 @@ TOGGLEABLE_COMMANDS = {
 #  🎨 КАСТОМНЫЕ ЭМОДЗИ (объявляем ДО EMOJI_KEYS)
 # ============================================================
 BOT_BTN_EMOJIS = {
-    # Валюты и ресурсы
+    # Оставляем только те, что точно работают (если уверен в ID — оставь, если нет — убирай в юникод)
     "_coin":         discord.PartialEmoji(name="coin", id=1566288877369434122),
     "_gem":          discord.PartialEmoji(name="gem", id=1566288868158738452),
     "_castle":       discord.PartialEmoji(name="castle", id=156628869484142712),
     "_storage":      discord.PartialEmoji(name="storage", id=1566288893849116712),
     
-    # Меню и разделы
     "_shop":         discord.PartialEmoji(name="buy", id=1566288887691874304),
     "_upgrades":     discord.PartialEmoji(name="upgrade", id=1566288897057755146),
     "_achievements": discord.PartialEmoji(name="achiv", id=1566288895526834266),
     "_quests":       discord.PartialEmoji(name="quests", id=156628885984526376),
     "_stats":        discord.PartialEmoji(name="analytic", id=1566288866409848874),
-    "_analytics":    discord.PartialEmoji(name="analytic", id=1566288866409848874),
     "_settings":     discord.PartialEmoji(name="settings", id=1566288873947009115),
     
-    # Действия
     "_back":         discord.PartialEmoji(name="back", id=1566288863582887946),
     "_forward":      discord.PartialEmoji(name="forward", id=156628864950362153),
     "_move":         discord.PartialEmoji(name="changeplace", id=1566288884579434607),
