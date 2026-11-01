@@ -8459,7 +8459,6 @@ class ShopView(BaseView):
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-    # ВОТ ЗДЕСЬ ВАЖНО ДОБАВИТЬ button: discord.ui.Button
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
@@ -8666,29 +8665,46 @@ class UpgradesView(BaseView):
         self.add_buttons()
 
     def add_buttons(self):
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+        back = discord.ui.Button(
+            label="Назад", 
+            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            style=discord.ButtonStyle.secondary, 
+            row=0
+        )
         back.callback = self.back
         self.add_item(back)
-        buy = discord.ui.Button(label="Купить", emoji="💳", style=discord.ButtonStyle.success, row=0)
+        
+        buy = discord.ui.Button(
+            label="Купить", 
+            emoji=BOT_BTN_EMOJIS.get("_buy", "💳"), 
+            style=discord.ButtonStyle.success, 
+            row=0
+        )
         buy.callback = self.buy
         self.add_item(buy)
-        prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+        
+        prev = discord.ui.Button(
+            label="◀️ Стр.", 
+            style=discord.ButtonStyle.secondary, 
+            row=1
+        )
         prev.callback = self.prev_page
         self.add_item(prev)
-        nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+        
+        nxt = discord.ui.Button(
+            label="Стр. ▶️", 
+            style=discord.ButtonStyle.secondary, 
+            row=1
+        )
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-    async def back(self, interaction: discord.Interaction):
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🛒 Магазин",
-            description="Выбери раздел:",
-            color=0xf1c40f
-        )
+        embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    async def buy(self, interaction: discord.Interaction):
+    async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         async with bot.db.execute("""
             SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
@@ -8713,13 +8729,13 @@ class UpgradesView(BaseView):
             return
         await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0)
 
-    async def prev_page(self, interaction: discord.Interaction):
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         self.page = max(0, self.page - 1)
         embed, _ = await build_upgrades_page(interaction, self.page)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    async def next_page(self, interaction: discord.Interaction):
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed, total = await build_upgrades_page(interaction, self.page + 1)
         self.page = min(total - 1, self.page + 1)
