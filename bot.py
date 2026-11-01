@@ -173,6 +173,14 @@ TOGGLEABLE_COMMANDS = {
 # Установите False, чтобы использовать стандартные Unicode-эмодзи.
 USE_CUSTOM_EMOJIS = False
 # ============================================================
+
+# Список кастомных эмодзи, которые РАЗРЕШЕНО использовать.
+# Добавляйте сюда ключи по одному, чтобы проверить их работу.
+ENABLED_CUSTOM_EMOJIS = {"_clan"} 
+# Например: ENABLED_CUSTOM_EMOJIS = {"_coin", "_gem", "_clan"}
+
+
+
 #  🎨 КАСТОМНЫЕ ЭМОДЗИ (объявляем ДО EMOJI_KEYS)
 # ============================================================
 BOT_BTN_EMOJIS = {
@@ -288,9 +296,10 @@ UNICODE_EMOJIS = {
 }
 
 def get_emoji(key: str):
-    """Возвращает кастомный или стандартный эмодзи в зависимости от флага."""
-    if USE_CUSTOM_EMOJIS and key in BOT_BTN_EMOJIS:
+    # Если ключ в белом списке и он есть в словаре кастомных эмодзи — отдаем кастомный
+    if key in ENABLED_CUSTOM_EMOJIS and key in BOT_BTN_EMOJIS:
         return BOT_BTN_EMOJIS[key]
+    # Иначе отдаем стандартный юникод
     return UNICODE_EMOJIS.get(key, "❔")
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
