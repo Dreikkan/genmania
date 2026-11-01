@@ -4173,15 +4173,12 @@ async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Em
 async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
-    custom = settings["custom_emojis"] 
+    custom = settings["custom_emojis"]
     coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
     gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
     shop_emoji = str(BOT_BTN_EMOJIS.get("_shop", "🛒"))
 
-    async with bot.db.execute(
-        "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour "
-        "FROM items WHERE buyable = 1 ORDER BY price ASC"
-    ) as c:
+    async with bot.db.execute("SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
         rows = await c.fetchall()
 
     total = len(rows)
@@ -4189,27 +4186,20 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
 
-    embed = discord.Embed(
-        title=f"{shop_emoji} Магазин",
-        description=f"Страница {page + 1}/{total_pages}",
-        color=0xf1c40f
-    )
+    embed = discord.Embed(title=f"{shop_emoji} Магазин", description=f"Страница {page + 1}/{total_pages}", color=0xf1c40f)
     for item_id, name, price, income_coins, default_emoji, rarity, income_gems in chunk:
         emoji = custom.get(item_id, default_emoji)
         inc = []
-        if income_coins > 0:
-            inc.append(f"{coin} {income_coins * 3600:.2f}/час")
-        if income_gems > 0:
-            inc.append(f"{gem} {income_gems * 3600:.4f}/час")
+        if income_coins > 0: inc.append(f"{coin} {income_coins * 3600:.2f}/час")
+        if income_gems > 0: inc.append(f"{gem} {income_gems * 3600:.4f}/час")
         inc_str = " ".join(inc) if inc else "без дохода"
+        
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
             value=f"Цена: {coin} {format_price(price)} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
             inline=False
         )
-
-    embed = await fix_embed_emojis(embed)
-    return embed, total_pages
+    return await fix_embed_emojis(embed), total_pages
 
 
 async def build_achievements_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
@@ -4263,16 +4253,10 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     """) as c:
         rows = await c.fetchall()
 
-    order = {
-        "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
-        "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
-        "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
-    }
+    order = {"grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3, "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7, "vip": 10, "gold": 11, "platinum": 12, "diamond": 13}
     rows = sorted(rows, key=lambda r: order.get(r[0], 99))
 
-    async with bot.db.execute(
-        "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
-    ) as c:
+    async with bot.db.execute("SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)) as c:
         owned = {r[0] for r in await c.fetchall()}
 
     total = len(rows)
@@ -4280,21 +4264,19 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
 
-    embed = discord.Embed(
-        title=f"{up_emoji} Магазин улучшений",
-        description=f"Страница {page + 1}/{total_pages}",
-        color=0x9b59b6
-    )
+    embed = discord.Embed(title=f"{up_emoji} Магазин улучшений", description=f"Страница {page + 1}/{total_pages}", color=0x9b59b6)
     for gid, name, desc, price, emoji, currency in chunk:
         status = "✅ Куплено" if gid in owned else "🔒 Не куплено"
         price_str = f"{coin} {format_price(price)}" if currency == "coins" else f"{gem} {format_price(price)}"
-        embed.add_field(
-            name=f"{emoji} {name} (`{gid}`)",
-            value=f"{desc}\nЦена: {price_str}\n{status}",
-            inline=False
-        )
-    embed = await fix_embed_emojis(embed)
-    return embed, total_pages
+        
+        # Заменяем стандартные эмодзи статусов на кастомные из базы
+        if gid == "vip": emoji = str(BOT_BTN_EMOJIS.get("_vip", "⭐"))
+        elif gid == "gold": emoji = str(BOT_BTN_EMOJIS.get("_gold", "🥇"))
+        elif gid == "platinum": emoji = str(BOT_BTN_EMOJIS.get("_platinum", "💠"))
+        elif gid == "diamond": emoji = str(BOT_BTN_EMOJIS.get("_diamond", "💎"))
+        
+        embed.add_field(name=f"{emoji} {name} (`{gid}`)", value=f"{desc}\nЦена: {price_str}\n{status}", inline=False)
+    return await fix_embed_emojis(embed), total_pages
 
 
 async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -8457,18 +8439,11 @@ async def open_shop_buy_select(interaction: discord.Interaction, author_id: int,
     options = []
     for item_id, name, price, default_emoji in chunk:
         emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji(emoji_str)
-        options.append(discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=emoji_obj))
+        emoji_obj = parse_emoji(emoji_str) or "⚙️"
+        options.append(discord.SelectOption(label=f"{name} — 🪙 {format_price(price)}", value=item_id, emoji=emoji_obj))
         
-    embed = discord.Embed(
-        title="🛒 Выбери предмет",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из списка:",
-        color=0xf1c40f
-    )
-    await interaction.edit_original_response(
-        embed=embed,
-        view=ShopBuySelectView(author_id, options, page, total_pages)
-    )
+    embed = discord.Embed(title="🛒 Выбери предмет", description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из списка:", color=0xf1c40f)
+    await interaction.edit_original_response(embed=embed, view=ShopBuySelectView(author_id, options, page, total_pages))
 
 
 class ShopBuySelectView(discord.ui.View):
