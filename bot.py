@@ -163,6 +163,41 @@ TOGGLEABLE_COMMANDS = {
     "stats":        "Статистика",
 }
 
+# ============================================================
+#  🎨 КАСТОМНЫЕ ЭМОДЗИ (объявляем ДО EMOJI_KEYS)
+# ============================================================
+BOT_BTN_EMOJIS = {
+    # Валюты и ресурсы
+    "_coin":         discord.PartialEmoji(name="coin", id=1566288877369434122),
+    "_gem":          discord.PartialEmoji(name="gem", id=1566288868158738452),
+    "_castle":       discord.PartialEmoji(name="castle", id=156628869484142712),
+    "_storage":      discord.PartialEmoji(name="storage", id=1566288893849116712),
+    
+    # Меню и разделы
+    "_shop":         discord.PartialEmoji(name="buy", id=1566288887691874304),
+    "_upgrades":     discord.PartialEmoji(name="upgrade", id=1566288897057755146),
+    "_achievements": discord.PartialEmoji(name="achiv", id=1566288895526834266),
+    "_quests":       discord.PartialEmoji(name="quests", id=156628885984526376),
+    "_stats":        discord.PartialEmoji(name="analytic", id=1566288866409848874),
+    "_analytics":    discord.PartialEmoji(name="analytic", id=1566288866409848874),
+    "_settings":     discord.PartialEmoji(name="settings", id=1566288873947009115),
+    
+    # Действия
+    "_back":         discord.PartialEmoji(name="back", id=1566288863582887946),
+    "_forward":      discord.PartialEmoji(name="forward", id=156628864950362153),
+    "_move":         discord.PartialEmoji(name="changeplace", id=1566288884579434607),
+    "_swap":         discord.PartialEmoji(name="swap", id=156628889172205788),
+    "_sell":         discord.PartialEmoji(name="sell", id=1566288878690639999),
+    "_buy":          discord.PartialEmoji(name="buy", id=1566288887691874304),
+    "_synthesis":    discord.PartialEmoji(name="synthesis", id=1566288883174342826),
+    "_stars":        discord.PartialEmoji(name="stars", id=1566288892351610890),
+    "_market":       discord.PartialEmoji(name="market", id=1566288881609867354),
+    "_clan":         discord.PartialEmoji(name="clan", id=1566288880263630898),
+    "_raid":         discord.PartialEmoji(name="raidicon", id=1566288890917163068),
+    "_duel":         discord.PartialEmoji(name="duel", id=1566288898458390551),
+    "_switch":       discord.PartialEmoji(name="switch", id=1566288872185401436),
+}
+
 EMOJI_KEYS = {
     "_coin":         ("Монета", str(BOT_BTN_EMOJIS.get("_coin", "🪙"))),
     "_gem":          ("Гем", str(BOT_BTN_EMOJIS.get("_gem", "💎"))),
@@ -1605,38 +1640,6 @@ class CastleBot(commands.Bot):
 
 
 bot = CastleBot()
-BOT_BTN_EMOJIS = {
-    # Валюты и ресурсы
-    "_coin":         discord.PartialEmoji(name="coin", id=1566288877369434122),
-    "_gem":          discord.PartialEmoji(name="gem", id=1566288868158738452),
-    "_castle":       discord.PartialEmoji(name="castle", id=156628869484142712),
-    "_storage":      discord.PartialEmoji(name="storage", id=1566288893849116712),
-    
-    # Меню и разделы
-    "_shop":         discord.PartialEmoji(name="buy", id=1566288887691874304),
-    "_upgrades":     discord.PartialEmoji(name="upgrade", id=1566288897057755146),
-    "_achievements": discord.PartialEmoji(name="achiv", id=1566288895526834266),
-    "_quests":       discord.PartialEmoji(name="quests", id=156628885984526376),
-    "_stats":        discord.PartialEmoji(name="analytic", id=1566288866409848874),
-    "_analytics":    discord.PartialEmoji(name="analytic", id=1566288866409848874),
-    "_settings":     discord.PartialEmoji(name="settings", id=1566288873947009115),
-    
-    # Действия
-    "_back":         discord.PartialEmoji(name="back", id=1566288863582887946),
-    "_forward":      discord.PartialEmoji(name="forward", id=156628864950362153),
-    "_move":         discord.PartialEmoji(name="changeplace", id=1566288884579434607),
-    "_swap":         discord.PartialEmoji(name="swap", id=156628889172205788),
-    "_sell":         discord.PartialEmoji(name="sell", id=1566288878690639999),
-    "_buy":          discord.PartialEmoji(name="buy", id=1566288887691874304),
-    "_synthesis":    discord.PartialEmoji(name="synthesis", id=1566288883174342826),
-    "_stars":        discord.PartialEmoji(name="stars", id=1566288892351610890),
-    "_market":       discord.PartialEmoji(name="market", id=1566288881609867354),
-    "_clan":         discord.PartialEmoji(name="clan", id=1566288880263630898),
-    "_raid":         discord.PartialEmoji(name="raidicon", id=1566288890917163068),
-    "_duel":         discord.PartialEmoji(name="duel", id=1566288898458390551),
-    "_switch":       discord.PartialEmoji(name="switch", id=1566288872185401436),
-}
-
 
 # ============================================================
 #  🧰 НАСТРОЙКИ СЕРВЕРА
