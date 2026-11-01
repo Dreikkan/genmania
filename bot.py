@@ -10648,7 +10648,7 @@ class AdminProfileModal(discord.ui.Modal, title="Профиль игрока"):
 
         embed = discord.Embed(title=f"🛡️ Профиль <@{uid}>", color=0xe74c3c)
         embed.add_field(name="ID", value=f"`{uid}`", inline=False)
-        embed.add_field(name="Кошелёк", value=f"{COIN} {coins} | {GEM} {gems}"", inline=True)
+        embed.add_field(name="Кошелёк", value=f"{COIN} {coins} | {GEM} {gems}", inline=True)
         embed.add_field(name="Катализаторы", value=f"🧪 {catalysts}", inline=True)
         embed.add_field(name="Сетка", value=f"{grid_size}", inline=True)
         embed.add_field(name="Бонус", value=f"+{int(bonus * 100)}%", inline=True)
