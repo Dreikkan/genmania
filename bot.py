@@ -9198,12 +9198,6 @@ class UserProfileView(BaseView):
         await interaction.response.defer()
         await open_titles_view(interaction, self.author_id, 0, return_to="profile")
 
-    @discord.ui.button(label="Косметика", emoji=BOT_BTN_EMOJIS.get("_customization", "🎨"), style=discord.ButtonStyle.primary, row=0)
-    async def btn_cosmetics(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_cosmetics_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=CosmeticsView(self.author_id, return_to="profile"))
-
     @discord.ui.button(label="Достижения", emoji=BOT_BTN_EMOJIS.get("_achievements", "🏆"), style=discord.ButtonStyle.primary, row=0)
     async def btn_achievements(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -9259,7 +9253,7 @@ class UserProfileView(BaseView):
         await interaction.response.defer()
         embed = discord.Embed(
             title="🎨 Кастомизация",
-            description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+            description="Выбери раздел: титулы, косметика.",
             color=0x9b59b6,
         )
         await interaction.edit_original_response(
@@ -9271,6 +9265,7 @@ class UserProfileView(BaseView):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+        
 class CustomizationHubView(BaseView):
     @discord.ui.button(
         label="Титулы",
@@ -9281,19 +9276,6 @@ class CustomizationHubView(BaseView):
     async def btn_titles(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_titles_view(interaction, self.author_id, 0, return_to="hub")
-
-    @discord.ui.button(
-        label="Ежедневный вход",
-        emoji=BOT_BTN_EMOJIS.get("_dailyquests", "📅"),
-        style=discord.ButtonStyle.success,
-        row=0,
-    )
-    async def btn_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_daily_embed(interaction)
-        await interaction.edit_original_response(
-            embed=embed, view=DailyView(self.author_id, return_to="hub")
-        )
 
     @discord.ui.button(
         label="Косметика",
@@ -9307,20 +9289,6 @@ class CustomizationHubView(BaseView):
         await interaction.edit_original_response(
             embed=embed, view=CosmeticsView(self.author_id, return_to="hub")
         )
-
-    @discord.ui.button(
-        label="Сюжетные квесты",
-        emoji=BOT_BTN_EMOJIS.get("_storyquests", "📜"),
-        style=discord.ButtonStyle.secondary,
-        row=1,
-    )
-    async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_story_quests_embed(interaction)
-        await interaction.edit_original_response(
-            embed=embed, view=StoryQuestsView(self.author_id, return_to="hub")
-        )
-
     @discord.ui.button(
         label="Назад",
         emoji=BOT_BTN_EMOJIS.get("_back", "◀️"),
