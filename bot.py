@@ -4595,7 +4595,6 @@ class GuideView(BaseView):
         page = max(0, min(page, total_pages - 1))
         chunk = items[page*per_page:(page+1)*per_page]
 
-        # 5 разделов в первом ряду
         for idx, (key, (label, _desc)) in enumerate(chunk):
             btn = discord.ui.Button(
                 label=label[:80],
@@ -4605,7 +4604,6 @@ class GuideView(BaseView):
             btn.callback = self._make_section_callback(key)
             self.add_item(btn)
 
-        # Пагинация и назад во втором ряду
         if total_pages > 1:
             prev = discord.ui.Button(label="◀️", style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
