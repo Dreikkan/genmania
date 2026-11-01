@@ -1925,7 +1925,7 @@ async def get_settings(guild_id: int) -> dict:
     if not guild_id:
         return defaults
 
-    def replace_emojis(text: str) -> str:
+def replace_emojis(text: str) -> str:
     """Заменяет стандартные эмодзи на кастомные из BOT_BTN_EMOJIS."""
     if not isinstance(text, str):
         return text
