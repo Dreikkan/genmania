@@ -457,7 +457,7 @@ class CastleBot(commands.Bot):
         asyncio.create_task(self.notification_task())
         asyncio.create_task(self.war_closer())
 
-        async def war_closer(self):
+    async def war_closer(self):
         await self.wait_until_ready()
         while not self.is_closed():
             try:
@@ -485,8 +485,9 @@ class CastleBot(commands.Bot):
                     )
                     if winner:
                         await log_clan(winner, "war_win", f"Победа над кланом {c2 if winner == c1 else c1}")
+                        await update_clan_quest(winner, "war", 1)
+
                 await self.db.commit()
-                await update_clan_quest(winner, "war", 1)
             except Exception as e:
                 print(f"[WAR_CLOSER] Ошибка: {e}")
                 await asyncio.sleep(600)
