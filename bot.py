@@ -1308,9 +1308,6 @@ class CastleBot(commands.Bot):
                     await self.db.execute(
                         "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
                     )
-                    await self.db.execute(
-                        "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
-                    )
                 await self.db.commit()
             except Exception as e:
                 print(f"[AUCTION_CLOSER] Ошибка: {e}")
