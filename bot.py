@@ -169,7 +169,7 @@ TOGGLEABLE_COMMANDS = {
 BOT_BTN_EMOJIS = {
     "_coin":         discord.PartialEmoji(name="coin", id=1566288877369434122),
     "_gem":          discord.PartialEmoji(name="gem", id=1566288868158738452),
-    "_castle":       discord.PartialEmoji(name="castle", id=1566413253188390982),
+    "_castle":       discord.PartialEmoji(name="castle", id=1566413854219444224),
     "_storage":      discord.PartialEmoji(name="storage", id=1566288893849116712),
     "_shop":         discord.PartialEmoji(name="market", id=1566288881609867354),
     "_upgrades":     discord.PartialEmoji(name="upgrade", id=1566288897057755146),
