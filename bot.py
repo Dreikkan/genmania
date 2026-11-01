@@ -167,7 +167,7 @@ TOGGLEABLE_COMMANDS = {
 #  🎨 КАСТОМНЫЕ ЭМОДЗИ (объявляем ДО EMOJI_KEYS)
 # ============================================================
 BOT_BTN_EMOJIS = {
-    "_coin":         "🪙",
+    "_coin":         discord.PartialEmoji(name="coin", id=1566288877369434122),
     "_gem":          "💎",
     "_castle":       "🏰",
     "_storage":      "🎒",
