@@ -8641,7 +8641,7 @@ class BuyItemQuantityView(discord.ui.View):
 
         await update_story_quests(user_id, "buy", qty)
 
-    async def fail(self, interaction: discord.Interaction, button: discord.ui.Button, msg: str = ""):
+    async def fail(self, interaction: discord.Interaction, msg: str):
         embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
