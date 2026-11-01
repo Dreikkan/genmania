@@ -4064,6 +4064,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
 
     title, body = sections.get(key, ("📖 Путеводитель", "Раздел не найден."))
     embed = discord.Embed(title=title, description=body, color=0x3498db)
+    embed = await fix_embed_emojis(embed)
     return embed
 
 
