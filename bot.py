@@ -4740,13 +4740,13 @@ class GuideView(BaseView):
             )
         return callback
 
-    async def prev_page(self, interaction: discord.Interaction):
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         new_page = max(0, self.page - 1)
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id, new_page))
 
-    async def next_page(self, interaction: discord.Interaction):
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         items = list(GUIDE_SECTIONS.items())
         total_pages = (len(items) + 5 - 1) // 5
