@@ -4655,7 +4655,7 @@ class GuideSectionView(BaseView):
         super().__init__(author_id, timeout)
         self.page = page
 
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Назад", emoji="<:back:1566419637267071066>", style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
