@@ -4091,7 +4091,7 @@ async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Em
     embed.add_field(name="Лидер", value=f"<@{leader_id}>", inline=True)
     embed.add_field(name="Участников", value=str(len(members)), inline=True)
     embed.add_field(name="Мощь клана", value=str(power), inline=True)
-    embed.add_field(name="Сундук", value=f"🪙 {treasury}", inline=True)
+    embed.add_field(name="Сундук", value=f"{COIN} {treasury}", inline=True)
     embed.add_field(name="Бонус к доходу", value=f"+{int(bonus*100)}%", inline=True)
 
     embed = await fix_embed_emojis(embed)
@@ -4102,9 +4102,9 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
     custom = settings["custom_emojis"]
-    coin = custom.get("_coin", "🪙")
-    gem = custom.get("_gem", "💎")
-    shop_emoji = custom.get("_shop", "🛒")
+    coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+    gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
+    shop_emoji = str(BOT_BTN_EMOJIS.get("_shop", "🛒"))
 
     async with bot.db.execute(
         "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour "
@@ -4145,7 +4145,7 @@ async def build_achievements_page(interaction: discord.Interaction, page: int) -
     guild_id = interaction.guild_id
     custom = (await get_settings(guild_id))["custom_emojis"]
     ach_emoji = custom.get("_achievements", "🏆")
-    gem = custom.get("_gem", "💎")
+    gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
 
     async with bot.db.execute(
         "SELECT id, name, description, reward_gems, emoji FROM achievements ORDER BY reward_gems ASC"
@@ -4180,10 +4180,9 @@ async def build_achievements_page(interaction: discord.Interaction, page: int) -
 
 async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
     guild_id = interaction.guild_id
-    custom = (await get_settings(guild_id))["custom_emojis"]
-    gem = custom.get("_gem", "💎")
-    coin = custom.get("_coin", "🪙")
-    up_emoji = custom.get("_upgrades", "💎")
+    gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
+    coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+    up_emoji = str(BOT_BTN_EMOJIS.get("_upgrades", "💎"))
 
     async with bot.db.execute("""
         SELECT id, name, description, price_coins as price, emoji, 'coins' as currency FROM grid_shop
@@ -9088,97 +9087,61 @@ class AdminPanelPage2(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Питомцы", emoji="🐾", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Питомцы", emoji=BOT_BTN_EMOJIS.get("_pets", "🐾"), style=discord.ButtonStyle.primary, row=0)
     async def btn_pets(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🐾 Управление питомцами",
-            description="Выбери действие:",
-            color=0x9b59b6
-        )
+        embed = discord.Embed(title="🐾 Управление питомцами", description="Выбери действие:", color=0x9b59b6)
         await interaction.edit_original_response(embed=embed, view=AdminPetsView(self.author_id))
 
-    @discord.ui.button(label="Титулы", emoji="🏅", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Титулы", emoji=BOT_BTN_EMOJIS.get("_achievements", "🏅"), style=discord.ButtonStyle.primary, row=0)
     async def btn_titles(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🏅 Управление титулами",
-            description="Выбери действие:",
-            color=0xf1c40f
-        )
+        embed = discord.Embed(title="🏅 Управление титулами", description="Выбери действие:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=AdminTitlesView(self.author_id))
 
-    @discord.ui.button(label="Кланы", emoji="🏰", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Кланы", emoji=BOT_BTN_EMOJIS.get("_clan", "🏰"), style=discord.ButtonStyle.primary, row=0)
     async def btn_clans_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🏰 Управление кланами",
-            description="Выбери действие:",
-            color=0x3498db
-        )
+        embed = discord.Embed(title="🏰 Управление кланами", description="Выбери действие:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=AdminClansView(self.author_id))
 
-    @discord.ui.button(label="Аукцион", emoji="🏛️", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Аукцион", emoji=BOT_BTN_EMOJIS.get("_market", "🏛️"), style=discord.ButtonStyle.primary, row=1)
     async def btn_auction_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🏛️ Управление аукционом",
-            description="Выбери действие:",
-            color=0xf1c40f
-        )
+        embed = discord.Embed(title="🏛️ Управление аукционом", description="Выбери действие:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=AdminAuctionView(self.author_id))
 
-    @discord.ui.button(label="Банк", emoji="🏦", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Банк", emoji=BOT_BTN_EMOJIS.get("_bank", "🏦"), style=discord.ButtonStyle.primary, row=1)
     async def btn_bank_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🏦 Управление банком",
-            description="Выбери действие:",
-            color=0x2ecc71
-        )
+        embed = discord.Embed(title="🏦 Управление банком", description="Выбери действие:", color=0x2ecc71)
         await interaction.edit_original_response(embed=embed, view=AdminBankView(self.author_id))
 
-    @discord.ui.button(label="Автосборщик", emoji="🤖", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Автосборщик", emoji=BOT_BTN_EMOJIS.get("_autocollector", "🤖"), style=discord.ButtonStyle.primary, row=1)
     async def btn_autocollector_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🤖 Управление автосборщиком",
-            description="Выбери действие:",
-            color=0x3498db
-        )
+        embed = discord.Embed(title="🤖 Управление автосборщиком", description="Выбери действие:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=AdminAutocollectorView(self.author_id))
 
-    @discord.ui.button(label="Адвент", emoji="🎄", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Адвент", emoji=BOT_BTN_EMOJIS.get("_advent", "🎄"), style=discord.ButtonStyle.primary, row=2)
     async def btn_advent_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🎄 Управление адвентом",
-            description="Выбери действие:",
-            color=0xe74c3c
-        )
+        embed = discord.Embed(title="🎄 Управление адвентом", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminAdventView(self.author_id))
 
-    @discord.ui.button(label="Прогресс", emoji="📅", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Прогресс", emoji=BOT_BTN_EMOJIS.get("_quests", "📅"), style=discord.ButtonStyle.primary, row=2)
     async def btn_progress_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="📅 Управление прогрессом",
-            description="Дейли и сюжетные квесты:",
-            color=0x3498db
-        )
+        embed = discord.Embed(title="📅 Управление прогрессом", description="Дейли и сюжетные квесты:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=AdminProgressView(self.author_id))
 
-    @discord.ui.button(label="Прочее", emoji="⚙️", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Прочее", emoji=BOT_BTN_EMOJIS.get("_settings", "⚙️"), style=discord.ButtonStyle.primary, row=2)
     async def btn_misc_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="⚙️ Прочее",
-            description="Уведомления и достижения:",
-            color=0x808080
-        )
+        embed = discord.Embed(title="⚙️ Прочее", description="Уведомления и достижения:", color=0x808080)
         await interaction.edit_original_response(embed=embed, view=AdminMiscView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=4)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛡️ Панель администратора", color=0xe74c3c)
@@ -10981,47 +10944,47 @@ class SettingsView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Общие", emoji="🌐", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Общие", BOT_BTN_EMOJIS.get("_settings", "🌐"), style=discord.ButtonStyle.primary, row=0)
     async def general(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SettingsGeneralModal(self.author_id))
 
-    @discord.ui.button(label="Экономика", emoji="💰", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Экономика", BOT_BTN_EMOJIS.get("_coin", "💰"), style=discord.ButtonStyle.success, row=0)
     async def economy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="💰 Экономика", description="Цены, доход, стартовые монеты, потолок, лимит.", color=0x2ecc71)
         await interaction.edit_original_response(embed=embed, view=SettingsEconomyView(self.author_id))
 
-    @discord.ui.button(label="Валюты", emoji="🪙", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Валюты", BOT_BTN_EMOJIS.get("_coin", "🪙"), style=discord.ButtonStyle.secondary, row=1)
     async def currencies(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SettingsCurrencyModal(self.author_id))
 
-    @discord.ui.button(label="Команды", emoji="🚫", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Команды", BOT_BTN_EMOJIS.get("_reset", "🚫"), style=discord.ButtonStyle.secondary, row=1)
     async def commands(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🚫 Отключение команд", description="Выбери команды.", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SettingsCommandsView(self.author_id))
 
-    @discord.ui.button(label="Роли за статус", emoji="🎭", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Роли за статус", BOT_BTN_EMOJIS.get("_profile", "🎭"), style=discord.ButtonStyle.secondary, row=2)
     async def status_roles(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SettingsStatusRoleModal(self.author_id))
 
-    @discord.ui.button(label="Достижения", emoji="🏆", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Достижения", BOT_BTN_EMOJIS.get("_achievements", "🏆"), style=discord.ButtonStyle.secondary, row=2)
     async def achievements(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🏆 Управление достижениями", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=SettingsAchievementsView(self.author_id))
 
-    @discord.ui.button(label="Роль админа", emoji="👑", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Роль админа", BOT_BTN_EMOJIS.get("_settings", "👑"), style=discord.ButtonStyle.danger, row=3)
     async def admin_role(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SettingsAdminRoleModal(self.author_id))
 
-    @discord.ui.button(label="Эмодзи", emoji="🎨", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Эмодзи", BOT_BTN_EMOJIS.get("_customization", "🎨"), style=discord.ButtonStyle.secondary, row=3)
     async def emojis(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🎨 Кастомные эмодзи", description="Выбери, что изменить.", color=0x9b59b6)
         await interaction.edit_original_response(embed=embed, view=SettingsEmojisView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Назад", BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛡️ Панель администратора", color=0xe74c3c)
