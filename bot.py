@@ -4812,11 +4812,11 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
         """, (target, now.isoformat(), now.isoformat()))
         await bot.db.commit()
 
-        if success:
+                if success:
             # Забираем 15% баланса
             async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (target,)) as c:
                 victim_coins = (await c.fetchone())[0]
-            
+
             pet_loot = await get_pet_bonus(self.author_id, "raid_loot")
             title_loot = await get_title_bonus(self.author_id, "raid_loot")
             loot = int(victim_coins * (0.15 + pet_loot + title_loot))
@@ -4827,16 +4827,19 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
                 msg = f"🏆 **Успешный рейд!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nВы украли 🪙 **{loot}** монет!"
             else:
                 msg = "🏆 Победа, но у врага пустой кошелёк."
+
+            # клановый квест
+            clan = await get_clan(self.author_id)
+            if clan:
+                await update_clan_quest(clan[0], "raid", 1)
+
+            # сюжетный квест
+            await update_story_quests(self.author_id, "raid_win", 1)
         else:
             msg = f"💥 **Провал!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nТы ничего не украл."
 
         embed = discord.Embed(title="Результат рейда", description=msg, color=0x2ecc71 if success else 0xe74c3c)
         await interaction.followup.send(embed=embed)
-         # клановый квест
-         clan = await get_clan(self.author_id)
-        if clan:
-        await update_clan_quest(clan[0], "raid", 1)
-        await update_story_quests(self.author_id, "raid_win", 1)
 
 class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
     opponent_id = discord.ui.TextInput(label="ID противника", required=True)
