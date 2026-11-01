@@ -4204,7 +4204,7 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
         inc_str = " ".join(inc) if inc else "без дохода"
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
-            value=f"Цена: {coin} {format_price(price)} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",,
+            value=f"Цена: {coin} {format_price(price)} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
             inline=False
         )
 
