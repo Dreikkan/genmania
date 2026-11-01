@@ -6306,10 +6306,18 @@ async def open_pets_shop(interaction: discord.Interaction, author_id: int):
     options = []
     for pid, pt in PET_TYPES.items():
         if pid in owned:
-            continue  # купленных не показываем
+            continue
+            
+        # Парсим строку <:cat:id> в объект PartialEmoji
+        emoji_obj = parse_emoji(pt["emoji"]) 
+        if not emoji_obj:
+            emoji_obj = "🐾" # Фолбэк, если что-то пошло не так
+
         options.append(discord.SelectOption(
-            label=f"{pt['emoji']} {pt['name']} — 💎 {pt['price_gems']}",
-            value=pid, description=pt["desc"][:100]
+            label=f"{pt['name']} — 💎 {pt['price_gems']}",
+            value=pid, 
+            description=pt["desc"][:100],
+            emoji=emoji_obj
         ))
 
     if not options:
@@ -6318,11 +6326,11 @@ async def open_pets_shop(interaction: discord.Interaction, author_id: int):
             description="Ты уже купил всех питомцев! 🎉\nСмени активного в меню «Питомцы».",
             color=0x9b59b6
         )
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
         async def _back(i: discord.Interaction):
             await i.response.defer()
             embed2 = await build_pets_embed(i)
-            await i.edit_original_response(embed=embed2, view=PetsView(author_id))
+            await i.edit_original_response(embed=embed2, view=PetsView(author_id, return_to="shop"))
         back.callback = _back
         view = discord.ui.View()
         view.add_item(back)
@@ -6330,8 +6338,8 @@ async def open_pets_shop(interaction: discord.Interaction, author_id: int):
         return
 
     embed = discord.Embed(
-        title="🛒 Магазин питомцев",
-        description=f"У тебя 💎 {gems}. Выбери питомца:",
+        title=f"{BOT_BTN_EMOJIS.get('_pets', '🐾')} Магазин питомцев",
+        description=f"У тебя {BOT_BTN_EMOJIS.get('_gem', '💎')} {gems}. Выбери питомца:",
         color=0x9b59b6
     )
     await interaction.edit_original_response(embed=embed, view=PetsShopView(author_id, options))
@@ -8013,44 +8021,73 @@ class CatalystSelectView(discord.ui.View):
         await interaction.response.defer()
         qty = int(interaction.data["values"][0])
         user_id = interaction.user.id
-        total = CATALYST_PRICE * qty
 
-        async with bot.db.execute("SELECT gems, catalysts FROM players WHERE user_id = ?", (user_id,)) as c:
-            gems, owned = await c.fetchone()
-        if gems < total:
-            embed = discord.Embed(
-                title="❌ Не хватает гемов",
-                description=f"Нужно 💎 {total}, у тебя {gems}.",
-                color=0xe74c3c
-            )
-            await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
-            return
+        async with bot.db.execute("SELECT price, name, buyable, emoji FROM items WHERE id = ?", (self.item_id,)) as c:
+            item = await c.fetchone()
+            
+        if not item:
+            return await self.fail(interaction, "❌ Предмет не найден.")
+            
+        price, name, buyable, default_emoji = item
+        
+        if not buyable:
+            return await self.fail(interaction, f"❌ **{name}** нельзя купить.")
 
-        await bot.db.execute(
-            "UPDATE players SET gems = gems - ?, catalysts = catalysts + ? WHERE user_id = ?",
-            (total, qty, user_id)
+        total_cost = price * qty
+
+        # Проверка баланса
+        async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (user_id,)) as c:
+            balance = (await c.fetchone())[0]
+            
+        if balance < total_cost:
+            coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+            return await self.fail(interaction, f"❌ Нужно {total_cost} {coin}, у тебя {balance}.")
+
+        # --- ТРАНЗАКЦИЯ (НОВАЯ, БЕЗ db_transaction) ---
+        cursor = await bot.db.execute(
+            "UPDATE players SET coins = coins - ? WHERE user_id = ? AND coins >= ?",
+            (total_cost, user_id, total_cost)
         )
+        
+        if cursor.rowcount == 0:
+            coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+            return await self.fail(interaction, f"❌ Не хватает монет (нужно {total_cost} {coin}).")
+
+        try:
+            to_profile, to_storage = await place_items(user_id, self.item_id, qty)
+        except ValueError as e:
+            await bot.db.rollback()
+            return await self.fail(interaction, f"❌ {e}")
+
         await bot.db.commit()
+        # --- КОНЕЦ ТРАНЗАКЦИИ ---
 
-        embed = discord.Embed(
-            title="🧪 Катализатор куплен",
-            description=(
-                f"Куплено **{qty}** катализатор(ов) за 💎 {total}.\n"
-                f"Эффект: +{int(CATALYST_BONUS * 100)}% к шансу следующего синтеза.\n"
-                f"Всего катализаторов: **{owned + qty}**."
-            ),
-            color=0x2ecc71
-        )
-        await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
+        # Обновляем инвентарь и квесты
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
 
-    async def cancel(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        embed = discord.Embed(
-            title="🛒 Магазин",
-            description="Выбери раздел:",
-            color=0xf1c40f
-        )
-        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
+        await update_quest_progress(user_id, "buy_3", qty)
+        unlocked = await check_achievements(user_id)
+
+        coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+        emoji = default_emoji or "⚙️" 
+        
+        msg = f"✅ Куплено {emoji} **{name}** x{qty} за {coin} {format_price(total_cost)}."
+        if to_storage > 0:
+            msg += f"\n📦 {to_profile} в замок, {to_storage} в хранилище (в замке не хватило места)."
+        if unlocked:
+            msg += "\n🏆 " + ", ".join(f"{e} {n}" for e, n, _ in unlocked)
+            
+        embed = discord.Embed(title="🛒 Покупка", description=msg, color=0x2ecc71)
+        embed = await fix_embed_emojis(embed)
+        await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
+        
+        # Клановый квест
+        clan = await get_clan(user_id)
+        if clan:
+            await update_clan_quest(clan[0], "buy", qty)
+
+        await update_sory_quests(user_id, "buy", qty)
 
 
 # ============================================================
@@ -8388,23 +8425,48 @@ class ShopView(BaseView):
         self.add_buttons()
 
     def add_buttons(self):
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+        back = discord.ui.Button(
+            label="Назад", 
+            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            style=discord.ButtonStyle.secondary, 
+            row=0
+        )
         back.callback = self.back
         self.add_item(back)
-        buy = discord.ui.Button(label="Купить", emoji="🛍️", style=discord.ButtonStyle.success, row=0)
+        
+        buy = discord.ui.Button(
+            label="Купить", 
+            emoji=BOT_BTN_EMOJIS.get("_buy", "🛍️"), 
+            style=discord.ButtonStyle.success, 
+            row=0
+        )
         buy.callback = self.buy
         self.add_item(buy)
-        prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+        
+        prev = discord.ui.Button(
+            label="◀️ Стр.", 
+            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            style=discord.ButtonStyle.secondary, 
+            row=1
+        )
         prev.callback = self.prev_page
         self.add_item(prev)
-        nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+        
+        nxt = discord.ui.Button(
+            label="Стр. ▶️", 
+            emoji=BOT_BTN_EMOJIS.get("_forward", "▶️"), 
+            style=discord.ButtonStyle.secondary, 
+            row=1
+        )
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-    async def back(self, interaction: discord.Interaction):
-        await self.back_to_main(interaction)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
+        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    async def buy(self, interaction: discord.Interaction):
+    async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         async with bot.db.execute(
             "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
@@ -8415,13 +8477,13 @@ class ShopView(BaseView):
             return
         await open_shop_buy_select(interaction, self.author_id, rows, 0)
 
-    async def prev_page(self, interaction: discord.Interaction):
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         self.page = max(0, self.page - 1)
         embed, _ = await build_shop_page(interaction, self.page)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    async def next_page(self, interaction: discord.Interaction):
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed, total = await build_shop_page(interaction, self.page + 1)
         self.page = min(total - 1, self.page + 1)
@@ -8511,68 +8573,67 @@ class BuyItemQuantityView(discord.ui.View):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.item_id = item_id
+        
         options = [discord.SelectOption(label=f"{q} шт", value=str(q)) for q in (1, 5, 10, 25, 50)]
         self.add_item(make_select("Сколько купить?", options, self.quantity_select, row=0))
         
-        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=1)
+        back = discord.ui.Button(
+            label="Назад", 
+            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            style=discord.ButtonStyle.secondary, 
+            row=1
+        )
         back.callback = self.back
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return interaction.user.id == self.author_id
 
     async def quantity_select(self, interaction: discord.Interaction):
         await interaction.response.defer()
         qty = int(interaction.data["values"][0])
         user_id = interaction.user.id
 
-        async with bot.db.execute("SELECT price, name, buyable FROM items WHERE id = ?", (self.item_id,)) as c:
+        async with bot.db.execute("SELECT price, name, buyable, emoji FROM items WHERE id = ?", (self.item_id,)) as c:
             item = await c.fetchone()
+            
         if not item:
-            await self.fail(interaction, "❌ Предмет не найден.")
-            return
-        price, name, buyable = item
+            return await self.fail(interaction, "❌ Предмет не найден.")
+            
+        price, name, buyable, default_emoji = item
+        
         if not buyable:
-            await self.fail(interaction, f"❌ **{name}** нельзя купить.")
-            return
+            return await self.fail(interaction, f"❌ **{name}** нельзя купить.")
 
         total_cost = price * qty
 
-        # проверка (вне транзакции)
+        # Проверка баланса
         async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (user_id,)) as c:
             balance = (await c.fetchone())[0]
+            
         if balance < total_cost:
-            await self.fail(interaction, f"❌ Нужно {total_cost} монет, у тебя {balance}.")
-            return
+            coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+            return await self.fail(interaction, f"❌ Нужно {total_cost} {coin}, у тебя {balance}.")
 
-        # транзакция (списание + выдача)
-        async with db_transaction():
-            # повторная проверка (на случай race condition)
-            async with bot.db.execute(
-                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
-            ) as c:
-                balance = (await c.fetchone())[0]
-            if balance < total_cost:
-                raise ValueError("Недостаточно монет (race condition)")
-            await bot.db.execute(
-                "UPDATE players SET coins = coins - ? WHERE user_id = ?",
-                (total_cost, user_id)
-            )
-            try:
-                await place_items(user_id, self.item_id, qty)
-            except ValueError as e:
-                raise ValueError(str(e))
+        # Транзакция
+        # 1. Пытаемся списать монеты. Если денег не хватит, rowcount будет 0.
+        cursor = await bot.db.execute(
+            "UPDATE players SET coins = coins - ? WHERE user_id = ? AND coins >= ?",
+            (total_cost, user_id, total_cost)
+        )
+        
+        if cursor.rowcount == 0:
+            coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+            return await self.fail(interaction, f"❌ Не хватает монет (нужно {total_cost} {coin}).")
 
+        # 2. Пытаемся выдать предметы
         try:
             to_profile, to_storage = await place_items(user_id, self.item_id, qty)
         except ValueError as e:
-            await self.fail(interaction, f"❌ {e}")
-            return
+            # Если не хватило места, откатываем списание
+            await bot.db.rollback()
+            return await self.fail(interaction, f"❌ {e}")
 
-        await bot.db.execute("UPDATE players SET coins = coins - ? WHERE user_id = ?", (total_cost, user_id))
         await bot.db.commit()
 
         await sort_inventory(user_id, "profile")
@@ -8581,14 +8642,20 @@ class BuyItemQuantityView(discord.ui.View):
         await update_quest_progress(user_id, "buy_3", qty)
         unlocked = await check_achievements(user_id)
 
-        msg = f"✅ Куплено **{name}** x{qty} за {total_cost} монет."
+        coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+        emoji = default_emoji or "⚙️" 
+        
+        msg = f"✅ Куплено {emoji} **{name}** x{qty} за {coin} {format_price(total_cost)}."
         if to_storage > 0:
             msg += f"\n📦 {to_profile} в замок, {to_storage} в хранилище (в замке не хватило места)."
         if unlocked:
             msg += "\n🏆 " + ", ".join(f"{e} {n}" for e, n, _ in unlocked)
+            
         embed = discord.Embed(title="🛒 Покупка", description=msg, color=0x2ecc71)
+        embed = await fix_embed_emojis(embed)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
-                # клановый квест
+        
+        # Клановый квест
         clan = await get_clan(user_id)
         if clan:
             await update_clan_quest(clan[0], "buy", qty)
@@ -8599,10 +8666,13 @@ class BuyItemQuantityView(discord.ui.View):
         embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
-    async def back(self, interaction: discord.Interaction):
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed, _ = await build_shop_page(interaction, 0)
-        await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
+        async with bot.db.execute(
+            "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
+        ) as c:
+            rows = await c.fetchall()
+        await open_shop_buy_select(interaction, self.author_id, rows, 0)
 
 
 # ============================================================
@@ -10449,20 +10519,23 @@ class AdminGrantView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.author_id = author_id
         self.currency = "coins"
-        options = [discord.SelectOption(label="Монеты", value="coins", emoji="🪙"), discord.SelectOption(label="Гемы", value="gems", emoji="💎")]
+        
+        options = [
+            discord.SelectOption(label="Монеты", value="coins", emoji=BOT_BTN_EMOJIS.get("_coin", "🪙")), 
+            discord.SelectOption(label="Гемы", value="gems", emoji=BOT_BTN_EMOJIS.get("_gem", "💎"))
+        ]
         self.add_item(make_select("Выбери валюту", options, self.currency_select, row=0))
-        enter = discord.ui.Button(label="Ввести ID", emoji="📝", style=discord.ButtonStyle.primary, row=1)
+        
+        enter = discord.ui.Button(label="Ввести ID", emoji=BOT_BTN_EMOJIS.get("_settings", "📝"), style=discord.ButtonStyle.primary, row=1)
         enter.callback = self.enter
         self.add_item(enter)
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return interaction.user.id == self.author_id
 
     async def currency_select(self, interaction: discord.Interaction):
         self.currency = interaction.data["values"][0]
@@ -10473,7 +10546,7 @@ class AdminGrantView(discord.ui.View):
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = discord.Embed(title="🛡️ Панель администратора", color=0xe74c3c)
+        embed = discord.Embed(title=f"{BOT_BTN_EMOJIS.get('_settings', '🛡️')} Панель администратора", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
 
 
@@ -10482,20 +10555,23 @@ class AdminTakeView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.author_id = author_id
         self.currency = "coins"
-        options = [discord.SelectOption(label="Монеты", value="coins", emoji="🪙"), discord.SelectOption(label="Гемы", value="gems", emoji="💎")]
+        
+        options = [
+            discord.SelectOption(label="Монеты", value="coins", emoji=BOT_BTN_EMOJIS.get("_coin", "🪙")), 
+            discord.SelectOption(label="Гемы", value="gems", emoji=BOT_BTN_EMOJIS.get("_gem", "💎"))
+        ]
         self.add_item(make_select("Выбери валюту", options, self.currency_select, row=0))
-        enter = discord.ui.Button(label="Ввести ID", emoji="📝", style=discord.ButtonStyle.primary, row=1)
+        
+        enter = discord.ui.Button(label="Ввести ID", emoji=BOT_BTN_EMOJIS.get("_settings", "📝"), style=discord.ButtonStyle.primary, row=1)
         enter.callback = self.enter
         self.add_item(enter)
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return interaction.user.id == self.author_id
 
     async def currency_select(self, interaction: discord.Interaction):
         self.currency = interaction.data["values"][0]
@@ -10506,38 +10582,8 @@ class AdminTakeView(discord.ui.View):
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = discord.Embed(title="🛡️ Панель администратора", color=0xe74c3c)
+        embed = discord.Embed(title=f"{BOT_BTN_EMOJIS.get('_settings', '🛡️')} Панель администратора", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
-
-async def open_admin_logs(interaction: discord.Interaction, author_id: int, page: int = 0):
-    async with bot.db.execute("""
-        SELECT admin_id, target_id, action, details, timestamp
-        FROM admin_log ORDER BY id DESC LIMIT ? OFFSET ?
-    """, (PAGE_SIZE, page * PAGE_SIZE)) as c:
-        rows = await c.fetchall()
-
-    async with bot.db.execute("SELECT COUNT(*) FROM admin_log") as c:
-        total = (await c.fetchone())[0]
-
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = rows
-
-    embed = discord.Embed(
-        title="📜 Логи администрации",
-        description=f"Страница {page + 1}/{total_pages} | Всего записей: {total}",
-        color=0xe74c3c
-    )
-    if not chunk:
-        embed.add_field(name="Пусто", value="Действий пока не было.")
-    for admin_id, target_id, action, details, ts in chunk:
-        embed.add_field(
-            name=f"`{action}` — <@{admin_id}> → <@{target_id}>",
-            value=f"{details}\n{ts}",
-            inline=False
-        )
-    view = AdminLogsView(author_id, page, total_pages)
-    await interaction.edit_original_response(embed=embed, view=view)
 
 
 class AdminLogsView(discord.ui.View):
