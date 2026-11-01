@@ -5249,6 +5249,12 @@ class SocialView(BaseView):
         trio.callback = lambda i: open_raid_targets(i, self.author_id, 3)
         view.add_item(trio)
 
+        @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
+        async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await interaction.response.defer()
+            embed = await build_main_embed(interaction)
+            await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
         await interaction.edit_original_response(embed=embed, view=view)
 
     @discord.ui.button(label="Дуэль", emoji=get_emoji("_duel"), style=discord.ButtonStyle.success, row=0)
