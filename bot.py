@@ -174,10 +174,76 @@ TOGGLEABLE_COMMANDS = {
 USE_CUSTOM_EMOJIS = False
 # ============================================================
 
-# Список кастомных эмодзи, которые РАЗРЕШЕНО использовать.
-# Добавляйте сюда ключи по одному, чтобы проверить их работу.
-ENABLED_CUSTOM_EMOJIS = {"_clan", "_raid", "_market", "_bank", "_duel", "_coop", "_leaderboards", "_profile"} 
-# Например: ENABLED_CUSTOM_EMOJIS = {"_coin", "_gem", "_clan"}
+# ============================================================
+#  🎨 БЕЗОПАСНЫЕ ЭМОДЗИ
+# ============================================================
+ENABLED_CUSTOM_EMOJIS = {
+    # Валюты и ресурсы
+    "_coin", "_gem", "_castle", "_storage",
+    
+    # Меню и разделы
+    "_shop", "_upgrades", "_achievements", "_quests", 
+    "_dailyquests", "_storyquests", "_stats", "_settings", 
+    "_customization", "_notifications", "_autocollector", 
+    "_advent", "_inventory",
+    
+    # Действия
+    "_back", "_forward", "_move", "_swap", "_sorting", "_sell", 
+    "_buy", "_synthesis", "_stars", "_catalyst", "_echange", 
+    "_switch", "_reset",
+    
+    # Социум и экономика
+    "_market", "_bank", "_clan", "_raid", "_duel", "_coop", 
+    "_leaderboards", "_profile",
+    
+    # Питомцы
+    "_cat", "_dog", "_dragon", "_phoenix", "_wolf", "_pets",
+
+    # Статусы
+    "_vip", "_platinum", "_gold", "_diamond",
+    
+    # Титул
+    "_title",
+    
+    # Достижения
+    "_ach_first", "_ach_star1", "_ach_chemist", "_ach_rich", 
+    "_ach_million", "_ach_master", "_ach_lucky", "_ach_fortune", 
+    "_ach_legend", "_ach_unlucky", "_ach_starcol", "_ach_gem"
+}
+
+def get_emoji(key: str):
+    """Безопасно возвращает кастомный или стандартный эмодзи для КНОПОК."""
+    if key in ENABLED_CUSTOM_EMOJIS and key in BOT_BTN_EMOJIS:
+        val = BOT_BTN_EMOJIS[key]
+        # Если это объект PartialEmoji или Emoji — отдаем как есть
+        if isinstance(val, (discord.PartialEmoji, discord.Emoji)):
+            return val
+    return UNICODE_EMOJIS.get(key, "❔")
+
+def parse_emoji_safe(emoji_input) -> discord.PartialEmoji | str | None:
+    """Безопасно парсит эмодзи для ВЫПАДАЮЩИХ СПИСКОВ (SelectOption)."""
+    if not emoji_input:
+        return None
+        
+    # Если уже объект — отдаем
+    if isinstance(emoji_input, (discord.PartialEmoji, discord.Emoji)):
+        return emoji_input
+        
+    # Если это строка <:name:id> или <a:name:id>
+    if isinstance(emoji_input, str):
+        emoji_input = emoji_input.strip()
+        m = CUSTOM_EMOJI_RE.match(emoji_input)
+        if m:
+            # Пытаемся найти этот ID в загруженных кастомных эмодзи
+            for k, v in BOT_BTN_EMOJIS.items():
+                if isinstance(v, (discord.PartialEmoji, discord.Emoji)) and v.id == int(m.group(1)):
+                    if k in ENABLED_CUSTOM_EMOJIS:
+                        return v
+            # Если ID не включен — возвращаем None, чтобы список не упал
+            return None
+            
+    # Если это обычная строка (юникод)
+    return emoji_input
 
 
 
@@ -294,13 +360,6 @@ UNICODE_EMOJIS = {
     "_ach_million": "💰", "_ach_master": "🔮", "_ach_lucky": "🍀", "_ach_fortune": "🎰",
     "_ach_legend": "🌠", "_ach_unlucky": "💥", "_ach_starcol": "🌟", "_ach_gem": "💎",
 }
-
-def get_emoji(key: str):
-    # Если ключ в белом списке и он есть в словаре кастомных эмодзи — отдаем кастомный
-    if key in ENABLED_CUSTOM_EMOJIS and key in BOT_BTN_EMOJIS:
-        return BOT_BTN_EMOJIS[key]
-    # Иначе отдаем стандартный юникод
-    return UNICODE_EMOJIS.get(key, "❔")
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
 
@@ -1990,10 +2049,11 @@ class CastleBot(commands.Bot):
                 print(f"[NOTIFICATION_TASK] Ошибка: {e}")
                 await asyncio.sleep(600)
 
-    async def load_application_emojis(self):
+        async def load_application_emojis(self):
         """Загружает application emojis и подменяет BOT_BTN_EMOJIS на реальные объекты."""
         try:
             app_emojis = await self.fetch_application_emojis()
+            print(f"[EMOJI] Успешно загружено {len(app_emojis)} эмодзи приложения.")
         except discord.HTTPException as e:
             print(f"[EMOJI] Не удалось загрузить application emojis: {e}")
             return
@@ -2001,35 +2061,29 @@ class CastleBot(commands.Bot):
         by_name = {e.name: e for e in app_emojis}
         by_id = {e.id: e for e in app_emojis}
 
-        fallback_map = {
-            "_coin": "🪙", "_gem": "💎", "_castle": "🏰", "_storage": "🎒",
-            "_shop": "🛒", "_upgrades": "💎", "_achievements": "🏆",
-            "_quests": "📅", "_stats": "📊", "_settings": "⚙️",
-            "_back": "◀️", "_forward": "▶️", "_move": "🔀", "_swap": "↔️",
-            "_sell": "💰", "_buy": "🛒", "_synthesis": "⚗️", "_stars": "⭐",
-            "_catalyst": "🧪", "_echange": "💱", "_switch": "🔄", "_reset": "🗑️",
-            "_market": "🏛️", "_bank": "🏦", "_clan": "⚔️", "_raid": "🏰",
-            "_duel": "🤺", "_coop": "👥", "_leaderboards": "📊", "_profile": "👤",
-            "_cat": "🐱", "_dog": "🐶", "_dragon": "🐲", "_phoenix": "🔥",
-            "_wolf": "🐺", "_pets": "🐾", "_title": "🏅",
-        }
-
+        loaded_count = 0
         for key, value in list(BOT_BTN_EMOJIS.items()):
+            # Если это объект PartialEmoji (как у вас в словаре)
             if isinstance(value, discord.PartialEmoji):
                 emoji = by_id.get(value.id) or by_name.get(value.name)
                 if emoji:
                     BOT_BTN_EMOJIS[key] = emoji
+                    loaded_count += 1
                 else:
-                    fallback = fallback_map.get(key, "❔")
-                    BOT_BTN_EMOJIS[key] = fallback
-                    print(f"[EMOJI] {key} (id={value.id}, name={value.name}) не найден — фолбэк {fallback}")
+                    print(f"[EMOJI] Внимание: {key} (id={value.id}, name={value.name}) не найден в приложении!")
+            
+            # Если это строка вида <:name:id>
             elif isinstance(value, str) and value.startswith("<") and value.endswith(">"):
-                # строки вида <:name:id> — вытащим ID и попробуем найти
                 m = re.search(r":(\d+)>$", value)
                 if m:
                     emoji = by_id.get(int(m.group(1)))
                     if emoji:
                         BOT_BTN_EMOJIS[key] = emoji
+                        loaded_count += 1
+                    else:
+                        print(f"[EMOJI] Внимание: {key} (строка {value}) не найден!")
+                        
+        print(f"[EMOJI] Заменено {loaded_count} кастомных эмодзи на рабочие объекты.")
 
 bot = CastleBot()
 
@@ -2088,7 +2142,8 @@ def format_price(price: int) -> str:
 def replace_emojis_in_text(text: str) -> str:
     if not isinstance(text, str):
         return text
-    
+        
+    # Если эмодзи не в белом списке, функция get_emoji вернет стандартный Unicode
     replacements = {
         "🪙": get_emoji("_coin"),
         "💎": get_emoji("_gem"),
@@ -2104,7 +2159,8 @@ def replace_emojis_in_text(text: str) -> str:
         "🎄": get_emoji("_advent"),
     }
     for old, new in replacements.items():
-        text = text.replace(old, new)
+        # Приводим к строке, так как replace требует строку
+        text = text.replace(old, str(new))
     return text
 
 
@@ -2201,16 +2257,6 @@ def is_valid_emoji(s: str) -> bool:
     if CUSTOM_EMOJI_RE.match(s): return True
     if len(s) <= 8 and not s.isascii(): return True
     return False
-
-def parse_emoji(emoji_str: str):
-    """Возвращает discord.PartialEmoji для кастомных, или строку для юникодных."""
-    m = CUSTOM_EMOJI_RE.match(emoji_str)
-    if m:
-        try:
-            return discord.PartialEmoji(name="custom", id=int(m.group(1)))
-        except:
-            return None
-    return emoji_str
 
 def format_slot(emoji: str, stars: int) -> str:
     """Добавляет пробелы, не ломая кастомные эмодзи."""
@@ -4773,14 +4819,14 @@ class BaseView(discord.ui.View):
 # ============================================================
 
 class MainMenuView(BaseView):
-    @discord.ui.button(label="Замок", emoji=BOT_BTN_EMOJIS.get("_castle", "🏰"), style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Замок", emoji=get_emoji("_castle"), style=discord.ButtonStyle.primary, row=0)
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
-        embed = await fix_embed_emojis(embed)  # <--- ДОБАВИТЬ ЭТУ СТРОКУ
+        embed = await fix_embed_emojis(embed)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
-    @discord.ui.button(label="Магазин", emoji=BOT_BTN_EMOJIS.get("_shop", "🛒"), style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Магазин", emoji=get_emoji("_shop"), style=discord.ButtonStyle.success, row=0)
     async def tab_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
@@ -4792,47 +4838,29 @@ class MainMenuView(BaseView):
         embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
 
-    @discord.ui.button(label="Мой профиль", emoji=BOT_BTN_EMOJIS.get("_settings", "👤"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Мой профиль", emoji=get_emoji("_profile"), style=discord.ButtonStyle.primary, row=1)
     async def tab_my_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_user_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
-    @discord.ui.button(label="Квесты", emoji=BOT_BTN_EMOJIS.get("_quests", "📋"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Квесты", emoji=get_emoji("_quests"), style=discord.ButtonStyle.primary, row=1)
     async def tab_quests_hub(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📋 Квесты", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=QuestsHubView(self.author_id))
 
-    @discord.ui.button(label="Ежедневная награда", emoji=BOT_BTN_EMOJIS.get("_achievements", "📅"), style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Ежедневная награда", emoji=get_emoji("_dailyquests"), style=discord.ButtonStyle.success, row=1)
     async def tab_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_daily_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, return_to="main"))
 
-    @discord.ui.button(label="Путеводитель", emoji=BOT_BTN_EMOJIS.get("_stats", "📖"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Путеводитель", emoji=get_emoji("_stats"), style=discord.ButtonStyle.secondary, row=2)
     async def tab_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id))
-
-GUIDE_SECTIONS = {
-    "economy": ("💰 Экономика", "Монеты, гемы, доход, обмен, банк, налоги"),
-    "generators": ("🏗️ Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
-    "pets": ("🐾 Питомцы", "5 видов, кормление, уровни, бонусы"),
-    "titles": ("🏅 Титулы", "20 штук, условия, бонусы"),
-    "clans": ("🏰 Кланы", "Создание, роли, войны, сундук, квесты"),
-    "pvp": ("⚔️ PvP", "Рейды, дуэли, мощь, лимиты"),
-    "auction": ("🏛️ Аукцион и биржа", "Лоты, ставки, комиссия, цены"),
-    "quests": ("📜 Квесты", "Сюжетные (10 глав), ежедневные задания"),
-    "daily": ("📅 Дейли и адвент", "30-дневный стрик, адвент-календарь"),
-    "achievements": ("🏆 Достижения", "14 штук, награды гемами"),
-    "cosmetics": ("🎨 Кастомизация", "Цвет, фон, иконка, титулы"),
-    "autocollector": ("🤖 Автосборщик", "Покупка, уровни, автодоход"),
-    "notifications": ("📬 Уведомления", "5 типов, настройка в ЛС"),
-    "tops": ("📊 Топы", "6 типов, 10/20/30 мест"),
-    "analytics": ("📈 Аналитика", "Личная статистика"),
-}
 
 
 class GuideView(BaseView):
@@ -4865,7 +4893,7 @@ class GuideView(BaseView):
 
         back = discord.ui.Button(
             label="Назад", 
-            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            emoji=get_emoji("_back"), 
             style=discord.ButtonStyle.danger, 
             row=1
         )
@@ -4905,7 +4933,7 @@ class GuideSectionView(BaseView):
         super().__init__(author_id, timeout)
         self.page = page
 
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
@@ -4923,31 +4951,31 @@ class GeneratorDetailView(BaseView):
         )
 
 class ShopHubView(BaseView):
-    @discord.ui.button(label="Генераторы", emoji=BOT_BTN_EMOJIS.get("_shop", "🏗️"), style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Генераторы", emoji=get_emoji("_shop"), style=discord.ButtonStyle.primary, row=0)
     async def btn_gens(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed, _ = await build_shop_page(interaction, 0)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
-    @discord.ui.button(label="Улучшения", emoji=BOT_BTN_EMOJIS.get("_upgrades", "💎"), style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Улучшения", emoji=get_emoji("_upgrades"), style=discord.ButtonStyle.primary, row=0)
     async def btn_upgrades(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed, _ = await build_upgrades_page(interaction, 0)
         await interaction.edit_original_response(embed=embed, view=UpgradesView(self.author_id, 0))
         
-    @discord.ui.button(label="Питомцы", emoji=BOT_BTN_EMOJIS.get("_pets", "🐾"), style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Питомцы", emoji=get_emoji("_pets"), style=discord.ButtonStyle.success, row=0)
     async def btn_pets(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_pets_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id, return_to="shop"))
 
-    @discord.ui.button(label="Автосборщик", emoji=BOT_BTN_EMOJIS.get("_autocollector", "🤖"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Автосборщик", emoji=get_emoji("_autocollector"), style=discord.ButtonStyle.primary, row=1)
     async def btn_autocollector(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_autocollector_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id, return_to="shop"))
 
-    @discord.ui.button(label="Катализаторы", emoji=BOT_BTN_EMOJIS.get("_catalyst", "🧪"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Катализаторы", emoji=get_emoji("_catalyst"), style=discord.ButtonStyle.primary, row=1)
     async def btn_catalysts(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(
@@ -4961,12 +4989,12 @@ class ShopHubView(BaseView):
         )
         await interaction.edit_original_response(embed=embed, view=CatalystSelectView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
-
+        
 class QuestsHubView(BaseView):
     @discord.ui.button(label="Сюжетные", emoji=BOT_BTN_EMOJIS.get("_storyquests", "📜"), style=discord.ButtonStyle.primary, row=0)
     async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5673,7 +5701,7 @@ async def open_clan_buy_select(interaction: discord.Interaction, author_id: int,
     total_pages = max(1, (len(rows) + 9) // 10)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page*10:page*10+10]
-    options = [discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=parse_emoji(emoji)) for item_id, name, price, emoji in chunk]
+    options = [discord.SelectOption(label=f"{name} — 🪙 {price}", value=item_id, emoji=parse_emoji_safe(emoji)) for item_id, name, price, emoji in chunk]
     embed = discord.Embed(title="🛒 Купить для клана", description=f"Страница {page+1}/{total_pages}", color=0xf1c40f)
     await interaction.edit_original_response(embed=embed, view=ClanBuySelectView(author_id, clan_id, options, page, total_pages))
 
@@ -6396,7 +6424,7 @@ async def open_pets_shop(interaction: discord.Interaction, author_id: int):
             continue
             
         # Парсим строку <:cat:id> в объект PartialEmoji
-        emoji_obj = parse_emoji(pt["emoji"]) 
+        emoji_obj = parse_emoji_safe(pt["emoji"]) 
         if not emoji_obj:
             emoji_obj = "🐾" # Фолбэк, если что-то пошло не так
 
@@ -6846,51 +6874,51 @@ class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на мо�
 # ============================================================
 
 class ProfileView(BaseView):
-    @discord.ui.button(label="Хранилище", emoji=BOT_BTN_EMOJIS.get("_storage", "🎒"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Хранилище", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=0)
     async def storage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_storage_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=StorageView(self.author_id, return_to="profile"))
 
-    @discord.ui.button(label="Звёзды", emoji=BOT_BTN_EMOJIS.get("_stars", "⭐"), style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Звёзды", emoji=get_emoji("_stars"), style=discord.ButtonStyle.success, row=0)
     async def stars_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_star_view(interaction, self.author_id)
 
-    @discord.ui.button(label="Синтез", emoji=BOT_BTN_EMOJIS.get("_synthesis", "⚗️"), style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Синтез", emoji=get_emoji("_synthesis"), style=discord.ButtonStyle.success, row=0)
     async def craft_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_craft_view(interaction, self.author_id)
 
-    @discord.ui.button(label="Катализатор", emoji=BOT_BTN_EMOJIS.get("_catalyst", "🧪"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Катализатор", emoji=get_emoji("_catalyst"), style=discord.ButtonStyle.secondary, row=1)
     async def catalyst_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    @discord.ui.button(label="Переместить", emoji=BOT_BTN_EMOJIS.get("_move", "🔀"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Переместить", emoji=get_emoji("_move"), style=discord.ButtonStyle.primary, row=1)
     async def move_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_move_view(interaction, "profile", self.author_id)
 
-    @discord.ui.button(label="Поменять", emoji=BOT_BTN_EMOJIS.get("_swap", "↔️"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Поменять", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=1)
     async def swap_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_swap_view(interaction, "profile", self.author_id)
 
-    @discord.ui.button(label="Сортировка", emoji=BOT_BTN_EMOJIS.get("_sorting", "🔄"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Сортировка", emoji=get_emoji("_sorting"), style=discord.ButtonStyle.secondary, row=2)
     async def sort_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🔄 Сортировка генераторов", description="Выбери, как упорядочить генераторы в замке:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=SortMenuView(self.author_id))
 
-    @discord.ui.button(label="Детали", emoji=BOT_BTN_EMOJIS.get("_generatorparts", "📋"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Детали", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
     async def details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_generator_details_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=GeneratorDetailView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
@@ -7049,13 +7077,13 @@ async def open_sell_view(interaction: discord.Interaction, author_id: int, page:
 
     options = []
     for slot, item_id, name, default_emoji, price, stars, rarity in chunk:
-        emoji_obj = parse_emoji(custom.get(item_id, default_emoji))
+        emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
         sell_price = max(1, int(price * SELL_RATE))
         stars_str = f"({stars}⭐)" if stars > 0 else ""
         options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name} {stars_str} → 🪙 {sell_price}".strip(),
+            label=f"Слот {slot}: {name}...",
             value=f"{slot}:{item_id}",
-            emoji=emoji_obj,
+            emoji=parse_emoji_safe(custom.get(item_id, default_emoji)) # Новая функция
         ))
 
     embed = discord.Embed(
@@ -7262,7 +7290,7 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
     options = []
     for slot, item_id, name, default_emoji, stars in rows[:25]:
         emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji(emoji_str)
+        emoji_obj = parse_emoji_safe(emoji_str)
         stars_str = f"({stars}⭐)" if stars > 0 else ""
         options.append(discord.SelectOption(
             label=f"Слот {slot}: {name} {stars_str}".strip(),
@@ -7316,7 +7344,7 @@ class SwapFirstView(discord.ui.View):
         options = []
         for slot, item_id, name, default_emoji, stars in rows[:25]:
             emoji_str = custom.get(item_id, default_emoji)
-            emoji_obj = parse_emoji(emoji_str)
+            emoji_obj = parse_emoji_safe(emoji_str)
             stars_str = f"({stars}⭐)" if stars > 0 else ""
             options.append(discord.SelectOption(
                 label=f"Слот {slot}: {name} {stars_str}".strip(),
@@ -7453,7 +7481,7 @@ async def open_star_view(interaction: discord.Interaction, author_id: int):
     options = []
     for slot, item_id, name, default_emoji, stars in rows[:25]:
         emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji(emoji_str)
+        emoji_obj = parse_emoji_safe(emoji_str)
         next_star = stars + 1
         need = STAR_UPGRADE[next_star]["copies"]
         async with bot.db.execute(
@@ -7701,12 +7729,12 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
     options = []
     for slot, item_id, name, default_emoji, stars in chunk:
         emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji(emoji_str)
+        emoji_obj = parse_emoji_safe(emoji_str)
         stars_str = f"({stars}⭐)" if stars > 0 else ""
         options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name} {stars_str}".strip(),
-            value=f"{slot}:{item_id}:{stars}",
-            emoji=emoji_obj
+            label=f"Слот {slot}: {name}...",
+            value=f"{slot}:{item_id}",
+            emoji=parse_emoji_safe(custom.get(item_id, default_emoji)) # Новая функция
         ))
 
     location_name = "Замка" if source == "profile" else "Хранилища"
@@ -7919,12 +7947,12 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
             count = (await c.fetchone())[0]
         
         emoji_str = custom.get(item_id, src[1])
-        emoji_obj = parse_emoji(emoji_str)
+        emoji_obj = parse_emoji_safe(emoji_str)
         
-        options_all.append(discord.SelectOption(
-            label=f"{src[0]} ({count}/5) → {dst[0]}",
-            value=item_id,
-            emoji=emoji_obj
+        options.append(discord.SelectOption(
+            label=f"Слот {slot}: {name}...",
+            value=f"{slot}:{item_id}",
+            emoji=parse_emoji_safe(custom.get(item_id, default_emoji)) # Новая функция
         ))
 
     if not options_all:
@@ -8643,7 +8671,7 @@ async def open_shop_buy_select(
     options = []
     for item_id, name, price, default_emoji in chunk:
         emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji(emoji_str)
+        emoji_obj = parse_emoji_safe(emoji_str)
         options.append(discord.SelectOption(
             label=f"{name} — 🪙 {price}",
             value=item_id,
