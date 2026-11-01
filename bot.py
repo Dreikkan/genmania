@@ -5,18 +5,17 @@
 
 import discord
 from discord.ext import commands
-from discord import app_commands
 import aiosqlite
 import datetime
 import random
 import json
 import os
 import re
-import sqlite3
 from pathlib import Path
 import asyncio
-import io
 from contextlib import asynccontextmanager
+
+from duel_ui import ensure_duel_schema, open_duel_setup
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -75,6 +74,8 @@ CRAFT_CHAIN = {
     "dark_gen":       "light_gen",
     "light_gen":      "time_gen",
     "time_gen":       "space_gen",
+    "space_gen":      "divine_gen",
+    "divine_gen":     "legendary_gen",
 }
 
 CRAFT_COST = 5
@@ -107,23 +108,25 @@ CRAFT_SETTINGS = {
     "dark_gen":       {"chance": 0.12, "gems": 700},
     "light_gen":      {"chance": 0.10, "gems": 800},
     "time_gen":       {"chance": 0.08, "gems": 1000},
+    "space_gen":      {"chance": 0.06, "gems": 1500},
+    "divine_gen":     {"chance": 0.04, "gems": 2500},
 }
 
 STAR_UPGRADE = {
     1: {"copies": 2, "chance": 1.00, "gems": 0},
-    2: {"copies": 3, "chance": 0.90, "gems": 0},
-    3: {"copies": 4, "chance": 0.75, "gems": 5},
-    4: {"copies": 5, "chance": 0.60, "gems": 15},
-    5: {"copies": 6, "chance": 0.45, "gems": 40},
+    2: {"copies": 2, "chance": 0.90, "gems": 0},
+    3: {"copies": 2, "chance": 0.75, "gems": 5},
+    4: {"copies": 2, "chance": 0.60, "gems": 15},
+    5: {"copies": 2, "chance": 0.45, "gems": 40},
 }
 
 STAR_BONUS = {
     0: 0.00,
-    1: 1.10,
-    2: 2.30,
-    3: 3.60,
-    4: 5.00,
-    5: 6.50,
+    1: 1.10,   # +110% → 2.1x
+    2: 2.90,   # +290% → 3.9x
+    3: 6.50,   # +650% → 7.5x
+    4: 13.00,  # +1300% → 14x
+    5: 25.00,  # +2500% → 26x
 }
 
 CATALYST_PRICE = 10
@@ -244,15 +247,6 @@ BOT_BTN_EMOJIS = {
     "_ach_starcol":  discord.PartialEmoji(name="starcollector", id=1566521430806495352),
     "_ach_gem":      discord.PartialEmoji(name="gemtycoon", id=1566521421029449738),
 }
-
-# Функция, которая безопасно подставляет кастомный эмодзи
-def get_btn_emoji(key: str) -> discord.PartialEmoji | str:
-    if key in CUSTOM_EMOJIS_DB:
-        try:
-            return discord.PartialEmoji(name="custom", id=CUSTOM_EMOJIS_DB[key])
-        except Exception:
-            pass
-    return BOT_BTN_EMOJIS.get(key, "❓")
 
 EMOJI_KEYS = {
     "_coin":         ("Монета", str(BOT_BTN_EMOJIS.get("_coin", "🪙"))),
@@ -526,7 +520,6 @@ ADVENT_REWARDS = {
 # ============================================================
 
 intents = discord.Intents.default()
-intents.message_content = True
 
 class CastleBot(commands.Bot):
     def __init__(self):
@@ -535,12 +528,13 @@ class CastleBot(commands.Bot):
 
     async def setup_hook(self):
         # 1. Создаём папку data
-        DATA_DIR = Path("/app/data")
+        DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
         # 2. Подключаемся к базе
         DB_PATH = DATA_DIR / "castle.db"
         self.db = await aiosqlite.connect(str(DB_PATH))
+        self.db_path = str(DB_PATH)
         await self.db.execute("PRAGMA busy_timeout = 10000")
         await self.db.execute("PRAGMA journal_mode = WAL")
         await self.db.execute("PRAGMA foreign_keys = ON")
@@ -1089,12 +1083,13 @@ class CastleBot(commands.Bot):
         price = base_price
         income_hour = base_income_hour
         items_data = []
-        for item_id, name, emoji, rarity, is_gem in gen_names:
+        for index, (item_id, name, emoji, rarity, is_gem) in enumerate(gen_names, start=1):
+            buyable = 1 if index <= 26 else 0
             if is_gem:
                 gem_income = GEM_INCOME.get(item_id, 0.02)
-                items_data.append((item_id, name, round_price(price * 10), 0, emoji, rarity, 1, gem_income / 3600))
+                items_data.append((item_id, name, round_price(price * 10), 0, emoji, rarity, buyable, gem_income / 3600))
             else:
-                items_data.append((item_id, name, round_price(price), income_hour / 3600, emoji, rarity, 1, 0))
+                items_data.append((item_id, name, round_price(price), income_hour / 3600, emoji, rarity, buyable, 0))
             price *= 2.2
             income_hour *= 1.5
 
@@ -1106,9 +1101,17 @@ class CastleBot(commands.Bot):
                 item
             )
 
+        # Старые БД создавались с buyable = 1 для всех генераторов.
+        await self.db.execute(
+            "UPDATE items SET buyable = 0 WHERE id IN (?, ?, ?, ?)",
+            ("time_gen", "space_gen", "divine_gen", "legendary_gen"),
+        )
+
+        # Не перезаписываем звёздные эмодзи, если админ уже настроил их.
         for item_id, emoji_map in star_emojis.items():
             await self.db.execute(
-                "UPDATE items SET emoji_by_star = ? WHERE id = ?",
+                "UPDATE items SET emoji_by_star = ? WHERE id = ? "
+                "AND (emoji_by_star IS NULL OR emoji_by_star = '' OR emoji_by_star = '{}')",
                 (json.dumps(emoji_map, ensure_ascii=False), item_id)
             )
         await self.db.commit()
@@ -1170,6 +1173,7 @@ class CastleBot(commands.Bot):
                 winner_id INTEGER, loser_id INTEGER, bet INTEGER, type TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await ensure_duel_schema(self.db)
 
         # --- КЛАНЫ ---
         await self.db.execute("""
@@ -1268,9 +1272,18 @@ class CastleBot(commands.Bot):
             await self.db.execute(
                 "INSERT OR IGNORE INTO items "
                 "(id, name, emoji, rarity, price, buyable, income_per_hour) "
-                "VALUES (?, ?, ?, ?, ?, 0, 1.5)",
-                (item_id, name, emoji, rarity, price)
+                "VALUES (?, ?, ?, ?, ?, 0, ?)",
+                (item_id, name, emoji, rarity, price, 1.5 / 3600)
             )
+
+        # Миграция старого дохода daily-генераторов (было 1.5 в секунду).
+        await self.db.execute(
+            "UPDATE items SET income_per_hour = ? "
+            "WHERE id IN ('daily_common','daily_uncommon','daily_rare',"
+            "'daily_epic','daily_legendary','daily_mythic') "
+            "AND income_per_hour = 1.5",
+            (1.5 / 3600,),
+        )
 
         # --- КЛАНЫ ---
         await self.db.execute("""
@@ -2049,16 +2062,29 @@ async def get_btn_emoji(guild_id: int, key: str, default: str) -> discord.Partia
 
 async def get_star_emoji(item_id: str, stars: int, default_emoji: str) -> str:
     """Возвращает эмодзи для генератора с учётом звёздности.
-    Если в БД настроен emoji_by_star, берём оттуда. Иначе — default + звёзды."""
-    async with bot.db.execute("SELECT emoji_by_star FROM items WHERE id = ?", (item_id,)) as c:
+
+    Персональный emoji предмета (custom из guild_settings) имеет приоритет
+    над глобальным emoji_by_star.
+    """
+    async with bot.db.execute(
+        "SELECT emoji, emoji_by_star FROM items WHERE id = ?", (item_id,)
+    ) as c:
         row = await c.fetchone()
-    if row and row[0]:
+
+    base_emoji = row[0] if row else None
+    emoji_json = row[1] if row else None
+
+    if default_emoji and base_emoji and default_emoji != base_emoji:
+        return f"{default_emoji}({stars}⭐)" if stars > 0 else default_emoji
+
+    if emoji_json:
         try:
-            emoji_map = json.loads(row[0])
+            emoji_map = json.loads(emoji_json)
             if str(stars) in emoji_map and emoji_map[str(stars)]:
                 return emoji_map[str(stars)]
         except Exception:
             pass
+
     # Fallback: базовый эмодзи + звёзды
     if stars > 0:
         return f"{default_emoji}({stars}⭐)"
@@ -2318,36 +2344,6 @@ async def calculate_passive_income(user_id: int, guild_id: int = None):
         seconds = (now - last).total_seconds()
         penalty = apply_offline_penalty(seconds)
         raw = seconds * per_sec_gems * penalty
-        gems = min(int(raw), gem_cap)
-
-    return coins, gems
-
-    # --- ШТРАФ ЗА ОФЛАЙН ---
-    # Если игрок не заходил больше 2 часов, доход за время сверх 2 часов
-    # умножается на 0.7 (режется на 30%)
-    def apply_offline_penalty(seconds: float) -> float:
-        if seconds <= 7200:  # 2 часа
-            return 1.0  # без штрафа
-        offline_seconds = seconds - 7200
-        # Штраф применяется только к офлайн-части
-        effective_seconds = 7200 + offline_seconds * 0.7
-        return effective_seconds / seconds
-
-    # --- МОНЕТЫ ---
-    coins = 0
-    if per_sec_coins > 0:
-        last = datetime.datetime.fromisoformat(last_coins_str)
-        seconds = (now - last).total_seconds()
-        penalty = apply_offline_penalty(seconds)
-        coins = min(int(seconds * per_sec_coins * multiplier * penalty), passive_limit)
-
-    # --- ГЕМЫ ---
-    gems = 0
-    if per_sec_gems > 0:
-        last = datetime.datetime.fromisoformat(last_gems_str)
-        seconds = (now - last).total_seconds()
-        penalty = apply_offline_penalty(seconds)
-        raw = seconds * per_sec_gems * multiplier * penalty
         gems = min(int(raw), gem_cap)
 
     return coins, gems
@@ -3233,6 +3229,11 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         "SELECT total_coins_earned, total_gems_earned FROM players WHERE user_id = ?", (user_id,)
     ) as c:
         tce, tge = await c.fetchone()
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
+    ) as c:
+        ach_count = (await c.fetchone())[0] or 0
 
     # --- Строим embed ---
     embed = discord.Embed(
@@ -4794,13 +4795,13 @@ class GuideView(BaseView):
             )
         return callback
 
-    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         new_page = max(0, self.page - 1)
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id, new_page))
 
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         items = list(GUIDE_SECTIONS.items())
         total_pages = (len(items) + 5 - 1) // 5
@@ -4808,7 +4809,7 @@ class GuideView(BaseView):
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id, new_page))
 
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
@@ -4985,12 +4986,12 @@ class TopView(BaseView):
             await interaction.edit_original_response(embed=embed, view=TopView(self.author_id, self.top_type, size))
         return switch
 
-    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_refresh(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_top_embed(interaction, self.top_type, self.limit)
         await interaction.edit_original_response(embed=embed, view=TopView(self.author_id, self.top_type, self.limit))
 
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
@@ -5036,19 +5037,19 @@ class AdventView(BaseView):
             await interaction.edit_original_response(embed=embed_grid, view=AdventView(self.author_id, self.page))
         return callback
 
-    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_prev(self, interaction: discord.Interaction):
         await interaction.response.defer()
         new_page = max(0, self.page - 1)
         embed = await build_advent_embed(interaction, new_page)
         await interaction.edit_original_response(embed=embed, view=AdventView(self.author_id, new_page))
 
-    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_next(self, interaction: discord.Interaction):
         await interaction.response.defer()
         new_page = min(ADVENT_PAGES - 1, self.page + 1)
         embed = await build_advent_embed(interaction, new_page)
         await interaction.edit_original_response(embed=embed, view=AdventView(self.author_id, new_page))
 
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
@@ -5137,7 +5138,7 @@ class SocialView(BaseView):
 
     @discord.ui.button(label="Дуэль", emoji=BOT_BTN_EMOJIS.get("_duel", "🤺"), style=discord.ButtonStyle.success, row=0)
     async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(DuelModal(self.author_id))
+        await open_duel_setup(interaction, self.author_id)
 
     @discord.ui.button(label="Клан", emoji=BOT_BTN_EMOJIS.get("_clan", "🏰"), style=discord.ButtonStyle.success, row=0)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6932,6 +6933,59 @@ class StorageView(BaseView):
             embed = await build_main_embed(interaction)
             await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
+async def open_sell_view(interaction: discord.Interaction, author_id: int, page: int = 0):
+    user_id = interaction.user.id
+    guild_id = interaction.guild_id
+    settings = await get_settings(guild_id)
+    custom = settings["custom_emojis"]
+
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, i.name, i.emoji, i.price, inv.stars, i.rarity
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = 'storage'
+        ORDER BY inv.slot ASC
+    """, (user_id,)) as c:
+        rows = await c.fetchall()
+
+    rows = [row for row in rows if row[6] in SELL_ALLOWED_RARITIES]
+
+    if not rows:
+        await interaction.followup.send(
+            "❌ В хранилище нет предметов, которые можно продать.",
+            ephemeral=True,
+        )
+        return
+
+    total_pages = max(1, (len(rows) + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+
+    options = []
+    for slot, item_id, name, default_emoji, price, stars, rarity in chunk:
+        emoji_obj = parse_emoji(custom.get(item_id, default_emoji))
+        sell_price = max(1, int(price * SELL_RATE))
+        stars_str = f"({stars}⭐)" if stars > 0 else ""
+        options.append(discord.SelectOption(
+            label=f"Слот {slot}: {name} {stars_str} → 🪙 {sell_price}".strip(),
+            value=f"{slot}:{item_id}",
+            emoji=emoji_obj,
+        ))
+
+    embed = discord.Embed(
+        title="💰 Продажа предметов",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            f"Цена продажи — {int(SELL_RATE * 100)}% от магазинной."
+        ),
+        color=0x2ecc71,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=SellSelectView(author_id, options, page, total_pages),
+    )
+
+
 class SellSelectView(discord.ui.View):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
         super().__init__(timeout=120)
@@ -8087,7 +8141,7 @@ class CatalystSelectView(discord.ui.View):
         if clan:
             await update_clan_quest(clan[0], "buy", qty)
 
-        await update_sory_quests(user_id, "buy", qty)
+        await update_story_quests(user_id, "buy", qty)
 
 
 # ============================================================
@@ -8459,12 +8513,12 @@ class ShopView(BaseView):
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute(
             "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
@@ -8475,17 +8529,51 @@ class ShopView(BaseView):
             return
         await open_shop_buy_select(interaction, self.author_id, rows, 0)
 
-    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         self.page = max(0, self.page - 1)
         embed, _ = await build_shop_page(interaction, self.page)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed, total = await build_shop_page(interaction, self.page + 1)
         self.page = min(total - 1, self.page + 1)
         await interaction.edit_original_response(embed=embed, view=self)
+
+async def open_shop_buy_select(
+    interaction: discord.Interaction,
+    author_id: int,
+    rows: list,
+    page: int,
+):
+    guild_id = interaction.guild_id
+    custom = (await get_settings(guild_id))["custom_emojis"]
+    total = len(rows)
+    total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+
+    options = []
+    for item_id, name, price, default_emoji in chunk:
+        emoji_str = custom.get(item_id, default_emoji)
+        emoji_obj = parse_emoji(emoji_str)
+        options.append(discord.SelectOption(
+            label=f"{name} — 🪙 {price}",
+            value=item_id,
+            emoji=emoji_obj,
+        ))
+
+    embed = discord.Embed(
+        title="🛒 Выбери предмет",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из списка:",
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=ShopBuySelectView(author_id, options, page, total_pages),
+    )
+
 
 class ShopBuySelectView(discord.ui.View):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
@@ -8541,7 +8629,7 @@ class ShopBuySelectView(discord.ui.View):
             rows = await c.fetchall()
         await open_shop_buy_select(interaction, self.author_id, rows, self.page + 1)
 
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed, _ = await build_shop_page(interaction, 0)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
@@ -8645,7 +8733,7 @@ class BuyItemQuantityView(discord.ui.View):
         embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute(
             "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
@@ -8699,12 +8787,12 @@ class UpgradesView(BaseView):
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    async def buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute("""
             SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
@@ -8729,13 +8817,13 @@ class UpgradesView(BaseView):
             return
         await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0)
 
-    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         self.page = max(0, self.page - 1)
         embed, _ = await build_upgrades_page(interaction, self.page)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed, total = await build_upgrades_page(interaction, self.page + 1)
         self.page = min(total - 1, self.page + 1)
@@ -8818,6 +8906,26 @@ class UpgradesBuySelectView(discord.ui.View):
             name, price, emoji, category = gem_item
             currency = "gems"
 
+        new_grid_size = None
+        if category == "grid":
+            new_grid_size = size
+        elif upgrade_id.startswith("grid_"):
+            side = int(upgrade_id.split("_")[1].split("x")[0])
+            new_grid_size = side * side
+
+        if new_grid_size is not None:
+            async with bot.db.execute(
+                "SELECT grid_size FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                current_grid = (await c.fetchone())[0] or START_GRID
+            if new_grid_size <= current_grid:
+                await interaction.followup.send(
+                    f"❌ У тебя уже сетка на {current_grid} слотов. "
+                    "Меньшую или такую же покупать нельзя.",
+                    ephemeral=True,
+                )
+                return
+
         async with bot.db.execute(
             "SELECT 1 FROM player_upgrades WHERE user_id = ? AND upgrade_id = ?", (user_id, upgrade_id)
         ) as c:
@@ -8835,9 +8943,6 @@ class UpgradesBuySelectView(discord.ui.View):
             await interaction.followup.send(f"❌ Нужно {unit} {price}, у тебя {balance}.", ephemeral=True)
             return
 
-        await bot.db.execute(
-            f"UPDATE players SET {currency} = {currency} - ? WHERE user_id = ?", (price, user_id)
-        )
         cursor = await bot.db.execute(
             "INSERT OR IGNORE INTO player_upgrades (user_id, upgrade_id) VALUES (?, ?)",
             (user_id, upgrade_id)
@@ -8846,17 +8951,28 @@ class UpgradesBuySelectView(discord.ui.View):
             await interaction.followup.send("❌ Уже куплено (двойная покупка).", ephemeral=True)
             return
 
-        if category == "grid":
+        cursor = await bot.db.execute(
+            f"UPDATE players SET {currency} = {currency} - ? "
+            f"WHERE user_id = ? AND {currency} >= ?",
+            (price, user_id, price)
+        )
+        if cursor.rowcount == 0:
             await bot.db.execute(
-                "UPDATE players SET grid_size = ? WHERE user_id = ?", (size, user_id)
+                "DELETE FROM player_upgrades WHERE user_id = ? AND upgrade_id = ?",
+                (user_id, upgrade_id),
             )
-        elif upgrade_id.startswith("grid_"):
-            size = int(upgrade_id.split("_")[1].split("x")[0])
+            await bot.db.commit()
+            await interaction.followup.send(
+                "❌ Недостаточно средств (баланс изменился).", ephemeral=True
+            )
+            return
+
+        if new_grid_size is not None:
             await bot.db.execute(
-                "UPDATE players SET grid_size = ? WHERE user_id = ?", (size * size, user_id)
+                "UPDATE players SET grid_size = ? WHERE user_id = ?", (new_grid_size, user_id)
             )
         elif category == "status":
-            bonuses = {"vip": 0.15, "gold": 0.35, "platinum": 0.25, "diamond": 0.45}
+            bonuses = {"vip": 0.15, "gold": 0.25, "platinum": 0.35, "diamond": 0.45}
             async with bot.db.execute(
                 "SELECT upgrade_id FROM player_upgrades WHERE user_id = ? AND upgrade_id IN "
                 "('vip','gold','platinum','diamond')", (user_id,)
@@ -8989,11 +9105,92 @@ class UserProfileView(BaseView):
         embed = discord.Embed(title="⚙️ Личные настройки", description="Здесь ты можешь управлять своим профилем.", color=0x808080)
         await interaction.edit_original_response(embed=embed, view=UserSettingsView(self.author_id))
 
+    @discord.ui.button(
+        label="Кастомизация",
+        emoji=BOT_BTN_EMOJIS.get("_customization", "🎨"),
+        style=discord.ButtonStyle.primary,
+        row=3,
+    )
+    async def btn_customization(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(
+            title="🎨 Кастомизация",
+            description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
+            color=0x9b59b6,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=CustomizationHubView(self.author_id)
+        )
+
     @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+class CustomizationHubView(BaseView):
+    @discord.ui.button(
+        label="Титулы",
+        emoji=BOT_BTN_EMOJIS.get("_achievements", "🏅"),
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def btn_titles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_titles_view(interaction, self.author_id, 0, return_to="hub")
+
+    @discord.ui.button(
+        label="Ежедневный вход",
+        emoji=BOT_BTN_EMOJIS.get("_dailyquests", "📅"),
+        style=discord.ButtonStyle.success,
+        row=0,
+    )
+    async def btn_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_daily_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=DailyView(self.author_id, return_to="hub")
+        )
+
+    @discord.ui.button(
+        label="Косметика",
+        emoji=BOT_BTN_EMOJIS.get("_customization", "🎨"),
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def btn_cosmetics(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_cosmetics_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=CosmeticsView(self.author_id, return_to="hub")
+        )
+
+    @discord.ui.button(
+        label="Сюжетные квесты",
+        emoji=BOT_BTN_EMOJIS.get("_storyquests", "📜"),
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def btn_story(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_story_quests_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=StoryQuestsView(self.author_id, return_to="hub")
+        )
+
+    @discord.ui.button(
+        label="Назад",
+        emoji=BOT_BTN_EMOJIS.get("_back", "◀️"),
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=UserProfileView(self.author_id)
+        )
+
+
 class UserSettingsView(BaseView):
     @discord.ui.button(label="Сбросить прогресс", emoji="🗑️", style=discord.ButtonStyle.danger, row=0)
     async def btn_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -10582,6 +10779,39 @@ class AdminTakeView(discord.ui.View):
         await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
 
 
+async def open_admin_logs(interaction: discord.Interaction, author_id: int, page: int = 0):
+    async with bot.db.execute("""
+        SELECT admin_id, target_id, action, details, timestamp
+        FROM admin_log ORDER BY id DESC LIMIT ? OFFSET ?
+    """, (PAGE_SIZE, page * PAGE_SIZE)) as c:
+        rows = await c.fetchall()
+
+    async with bot.db.execute("SELECT COUNT(*) FROM admin_log") as c:
+        total = (await c.fetchone())[0]
+
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows
+
+    embed = discord.Embed(
+        title="📜 Логи администрации",
+        description=f"Страница {page + 1}/{total_pages} | Всего записей: {total}",
+        color=0xe74c3c,
+    )
+    if not chunk:
+        embed.add_field(name="Пусто", value="Действий пока не было.")
+    for admin_id, target_id, action, details, ts in chunk:
+        embed.add_field(
+            name=f"`{action}` — <@{admin_id}> → <@{target_id}>",
+            value=f"{details}\n{ts}",
+            inline=False,
+        )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=AdminLogsView(author_id, page, total_pages),
+    )
+
+
 class AdminLogsView(discord.ui.View):
     def __init__(self, author_id: int, page: int, total_pages: int):
         super().__init__(timeout=120)
@@ -10685,8 +10915,8 @@ class AdminTakeValuesModal(discord.ui.Modal, title="Забрать"):
         )
         await bot.db.commit()
         await log_admin_action(
-            self.author_id, uid, "grant",
-            f"{self.currency} +{amount}"
+            self.author_id, uid, "take",
+            f"{self.currency} -{amount}"
         )
         unit = "🪙" if self.currency == "coins" else "💎"
         await interaction.followup.send(f"✅ Забрано {amount} {unit} у <@{uid}>.", ephemeral=True)
@@ -10810,26 +11040,48 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
         except ValueError:
             await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
             return
-        await bot.db.execute("""
-            UPDATE players SET
-                coins = ?, gems = 0, catalysts = 0,
-                grid_size = 9, storage_size = 36, income_bonus = 0.0,
-                total_crafts = 0, total_successes = 0,
-                last_collected = CURRENT_TIMESTAMP,
-                last_gem_collected = CURRENT_TIMESTAMP,
-                daily_quest_date = NULL,
-                daily_quest_progress = '{}',
-                daily_quest_claimed = '[]'
-            WHERE user_id = ?
-        """, (DEFAULT_START_COINS, uid))
-        await bot.db.execute("DELETE FROM inventory WHERE user_id = ?", (uid,))
-        await bot.db.execute("DELETE FROM player_achievements WHERE user_id = ?", (uid,))
-        await bot.db.execute("DELETE FROM player_upgrades WHERE user_id = ?", (uid,))
-        await bot.db.execute("DELETE FROM craft_log WHERE user_id = ?", (uid,))
-        await bot.db.commit()
+        async with db_transaction():
+            await bot.db.execute("""
+                UPDATE players SET
+                    coins = ?, gems = 0, catalysts = 0,
+                    grid_size = 9, storage_size = 36, income_bonus = 0.0,
+                    total_crafts = 0, total_successes = 0,
+                    total_coins_earned = 0, total_gems_earned = 0,
+                    last_collected = CURRENT_TIMESTAMP,
+                    last_gem_collected = CURRENT_TIMESTAMP,
+                    daily_quest_date = NULL,
+                    daily_quest_progress = '{}',
+                    daily_quest_claimed = '[]',
+                    streak_days = 0,
+                    last_daily = NULL,
+                    title = 'Новичок',
+                    active_pet = NULL,
+                    last_tax_time = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            """, (DEFAULT_START_COINS, uid))
+
+            for table in (
+                "inventory", "player_achievements", "player_upgrades", "craft_log",
+                "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
+                "bank_deposits", "bank_history", "user_notifications",
+                "player_quests", "user_cosmetics", "tax_log",
+            ):
+                await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
+
+            await bot.db.execute(
+                "DELETE FROM duel_history WHERE winner_id = ? OR loser_id = ?",
+                (uid, uid),
+            )
+            await bot.db.execute(
+                "DELETE FROM raid_loot_log WHERE user_id = ?", (uid,)
+            )
+            await bot.db.execute(
+                "DELETE FROM market_listings WHERE seller_id = ?", (uid,)
+            )
+
         await log_admin_action(
-            self.author_id, uid, "grant",
-            f"{self.currency} +{amount}"
+            self.author_id, uid, "reset",
+            f"coins = {DEFAULT_START_COINS}, inventory/quests/pets/cosmetics cleared",
         )
         await interaction.followup.send(f"🗑️ Прогресс <@{uid}> сброшен.", ephemeral=True)
 
@@ -10891,12 +11143,12 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
                     (uid, free[i], item_id)
                 )
             await bot.db.commit()
-            await log_admin_action(
-                self.author_id, uid, "give_item",
-                f"{item_id} x{qty} → storage"
-            )
             msg = f"✅ Выдано {qty}×{emoji} {name} в хранилище <@{uid}>."
 
+        await log_admin_action(
+            self.author_id, uid, "give_item",
+            f"{item_id} x{qty} -> {loc}",
+        )
         await sort_inventory(uid, "profile")
         await sort_inventory(uid, "storage")
         await interaction.followup.send(msg, ephemeral=True)
@@ -11006,6 +11258,11 @@ class AddGeneratorStep2Modal(discord.ui.Modal, title="Добавить гене�
             "INSERT INTO items (id, name, price, income_per_hour, emoji, rarity, buyable, income_gems_per_hour) "
             "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
             (self.item_id, self.name, self.price, inc_c, self.emoji.value.strip(), rarity, inc_g)
+        )
+        await bot.db.execute(
+            "INSERT OR IGNORE INTO market_prices (item_id, base_price, current_price) "
+            "VALUES (?, ?, ?)",
+            (self.item_id, self.price, self.price)
         )
         await bot.db.commit()
         await log_admin_action(
@@ -11509,6 +11766,51 @@ class SettingsAdminRoleModal(discord.ui.Modal, title="Роль админист�
         await interaction.followup.send(f"✅ Роль <@&{role_id}> получила доступ.", ephemeral=True)
 
 
+class EditEmojiModal(discord.ui.Modal, title="Изменить эмодзи"):
+    emoji = discord.ui.TextInput(
+        label="Новый эмодзи",
+        placeholder="👑 или <:name:id>; пусто — сбросить",
+        required=False,
+        max_length=100,
+    )
+
+    def __init__(self, author_id: int, key: str):
+        super().__init__()
+        self.author_id = author_id
+        self.key = key
+        label = EMOJI_KEYS.get(key, (key, "?"))[0]
+        self.title = f"Эмодзи: {label}"[:45]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if interaction.guild_id is None:
+            return await interaction.followup.send(
+                "❌ Настройки доступны только на сервере.",
+                ephemeral=True,
+            )
+
+        value = self.emoji.value.strip()
+        settings = await get_settings(interaction.guild_id)
+        custom = settings["custom_emojis"]
+        label = EMOJI_KEYS.get(self.key, (self.key, "?"))[0]
+
+        if value:
+            if not is_valid_emoji(value):
+                return await interaction.followup.send(
+                    "❌ Эмодзи должен быть юникод-символом (👑) "
+                    "или кастомным (`<:name:id>`).",
+                    ephemeral=True,
+                )
+            custom[self.key] = value
+            message = f"✅ Эмодзи для «{label}» обновлён."
+        else:
+            custom.pop(self.key, None)
+            message = f"✅ Эмодзи для «{label}» сброшен."
+
+        await save_setting(interaction.guild_id, "custom_emojis", custom)
+        await interaction.followup.send(message, ephemeral=True)
+
+
 class SettingsEmojisView(discord.ui.View):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
@@ -11748,5 +12050,10 @@ async def admin_panel(interaction: discord.Interaction):
 # ============================================================
 
 if __name__ == "__main__":
-    token = os.getenv("DISCORD_BOT_TOKEN", "ТВОЙ_ТОКЕН")
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        raise SystemExit(
+            "DISCORD_BOT_TOKEN не задан. Добавь переменную окружения "
+            "или настрой .env на хостинге."
+        )
     bot.run(token)
