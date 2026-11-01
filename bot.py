@@ -1925,19 +1925,6 @@ async def get_settings(guild_id: int) -> dict:
     if not guild_id:
         return defaults
 
-def replace_emojis(text: str) -> str:
-    if not isinstance(text, str):
-        return text
-    text = text.replace("🪙", str(BOT_BTN_EMOJIS.get("_coin", "🪙")))
-    text = text.replace("💎", str(BOT_BTN_EMOJIS.get("_gem", "💎")))
-    text = text.replace("🏰", str(BOT_BTN_EMOJIS.get("_castle", "🏰")))
-    text = text.replace("🎒", str(BOT_BTN_EMOJIS.get("_storage", "🎒")))
-    text = text.replace("🛒", str(BOT_BTN_EMOJIS.get("_shop", "🛒")))
-    text = text.replace("🏆", str(BOT_BTN_EMOJIS.get("_achievements", "🏆")))
-    text = text.replace("📅", str(BOT_BTN_EMOJIS.get("_quests", "📅")))
-    text = text.replace("📊", str(BOT_BTN_EMOJIS.get("_stats", "📊")))
-    return text
-
     await bot.db.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,))
     async with bot.db.execute("""
         SELECT bot_name, custom_emojis, currency_coins, currency_gems, prefix,
