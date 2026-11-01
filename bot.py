@@ -176,7 +176,7 @@ USE_CUSTOM_EMOJIS = False
 
 # Список кастомных эмодзи, которые РАЗРЕШЕНО использовать.
 # Добавляйте сюда ключи по одному, чтобы проверить их работу.
-ENABLED_CUSTOM_EMOJIS = {"_clan"} 
+ENABLED_CUSTOM_EMOJIS = {"_clan", "_raid", "_market", "_bank", "_duel", "_coop", "_leaderboards", "_profile"} 
 # Например: ENABLED_CUSTOM_EMOJIS = {"_coin", "_gem", "_clan"}
 
 
@@ -221,7 +221,7 @@ BOT_BTN_EMOJIS = {
     "_reset":        discord.PartialEmoji(name="reset", id=1566487125497614416), # Новое
     
     # Социум и экономика
-    "_market":       discord.PartialEmoji(name="market", id=1566288881609867354),
+    "_market":       discord.PartialEmoji(name="bank", id=1566419638626025584),
     "_bank":         discord.PartialEmoji(name="bank", id=1566419638626025584),
     "_clan":         discord.PartialEmoji(name="clan", id=1566419646914236517),
     "_raid":         discord.PartialEmoji(name="raid", id=1566419659337769000),
