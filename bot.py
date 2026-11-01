@@ -1411,7 +1411,7 @@ class CastleBot(commands.Bot):
                 print(f"[AUTOCOLLECTOR] Ошибка: {e}")
                 await asyncio.sleep(60)
 
-        async def notification_task(self):
+    async def notification_task(self):
         await self.wait_until_ready()
         while not self.is_closed():
             try:
