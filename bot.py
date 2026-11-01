@@ -245,6 +245,11 @@ EMOJI_KEYS = {
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
 
+COIN = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+GEM = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
+CASTLE = str(BOT_BTN_EMOJIS.get("_castle", "🏰"))
+STORAGE = str(BOT_BTN_EMOJIS.get("_storage", "🎒"))
+
 # Сюжетные квесты: id -> (название, описание, цель, тип действия, награда гемами)
 STORY_QUESTS = {
     "q_first_gen": ("Первые шаги", "Купи первый генератор", 1, "buy", 10),
@@ -1920,6 +1925,20 @@ async def get_settings(guild_id: int) -> dict:
     if not guild_id:
         return defaults
 
+    def replace_emojis(text: str) -> str:
+    """Заменяет стандартные эмодзи на кастомные из BOT_BTN_EMOJIS."""
+    if not isinstance(text, str):
+        return text
+    text = text.replace("🪙", str(BOT_BTN_EMOJIS.get("_coin", "🪙")))
+    text = text.replace("💎", str(BOT_BTN_EMOJIS.get("_gem", "💎")))
+    text = text.replace("🏰", str(BOT_BTN_EMOJIS.get("_castle", "🏰")))
+    text = text.replace("🎒", str(BOT_BTN_EMOJIS.get("_storage", "🎒")))
+    text = text.replace("🛒", str(BOT_BTN_EMOJIS.get("_shop", "🛒")))
+    text = text.replace("🏆", str(BOT_BTN_EMOJIS.get("_achievements", "🏆")))
+    text = text.replace("📅", str(BOT_BTN_EMOJIS.get("_quests", "📅")))
+    text = text.replace("📊", str(BOT_BTN_EMOJIS.get("_stats", "📊")))
+    return text
+
     await bot.db.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,))
     async with bot.db.execute("""
         SELECT bot_name, custom_emojis, currency_coins, currency_gems, prefix,
@@ -1944,6 +1963,47 @@ async def get_settings(guild_id: int) -> dict:
         "status_roles": json.loads(row[9] or "{}"),
         "admin_role_id": row[10],
     }
+
+def replace_emojis_in_text(text: str) -> str:
+    """Заменяет стандартные эмодзи на кастомные из BOT_BTN_EMOJIS."""
+    if not isinstance(text, str):
+        return text
+    replacements = {
+        "🪙": str(BOT_BTN_EMOJIS.get("_coin", "🪙")),
+        "💎": str(BOT_BTN_EMOJIS.get("_gem", "💎")),
+        "🏰": str(BOT_BTN_EMOJIS.get("_castle", "🏰")),
+        "🎒": str(BOT_BTN_EMOJIS.get("_storage", "🎒")),
+        "🛒": str(BOT_BTN_EMOJIS.get("_shop", "🛒")),
+        "🏆": str(BOT_BTN_EMOJIS.get("_achievements", "🏆")),
+        "📅": str(BOT_BTN_EMOJIS.get("_quests", "📅")),
+        "📊": str(BOT_BTN_EMOJIS.get("_stats", "📊")),
+        "⚙️": str(BOT_BTN_EMOJIS.get("_settings", "⚙️")),
+        "🎨": str(BOT_BTN_EMOJIS.get("_customization", "🎨")),
+        "🤖": str(BOT_BTN_EMOJIS.get("_autocollector", "🤖")),
+        "🎄": str(BOT_BTN_EMOJIS.get("_advent", "🎄")),
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+async def fix_embed_emojis(embed: discord.Embed) -> discord.Embed:
+    """Проходит по всем полям эмбеда и меняет эмодзи на кастомные."""
+    if embed.title:
+        embed.title = replace_emojis_in_text(embed.title)
+    if embed.description:
+        embed.description = replace_emojis_in_text(embed.description)
+    if embed.footer and embed.footer.text:
+        embed.set_footer(text=replace_emojis_in_text(embed.footer.text), icon_url=embed.footer.icon_url)
+    
+    for i, field in enumerate(embed.fields):
+        embed.set_field_at(
+            i,
+            name=replace_emojis_in_text(field.name),
+            value=replace_emojis_in_text(field.value),
+            inline=field.inline
+        )
+    return embed
 
 
 
@@ -2916,16 +2976,14 @@ async def build_top_embed(interaction: discord.Interaction, top_type: str, limit
             value="\n".join(chunk),
             inline=False
         )
-
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_advent_embed(interaction: discord.Interaction, page: int = 0) -> discord.Embed:
     if datetime.date.today().month != 12:
-        return discord.Embed(
-            title="🎄 Адвент-календарь",
-            description="Адвент доступен только в декабре! Возвращайся зимой.",
-            color=0xe74c3c
-        )
+        e = discord.Embed(title="🎄 Адвент-календарь", description="Адвент доступен только в декабре! Возвращайся зимой.", color=0xe74c3c)
+        e = await fix_embed_emojis(e)
+        return e
     user_id = interaction.user.id
     opened = await get_advent_opened(user_id)
     last_day, last_date = await get_advent_state(user_id)
@@ -2977,6 +3035,7 @@ async def build_advent_embed(interaction: discord.Interaction, page: int = 0) ->
         embed.add_field(name=f"Награда за окошко {next_day}", value=reward_str, inline=False)
 
     embed.set_footer(text=f"Страница {page + 1}/{total_pages}")
+    embed = await fix_embed_emojis(embed)
     return embed
 
     # история последних 5 открытых
@@ -3011,7 +3070,9 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
     """, (user_id,)) as c:
         row = await c.fetchone()
     if not row:
-        return discord.Embed(title="❌ Профиль не найден", color=0xe74c3c)
+        e = discord.Embed(title="❌ Профиль не найден", color=0xe74c3c)
+        e = await fix_embed_emojis(e)
+        return e
 
     coins, gems, catalysts, crafts, successes, grid_size, bonus, title = row
     successes = successes or 0
@@ -3204,7 +3265,7 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         ),
         inline=True
     )
-
+    embed = await fix_embed_emojis(embed)
     return embed
 
 
@@ -3620,6 +3681,7 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонус", value=f"+{total_pct}%", inline=True)
     embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_guide_section_embed(key: str) -> discord.Embed:
@@ -3898,7 +3960,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
             row_items.append(items.get(slot, "⬛"))
         row_str = "  ".join(row_items)
         embed.add_field(name="\u200b", value=row_str, inline=False)
-
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_generator_details_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -3975,6 +4037,7 @@ async def build_generator_details_embed(interaction: discord.Interaction) -> dis
         value=f"🪙 {total_coins:.2f}/час | 💎 {total_gems:.4f}/час",
         inline=False
     )
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -4010,7 +4073,7 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
         
         row_str = "  ".join(row_items)
         embed.add_field(name="\u200b", value=row_str, inline=False)
-
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Embed:
@@ -4030,6 +4093,8 @@ async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Em
     embed.add_field(name="Мощь клана", value=str(power), inline=True)
     embed.add_field(name="Сундук", value=f"🪙 {treasury}", inline=True)
     embed.add_field(name="Бонус к доходу", value=f"+{int(bonus*100)}%", inline=True)
+
+    embed = await fix_embed_emojis(embed)
     return embed
 
 
@@ -4070,6 +4135,8 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
             value=f"Цена: {coin} {price} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
             inline=False
         )
+
+    embed = await fix_embed_emojis(embed)
     return embed, total_pages
 
 
@@ -4107,6 +4174,7 @@ async def build_achievements_page(interaction: discord.Interaction, page: int) -
             value=f"{desc}\nНаграда: {gem} {reward} — {status}",
             inline=False
         )
+    embed = await fix_embed_emojis(embed)
     return embed, total_pages
 
 
@@ -4154,6 +4222,7 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
             value=f"{desc}\nЦена: {price_str}\n{status}",
             inline=False
         )
+    embed = await fix_embed_emojis(embed)
     return embed, total_pages
 
 
@@ -4176,6 +4245,7 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
             value=f"Прогресс: {progress[qid]}/{target}\nНаграда: {gem} {reward}\n{status}",
             inline=False
         )
+    embed = await fix_embed_emojis(embed)
     return embed
 
 
@@ -4193,11 +4263,13 @@ async def build_stats_embed(interaction: discord.Interaction) -> discord.Embed:
         total, successes, gems_spent, catalysts_used = await c.fetchone()
 
     if not total:
-        return discord.Embed(
+        e = discord.Embed(
             title=f"{stats_emoji} Статистика синтеза",
             description="У тебя пока нет ни одного синтеза.",
             color=0x9b59b6
         )
+        e = await fix_embed_emojis(e)  # <--- ЗАМЕНА ЭМОДЗИ
+        return e
 
     successes = successes or 0
     failures = total - successes
@@ -4212,6 +4284,8 @@ async def build_stats_embed(interaction: discord.Interaction) -> discord.Embed:
     embed.add_field(name="Винрейт", value=f"{winrate:.1f}%", inline=True)
     embed.add_field(name=f"{gem} Потрачено", value=str(gems_spent), inline=True)
     embed.add_field(name="🧪 Катализаторов", value=str(catalysts_used), inline=True)
+    
+    embed = await fix_embed_emojis(embed)  # <--- ЗАМЕНА ЭМОДЗИ
     return embed
 
 async def build_user_profile_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -4228,7 +4302,9 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
         row = await c.fetchone()
         
     if not row:
-        return discord.Embed(title="❌ Профиль не найден", color=0xe74c3c)
+        e = discord.Embed(title="❌ Профиль не найден", color=0xe74c3c)
+        e = await fix_embed_emojis(e)
+        return e
         
     coins, gems, catalysts, crafts, successes, grid, bonus = row
     
@@ -4308,7 +4384,8 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
         )
     embed.add_field(name="🏰 Замок", value=f"Сетка: **{grid}** слотов\nБонус дохода: **+{int(bonus * 100)}%**", inline=True)
     embed.add_field(name="🆔 ID", value=f"`{user_id}`", inline=True)
-    
+
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -4352,6 +4429,8 @@ async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
     embed.add_field(name="Ближайшие дни", value=days_str, inline=False)
     embed.set_footer(text="Нажми «Забрать», чтобы получить награду!" if can_claim
                      else "Возвращайся завтра за следующей наградой.")
+
+    embed = await fix_embed_emojis(embed)
     return embed
 
 
@@ -4393,6 +4472,7 @@ async def build_story_quests_embed(interaction: discord.Interaction) -> discord.
         )
 
     embed.set_footer(text=f"Выполнено: {completed_count}/{len(STORY_QUESTS)}")
+    embed = await fix_embed_emojis(embed)
     return embed
 
 
@@ -4444,6 +4524,7 @@ async def build_pets_embed(interaction: discord.Interaction) -> discord.Embed:
             )
 
     embed.set_footer(text="Купить питомца — кнопка ниже.")
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_autocollector_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -4473,7 +4554,7 @@ async def build_autocollector_embed(interaction: discord.Interaction) -> discord
             f"Последний сбор: `{last_auto or '—'}`"
             f"{upgrade_str}"
         )
-
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_notifications_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -4499,6 +4580,7 @@ async def build_notifications_embed(interaction: discord.Interaction) -> discord
             value=f"{desc}{last_str}",
             inline=False
         )
+    embed = await fix_embed_emojis(embed)
     return embed
 
 # ============================================================
@@ -4555,6 +4637,7 @@ class MainMenuView(BaseView):
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
+        embed = await fix_embed_emojis(embed)  # <--- ДОБАВИТЬ ЭТУ СТРОКУ
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
     @discord.ui.button(label="Магазин", emoji=BOT_BTN_EMOJIS.get("_shop", "🛒"), style=discord.ButtonStyle.success, row=0)
@@ -4676,7 +4759,6 @@ class GuideView(BaseView):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
-
 
 class GuideSectionView(BaseView):
     def __init__(self, author_id: int, page: int = 0, timeout: int = 600):
@@ -5518,6 +5600,7 @@ async def build_clan_quests_embed(clan_id: int):
         desc = next(d for t, d, _, _ in CLAN_QUESTS if t == qt)
         status = "✅ Выполнено" if completed else "⏳ В процессе"
         embed.add_field(name=desc, value=f"Прогресс: {prog}/{target}\nНаграда: 🪙 {reward}\n{status}", inline=False)
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def update_clan_quest(clan_id: int, quest_type: str, amount: int = 1):
@@ -8945,50 +9028,50 @@ class AdminPanelView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Начислить", emoji="➕", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Начислить", emoji=BOT_BTN_EMOJIS.get("_buy", "➕"), style=discord.ButtonStyle.success, row=0)
     async def grant(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="➕ Начислить валюту", description="Выбери валюту, затем нажми «Ввести ID».", color=0x2ecc71)
         await interaction.edit_original_response(embed=embed, view=AdminGrantView(self.author_id))
 
-    @discord.ui.button(label="Забрать", emoji="➖", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Забрать", emoji=BOT_BTN_EMOJIS.get("_sell", "➖"), style=discord.ButtonStyle.danger, row=0)
     async def take(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="➖ Забрать валюту", description="Выбери валюту, затем нажми «Ввести ID».", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminTakeView(self.author_id))
 
-    @discord.ui.button(label="Профиль", emoji="👤", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Профиль", emoji=BOT_BTN_EMOJIS.get("_profile", "👤"), style=discord.ButtonStyle.primary, row=0)
     async def profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AdminProfileModal(self.author_id))
 
-    @discord.ui.button(label="Изменить", emoji="✏️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Изменить", emoji=BOT_BTN_EMOJIS.get("_settings", "✏️"), style=discord.ButtonStyle.secondary, row=1)
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AdminEditModal(self.author_id))
 
-    @discord.ui.button(label="Сбросить", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Сбросить", emoji=BOT_BTN_EMOJIS.get("_reset", "🗑️"), style=discord.ButtonStyle.danger, row=1)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AdminResetModal(self.author_id))
 
-    @discord.ui.button(label="Выдать предмет", emoji="🎁", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Выдать предмет", emoji=BOT_BTN_EMOJIS.get("_buy", "🎁"), style=discord.ButtonStyle.success, row=1)
     async def give_item(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AdminGiveItemModal(self.author_id))
 
-    @discord.ui.button(label="Добавить генератор", emoji="⚙️", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Добавить генератор", emoji=BOT_BTN_EMOJIS.get("_upgrades", "⚙️"), style=discord.ButtonStyle.secondary, row=2)
     async def add_gen(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddGeneratorModal(self.author_id))
 
-    @discord.ui.button(label="Настройки", emoji="🔧", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Настройки", emoji=BOT_BTN_EMOJIS.get("_settings", "🔧"), style=discord.ButtonStyle.secondary, row=2)
     async def settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🔧 Настройки сервера", description="Выбери категорию.", color=0x808080)
         await interaction.edit_original_response(embed=embed, view=SettingsView(self.author_id))
         
-    @discord.ui.button(label="Логи", emoji="📜", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Логи", emoji=BOT_BTN_EMOJIS.get("_storyquests", "📜"), style=discord.ButtonStyle.secondary, row=3)
     async def logs(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_admin_logs(interaction, self.author_id, page=0)
 
-    @discord.ui.button(label="Ещё", emoji="➡️", style=discord.ButtonStyle.primary, row=4)
+    @discord.ui.button(label="Ещё", emoji=BOT_BTN_EMOJIS.get("_forward", "➡️"), style=discord.ButtonStyle.primary, row=4)
     async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛡️ Панель администратора — страница 2", color=0xe74c3c)
@@ -10602,7 +10685,7 @@ class AdminProfileModal(discord.ui.Modal, title="Профиль игрока"):
 
         embed = discord.Embed(title=f"🛡️ Профиль <@{uid}>", color=0xe74c3c)
         embed.add_field(name="ID", value=f"`{uid}`", inline=False)
-        embed.add_field(name="Кошелёк", value=f"🪙 {coins} | 💎 {gems}", inline=True)
+        embed.add_field(name="Кошелёк", value=f"{COIN} {coins} | {GEM} {gems}"", inline=True)
         embed.add_field(name="Катализаторы", value=f"🧪 {catalysts}", inline=True)
         embed.add_field(name="Сетка", value=f"{grid_size}", inline=True)
         embed.add_field(name="Бонус", value=f"+{int(bonus * 100)}%", inline=True)
@@ -11558,6 +11641,7 @@ class StarEmojiModal2(discord.ui.Modal, title="Эмодзи по звёздам 
 @bot.tree.command(name="меню", description="Открыть главное меню замка")
 async def main_menu(interaction: discord.Interaction):
     embed = await build_main_embed(interaction)
+    embed = await fix_embed_emojis(embed) 
     view = MainMenuView(interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
