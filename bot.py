@@ -454,6 +454,19 @@ class CastleBot(commands.Bot):
         await self.init_db()
         await self.tree.sync()
 
+        settings = await get_settings(GUILD_ID) # или взять из bot.guilds
+        custom = settings.get("custom_emojis", {})
+        
+        for k, v in custom.items():
+            if v.startswith("<"):
+                m = re.search(r":(\d+)>$", v)
+                if m:
+                    BOT_BTN_EMOJIS[k] = discord.PartialEmoji(name="custom", id=int(m.group(1)))
+                else:
+                    BOT_BTN_EMOJIS[k] = v
+            else:
+                BOT_BTN_EMOJIS[k] = v
+
         # 5. Запускаем фоновые задачи (asyncio, а не self.loop)
         asyncio.create_task(self.auction_closer())
         asyncio.create_task(self.market_updater())
@@ -461,6 +474,8 @@ class CastleBot(commands.Bot):
         asyncio.create_task(self.autocollector_task())
         asyncio.create_task(self.notification_task())
         asyncio.create_task(self.war_closer())
+
+        await apply_custom_emojis_to_db()
 
     async def war_closer(self):
         await self.wait_until_ready()
@@ -1606,6 +1621,7 @@ class CastleBot(commands.Bot):
 
 
 bot = CastleBot()
+BOT_BTN_EMOJIS = {}
 
 
 # ============================================================
@@ -1653,6 +1669,77 @@ async def get_settings(guild_id: int) -> dict:
         "status_roles": json.loads(row[9] or "{}"),
         "admin_role_id": row[10],
     }
+
+async def apply_custom_emojis_to_db():
+    """Автоматически проставляет кастомные эмодзи сервера в настройки бота"""
+    # Вставь сюда ID твоего сервера, где загружены эмодзи
+    GUILD_ID = 123456789012345678  # <--- ЗАМЕНИ НА СВОЙ ID СЕРВЕРА
+
+    # Словарь: название в боте -> ID эмодзи с твоего скриншота
+    emojis_map = {
+        # Валюты и общие
+        "_coin":          "<:coin:1566288877369434122>",
+        "_gem":           "<:gem:1566288868158738452>",
+        "_castle":        "<:castle:156628869484142712>",
+        "_storage":       "<:storage:1566288893849116712>",
+        
+        # Меню
+        "_shop":          "<:buy:1566288887691874304>",
+        "_upgrades":      "<:upgrade:1566288897057755146>",
+        "_achievements":  "<:achiv:1566288895526834266>",
+        "_quests":        "<:quests:156628885984526376>",
+        "_stats":         "<:analytic:1566288866409848874>",
+        "_analytics":     "<:analytic:1566288866409848874>",
+        
+        # Действия
+        "_back":          "<:back:1566288863582887946>",
+        "_forward":       "<:forward:156628864950362153>",
+        "_settings":      "<:settings:1566288873947009115>",
+        "_move":          "<:changeplace:1566288884579434607>",
+        "_swap":          "<:swap:156628889172205788>",
+        "_sell":          "<:sell:1566288878690639999>",
+        "_buy":           "<:buy:1566288887691874304>",
+        "_synthesis":     "<:synthesis:1566288883174342826>",
+        "_stars":         "<:stars:1566288892351610890>",
+        "_market":        "<:market:1566288881609867354>",
+        "_clan":          "<:clan:1566288880263630898>",
+        "_raid":          "<:raidicon:1566288890917163068>",
+        "_duel":          "<:duel:1566288898458390551>",
+        "_switch":        "<:switch:1566288872185401436>",
+    }
+
+    if not GUILD_ID or GUILD_ID == 123456789012345678:
+        print("[EMOJI] ⚠️ Не указан ID сервера! Кастомные эмодзи не применены.")
+        return
+
+    # Получаем текущие настройки
+    settings = await get_settings(GUILD_ID)
+    custom = settings.get("custom_emojis", {})
+    
+    # Обновляем словарь
+    custom.update(emojis_map)
+    
+    # Сохраняем обратно в БД
+    await save_setting(GUILD_ID, "custom_emojis", custom)
+    print(f"[EMOJI] ✅ Установлено {len(emojis_map)} кастомных эмодзи для сервера {GUILD_ID}.")
+
+async def get_btn_emoji(guild_id: int, key: str, default: str) -> discord.PartialEmoji | str:
+    """Возвращает кастомный эмодзи для кнопки (если настроен) или стандартный."""
+    if not guild_id:
+        return default
+    
+    settings = await get_settings(guild_id)
+    custom = settings.get("custom_emojis", {})
+    emoji_str = custom.get(key, default)
+    
+    # Если это кастомный эмодзи вида <:name:id> или <a:name:id>
+    if emoji_str.startswith("<") and emoji_str.endswith(">"):
+        # Парсим ID из строки
+        m = re.search(r":(\d+)>$", emoji_str)
+        if m:
+            return discord.PartialEmoji(name="custom", id=int(m.group(1)))
+            
+    return emoji_str
 
 async def get_star_emoji(item_id: str, stars: int, default_emoji: str) -> str:
     """Возвращает эмодзи для генератора с учётом звёздности.
@@ -4240,60 +4327,46 @@ class BaseView(discord.ui.View):
 # ============================================================
 
 class MainMenuView(BaseView):
-    @discord.ui.button(label="Замок", emoji="🏰", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Замок", emoji=BOT_BTN_EMOJIS.get("_castle", "🏰"), style=discord.ButtonStyle.primary, row=0)
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
-    @discord.ui.button(label="Магазин", emoji="🛒", style=discord.ButtonStyle.success, row=0)
-    async def tab_shop_hub(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Магазин", emoji=BOT_BTN_EMOJIS.get("_shop", "🛒"), style=discord.ButtonStyle.success, row=0)
+    async def tab_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="🛒 Магазин",
-            description="Выбери раздел:",
-            color=0xf1c40f
-        )
+        embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    @discord.ui.button(label="Социум", emoji="⚔️", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Социум", emoji=BOT_BTN_EMOJIS.get("_clan", "⚔️"), style=discord.ButtonStyle.danger, row=0)
     async def tab_social(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
 
-    @discord.ui.button(label="Мой профиль", emoji="👤", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Мой профиль", emoji=BOT_BTN_EMOJIS.get("_settings", "👤"), style=discord.ButtonStyle.primary, row=1)
     async def tab_my_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_user_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
-    @discord.ui.button(label="Квесты", emoji="📋", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Квесты", emoji=BOT_BTN_EMOJIS.get("_quests", "📋"), style=discord.ButtonStyle.primary, row=1)
     async def tab_quests_hub(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="📋 Квесты",
-            description="Выбери раздел: сюжетные квесты или ежедневные задания.",
-            color=0x3498db
-        )
+        embed = discord.Embed(title="📋 Квесты", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=QuestsHubView(self.author_id))
 
-    @discord.ui.button(label="Ежедневная награда", emoji="📅", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Ежедневная награда", emoji=BOT_BTN_EMOJIS.get("_achievements", "📅"), style=discord.ButtonStyle.success, row=1)
     async def tab_daily(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_daily_embed(interaction)
-        await interaction.edit_original_response(
-            embed=embed, view=DailyView(self.author_id, return_to="main")
-        )
+        await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, return_to="main"))
 
-    @discord.ui.button(label="Путеводитель", emoji="📖", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Путеводитель", emoji=BOT_BTN_EMOJIS.get("_stats", "📖"), style=discord.ButtonStyle.secondary, row=2)
     async def tab_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(
-            title="📖 Путеводитель",
-            description="Выбери раздел:",
-            color=0x3498db
-        )
+        embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id))
 
 GUIDE_SECTIONS = {
