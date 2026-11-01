@@ -1947,39 +1947,50 @@ class CastleBot(commands.Bot):
                 print(f"[NOTIFICATION_TASK] Ошибка: {e}")
                 await asyncio.sleep(600)
 
+    async def load_application_emojis(self):
+        """Загружает application emojis и подменяет BOT_BTN_EMOJIS на реальные объекты."""
+        try:
+            app_emojis = await self.fetch_application_emojis()
+        except discord.HTTPException as e:
+            print(f"[EMOJI] Не удалось загрузить application emojis: {e}")
+            return
+
+        by_name = {e.name: e for e in app_emojis}
+        by_id = {e.id: e for e in app_emojis}
+
+        fallback_map = {
+            "_coin": "🪙", "_gem": "💎", "_castle": "🏰", "_storage": "🎒",
+            "_shop": "🛒", "_upgrades": "💎", "_achievements": "🏆",
+            "_quests": "📅", "_stats": "📊", "_settings": "⚙️",
+            "_back": "◀️", "_forward": "▶️", "_move": "🔀", "_swap": "↔️",
+            "_sell": "💰", "_buy": "🛒", "_synthesis": "⚗️", "_stars": "⭐",
+            "_catalyst": "🧪", "_echange": "💱", "_switch": "🔄", "_reset": "🗑️",
+            "_market": "🏛️", "_bank": "🏦", "_clan": "⚔️", "_raid": "🏰",
+            "_duel": "🤺", "_coop": "👥", "_leaderboards": "📊", "_profile": "👤",
+            "_cat": "🐱", "_dog": "🐶", "_dragon": "🐲", "_phoenix": "🔥",
+            "_wolf": "🐺", "_pets": "🐾", "_title": "🏅",
+        }
+
+        for key, value in list(BOT_BTN_EMOJIS.items()):
+            if isinstance(value, discord.PartialEmoji):
+                emoji = by_id.get(value.id) or by_name.get(value.name)
+                if emoji:
+                    BOT_BTN_EMOJIS[key] = emoji
+                else:
+                    fallback = fallback_map.get(key, "❔")
+                    BOT_BTN_EMOJIS[key] = fallback
+                    print(f"[EMOJI] {key} (id={value.id}, name={value.name}) не найден — фолбэк {fallback}")
+            elif isinstance(value, str) and value.startswith("<") and value.endswith(">"):
+                # строки вида <:name:id> — вытащим ID и попробуем найти
+                m = re.search(r":(\d+)>$", value)
+                if m:
+                    emoji = by_id.get(int(m.group(1)))
+                    if emoji:
+                        BOT_BTN_EMOJIS[key] = emoji
 
 bot = CastleBot()
 
-async def load_application_emojis(self):
-    """Загружает application emojis и подменяет BOT_BTN_EMOJIS на реальные объекты."""
-    try:
-        app_emojis = await self.fetch_application_emojis()
-    except discord.HTTPException as e:
-        print(f"[EMOJI] Не удалось загрузить application emojis: {e}")
-        return
 
-    # app_emojis — список discord.Emoji (application emoji)
-    by_name = {e.name: e for e in app_emojis}
-    by_id = {e.id: e for e in app_emojis}
-
-    for key, value in list(BOT_BTN_EMOJIS.items()):
-        # value может быть PartialEmoji или строкой
-        if isinstance(value, discord.PartialEmoji):
-            emoji = by_id.get(value.id) or by_name.get(value.name)
-            if emoji:
-                BOT_BTN_EMOJIS[key] = emoji
-            else:
-                # эмодзи не найден — откатываемся на Unicode-фолбэк
-                fallback = {
-                    "_clan": "⚔️", "_raid": "🏰", "_duel": "🤺",
-                    "_coin": "🪙", "_gem": "💎", "_castle": "🏰",
-                    "_storage": "🎒", "_shop": "🛒", "_back": "◀️",
-                    "_forward": "▶️", "_market": "🏛️", "_bank": "🏦",
-                    "_stats": "📊", "_quests": "📅", "_achievements": "🏆",
-                    "_settings": "⚙️", "_leaderboards": "📊",
-                }.get(key, "❔")
-                BOT_BTN_EMOJIS[key] = fallback
-                print(f"[EMOJI] {key} (id={value.id}, name={value.name}) не найден в application emojis — используется фолбэк {fallback}")
 
 # ============================================================
 #  🧰 НАСТРОЙКИ СЕРВЕРА
