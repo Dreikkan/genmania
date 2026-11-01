@@ -4864,6 +4864,24 @@ class MainMenuView(BaseView):
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id))
 
 
+GUIDE_SECTIONS = {
+    "economy": ("💰 Экономика", "Монеты, гемы, доход, обмен, банк, налоги"),
+    "generators": ("🏗️ Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
+    "pets": ("🐾 Питомцы", "5 видов, кормление, уровни, бонусы"),
+    "titles": ("🏅 Титулы", "20 штук, условия, бонусы"),
+    "clans": ("🏰 Кланы", "Создание, роли, войны, сундук, квесты"),
+    "pvp": ("⚔️ PvP", "Рейды, дуэли, мощь, лимиты"),
+    "auction": ("🏛️ Аукцион и биржа", "Лоты, ставки, комиссия, цены"),
+    "quests": ("📜 Квесты", "Сюжетные (10 глав), ежедневные задания"),
+    "daily": ("📅 Дейли и адвент", "30-дневный стрик, адвент-календарь"),
+    "achievements": ("🏆 Достижения", "14 штук, награды гемами"),
+    "cosmetics": ("🎨 Кастомизация", "Цвет, фон, иконка, титулы"),
+    "autocollector": ("🤖 Автосборщик", "Покупка, уровни, автодоход"),
+    "notifications": ("📬 Уведомления", "5 типов, настройка в ЛС"),
+    "tops": ("📊 Топы", "6 типов, 10/20/30 мест"),
+    "analytics": ("📈 Аналитика", "Личная статистика"),
+}
+
 class GuideView(BaseView):
     def __init__(self, author_id: int, page: int = 0, timeout: int = 600):
         super().__init__(author_id, timeout)
@@ -7943,7 +7961,8 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
     custom = (await get_settings(guild_id))["custom_emojis"]
     chain_items = list(CRAFT_CHAIN.items())
 
-    options_all = []
+    options_all = []  # <--- ВОТ ЭТА СТРОКА БЫЛА ПОТЕРЯНА
+    
     for item_id, next_id in chain_items:
         async with bot.db.execute("SELECT name, emoji FROM items WHERE id = ?", (item_id,)) as c:
             src = await c.fetchone()
@@ -7958,12 +7977,12 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
             count = (await c.fetchone())[0]
         
         emoji_str = custom.get(item_id, src[1])
-        emoji_obj = parse_emoji_safe(emoji_str)
+        emoji_obj = parse_emoji_safe(emoji_str)  # Используем безопасную функцию
         
-        options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name}...",
-            value=f"{slot}:{item_id}",
-            emoji=parse_emoji_safe(custom.get(item_id, default_emoji)) # Новая функция
+        options_all.append(discord.SelectOption(
+            label=f"{src[0]} ({count}/5) → {dst[0]}",
+            value=item_id,
+            emoji=emoji_obj
         ))
 
     if not options_all:
