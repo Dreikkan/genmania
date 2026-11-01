@@ -387,8 +387,8 @@ TOP_PAGE_SIZES = (10, 20, 30)   # доступные размеры страни
 # ============================================================
 
 ADVENT_DAYS = 30
-ADVENT_PAGE_SIZE = 6          # окошек на страницу (6 в ряд × 1 ряд = 6 кнопок)
-ADVENT_PAGES = (ADVENT_DAYS + ADVENT_PAGE_SIZE - 1) // ADVENT_PAGE_SIZE  # 5 страниц
+ADVENT_PAGE_SIZE = 5          # окошек на страницу (6 в ряд × 1 ряд = 6 кнопок)
+ADVENT_PAGES = (ADVENT_DAYS + ADVENT_PAGE_SIZE - 1) // ADVENT_PAGE_SIZE  # 6 страниц
 
 # Награды за окошки: день -> (монеты, гемы, предмет_id или None)
 ADVENT_REWARDS = {
@@ -2786,19 +2786,9 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
 
     # --- Достижения ---
     async with bot.db.execute(
-        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
-    ) as c:
-        ach_count = (await c.fetchone())[0] or 0
-
-    async with bot.db.execute(
         "SELECT total_coins_earned, total_gems_earned FROM players WHERE user_id = ?", (user_id,)
     ) as c:
         tce, tge = await c.fetchone()
-    embed.add_field(
-        name="📊 Всего заработано",
-        value=f"🪙 {tce or 0}\n💎 {tge or 0}",
-        inline=True
-    )
 
     # --- Строим embed ---
     embed = discord.Embed(
@@ -2807,6 +2797,13 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         color=0x3498db
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+    # Всего заработано (после создания embed!)
+    embed.add_field(
+        name="📊 Всего заработано",
+        value=f"🪙 {tce or 0}\n💎 {tge or 0}",
+        inline=True
+    )
 
     # Доход
     total_bonus_line = await get_total_bonus_line(user_id)
