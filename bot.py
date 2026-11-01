@@ -4589,32 +4589,37 @@ class GuideView(BaseView):
         super().__init__(author_id, timeout)
         self.page = page
 
-        # 5 кнопок в ряд, всего 15 разделов → 3 страницы
         items = list(GUIDE_SECTIONS.items())
         per_page = 5
         total_pages = (len(items) + per_page - 1) // per_page
         page = max(0, min(page, total_pages - 1))
         chunk = items[page*per_page:(page+1)*per_page]
 
+        # 5 разделов в первом ряду
         for idx, (key, (label, _desc)) in enumerate(chunk):
             btn = discord.ui.Button(
                 label=label[:80],
                 style=discord.ButtonStyle.primary,
-                row=idx,
+                row=0,
             )
             btn.callback = self._make_section_callback(key)
             self.add_item(btn)
 
-        # пагинация
+        # Пагинация и назад во втором ряду
         if total_pages > 1:
-            prev = discord.ui.Button(label="◀️", style=discord.ButtonStyle.secondary, row=5 - 1)
+            prev = discord.ui.Button(label="◀️", style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="▶️", style=discord.ButtonStyle.secondary, row=5 - 1)
+            nxt = discord.ui.Button(label="▶️", style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=5 - 1)
+        back = discord.ui.Button(
+            label="Назад", 
+            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            style=discord.ButtonStyle.danger, 
+            row=1
+        )
         back.callback = self.btn_back
         self.add_item(back)
 
@@ -4641,7 +4646,6 @@ class GuideView(BaseView):
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id, new_page))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=4)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
@@ -4653,7 +4657,7 @@ class GuideSectionView(BaseView):
         super().__init__(author_id, timeout)
         self.page = page
 
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
