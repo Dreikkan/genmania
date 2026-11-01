@@ -165,6 +165,13 @@ TOGGLEABLE_COMMANDS = {
     "stats":        "Статистика",
 }
 
+
+# ============================================================
+#  🎨 НАСТРОЙКА ЭМОДЗИ
+# ============================================================
+# Установите True, чтобы включить кастомные эмодзи приложения.
+# Установите False, чтобы использовать стандартные Unicode-эмодзи.
+USE_CUSTOM_EMOJIS = False
 # ============================================================
 #  🎨 КАСТОМНЫЕ ЭМОДЗИ (объявляем ДО EMOJI_KEYS)
 # ============================================================
@@ -258,6 +265,33 @@ EMOJI_KEYS = {
     "_quests":       ("Задания", str(BOT_BTN_EMOJIS.get("_quests", "📅"))),
     "_stats":        ("Статистика", str(BOT_BTN_EMOJIS.get("_stats", "📊"))),
 }
+
+# Стандартные эмодзи (используются, если кастомные отключены)
+UNICODE_EMOJIS = {
+    "_coin": "🪙", "_gem": "💎", "_castle": "🏰", "_storage": "🎒",
+    "_shop": "🛒", "_upgrades": "⬆️", "_achievements": "🏆", "_quests": "📅",
+    "_dailyquests": "📅", "_storyquests": "📜", "_stats": "📊", "_settings": "⚙️",
+    "_customization": "🎨", "_notifications": "📬", "_autocollector": "🤖",
+    "_advent": "🎄", "_inventory": "📦", "_back": "◀️", "_forward": "▶️",
+    "_move": "🔀", "_swap": "🔄", "_sorting": "↕️", "_sell": "💰", "_buy": "🛒",
+    "_synthesis": "⚗️", "_stars": "⭐", "_catalyst": "🧪", "_echange": "💱",
+    "_switch": "🔀", "_reset": "🗑️", "_market": "🏛️", "_bank": "🏦",
+    "_clan": "⚔️", "_raid": "🏰", "_duel": "🤺", "_coop": "👥",
+    "_leaderboards": "📊", "_profile": "👤", "_cat": "🐱", "_dog": "🐶",
+    "_dragon": "🐲", "_phoenix": "🔥", "_wolf": "🐺", "_pets": "🐾",
+    "_vip": "⭐", "_platinum": "💠", "_gold": "🥇", "_diamond": "💎",
+    "_title": "🏅",
+    # Достижения
+    "_ach_first": "⚗️", "_ach_star1": "⭐", "_ach_chemist": "🧪", "_ach_rich": "🪙",
+    "_ach_million": "💰", "_ach_master": "🔮", "_ach_lucky": "🍀", "_ach_fortune": "🎰",
+    "_ach_legend": "🌠", "_ach_unlucky": "💥", "_ach_starcol": "🌟", "_ach_gem": "💎",
+}
+
+def get_emoji(key: str):
+    """Возвращает кастомный или стандартный эмодзи в зависимости от флага."""
+    if USE_CUSTOM_EMOJIS and key in BOT_BTN_EMOJIS:
+        return BOT_BTN_EMOJIS[key]
+    return UNICODE_EMOJIS.get(key, "❔")
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
 
@@ -2045,19 +2079,20 @@ def format_price(price: int) -> str:
 def replace_emojis_in_text(text: str) -> str:
     if not isinstance(text, str):
         return text
+    
     replacements = {
-        "🪙": str(BOT_BTN_EMOJIS.get("_coin", "🪙")),
-        "💎": str(BOT_BTN_EMOJIS.get("_gem", "💎")),
-        "🏰": str(BOT_BTN_EMOJIS.get("_castle", "🏰")),
-        "🎒": str(BOT_BTN_EMOJIS.get("_storage", "🎒")),
-        "🛒": str(BOT_BTN_EMOJIS.get("_shop", "🛒")),
-        "🏆": str(BOT_BTN_EMOJIS.get("_achievements", "🏆")),
-        "📅": str(BOT_BTN_EMOJIS.get("_quests", "📅")),
-        "📊": str(BOT_BTN_EMOJIS.get("_stats", "📊")),
-        "⚙️": str(BOT_BTN_EMOJIS.get("_settings", "⚙️")),
-        "🎨": str(BOT_BTN_EMOJIS.get("_customization", "🎨")),
-        "🤖": str(BOT_BTN_EMOJIS.get("_autocollector", "🤖")),
-        "🎄": str(BOT_BTN_EMOJIS.get("_advent", "🎄")),
+        "🪙": get_emoji("_coin"),
+        "💎": get_emoji("_gem"),
+        "🏰": get_emoji("_castle"),
+        "🎒": get_emoji("_storage"),
+        "🛒": get_emoji("_shop"),
+        "🏆": get_emoji("_achievements"),
+        "📅": get_emoji("_quests"),
+        "📊": get_emoji("_stats"),
+        "⚙️": get_emoji("_settings"),
+        "🎨": get_emoji("_customization"),
+        "🤖": get_emoji("_autocollector"),
+        "🎄": get_emoji("_advent"),
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
@@ -4742,7 +4777,7 @@ class MainMenuView(BaseView):
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
         await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
 
-    @discord.ui.button(label="Социум", emoji=BOT_BTN_EMOJIS.get("_clan", "⚔️"), style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Социум", emoji=get_emoji("_clan"), style=discord.ButtonStyle.danger, row=0)
     async def tab_social(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
