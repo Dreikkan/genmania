@@ -4641,6 +4641,7 @@ class GuideView(BaseView):
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id, new_page))
 
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=4)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
