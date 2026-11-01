@@ -167,10 +167,29 @@ TOGGLEABLE_COMMANDS = {
 #  🎨 КАСТОМНЫЕ ЭМОДЗИ (объявляем ДО EMOJI_KEYS)
 # ============================================================
 BOT_BTN_EMOJIS = {
-    "_coin":         discord.PartialEmoji(name="coin", id=1566288877369434122),
-    "_gem":          discord.PartialEmoji(name="gem", id=1566288868158738452),
-    "_castle":       discord.PartialEmoji(name="castle", id=156628869484142712),
-    # ... и так далее, но только те ID, в которых ты уверен
+    "_coin":         "🪙",
+    "_gem":          "💎",
+    "_castle":       "🏰",
+    "_storage":      "🎒",
+    "_shop":         "🛒",
+    "_upgrades":     "💎",
+    "_achievements": "🏆",
+    "_quests":       "📅",
+    "_stats":        "📊",
+    "_settings":     "⚙️",
+    "_back":         "◀️",
+    "_forward":      "▶️",
+    "_move":         "🔀",
+    "_swap":         "↔️",
+    "_sell":         "💰",
+    "_buy":          "🛒",
+    "_synthesis":    "⚗️",
+    "_stars":        "⭐",
+    "_market":       "🏛️",
+    "_clan":         "🏰",
+    "_raid":         "⚔️",
+    "_duel":         "🤺",
+    "_switch":       "🔄"
 }
 
 # Функция, которая безопасно подставляет кастомный эмодзи
