@@ -542,6 +542,8 @@ class CastleBot(commands.Bot):
         await self.init_db()
         await self.tree.sync()
 
+        await self.load_application_emojis()
+
         # 4. Запускаем фоновые задачи
         asyncio.create_task(self.auction_closer())
         asyncio.create_task(self.market_updater())
@@ -1947,6 +1949,37 @@ class CastleBot(commands.Bot):
 
 
 bot = CastleBot()
+
+async def load_application_emojis(self):
+    """Загружает application emojis и подменяет BOT_BTN_EMOJIS на реальные объекты."""
+    try:
+        app_emojis = await self.fetch_application_emojis()
+    except discord.HTTPException as e:
+        print(f"[EMOJI] Не удалось загрузить application emojis: {e}")
+        return
+
+    # app_emojis — список discord.Emoji (application emoji)
+    by_name = {e.name: e for e in app_emojis}
+    by_id = {e.id: e for e in app_emojis}
+
+    for key, value in list(BOT_BTN_EMOJIS.items()):
+        # value может быть PartialEmoji или строкой
+        if isinstance(value, discord.PartialEmoji):
+            emoji = by_id.get(value.id) or by_name.get(value.name)
+            if emoji:
+                BOT_BTN_EMOJIS[key] = emoji
+            else:
+                # эмодзи не найден — откатываемся на Unicode-фолбэк
+                fallback = {
+                    "_clan": "⚔️", "_raid": "🏰", "_duel": "🤺",
+                    "_coin": "🪙", "_gem": "💎", "_castle": "🏰",
+                    "_storage": "🎒", "_shop": "🛒", "_back": "◀️",
+                    "_forward": "▶️", "_market": "🏛️", "_bank": "🏦",
+                    "_stats": "📊", "_quests": "📅", "_achievements": "🏆",
+                    "_settings": "⚙️", "_leaderboards": "📊",
+                }.get(key, "❔")
+                BOT_BTN_EMOJIS[key] = fallback
+                print(f"[EMOJI] {key} (id={value.id}, name={value.name}) не найден в application emojis — используется фолбэк {fallback}")
 
 # ============================================================
 #  🧰 НАСТРОЙКИ СЕРВЕРА
@@ -4817,7 +4850,7 @@ class GuideSectionView(BaseView):
         super().__init__(author_id, timeout)
         self.page = page
 
-    @discord.ui.button(label="Назад", emoji="<:back:1566419637267071066>", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
