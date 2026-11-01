@@ -3180,10 +3180,20 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     cos_bg = cos[1] if cos else None
     cos_icon = cos[2] if cos else None
 
+    async with bot.db.execute(
+        "SELECT embed_color, bg_url, castle_icon FROM user_cosmetics WHERE user_id = ?", (user_id,)
+    ) as c:
+        cos = await c.fetchone()
+    cos_color = (cos[0] if cos and cos[0] else 0x00ff00)
+    cos_bg = cos[1] if cos else None
+    cos_icon = cos[2] if cos else None
+
     embed = discord.Embed(
         title=f"{cos_icon or castle} Замок {interaction.user.name}",
         color=cos_color
     )
+    if cos_bg:
+        embed.set_image(url=cos_bg)
     if cos_bg:
         embed.set_image(url=cos_bg)
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
@@ -3463,10 +3473,21 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
     cos_bg = cos[1] if cos else None
     cos_icon = cos[2] if cos else None
 
+    async with bot.db.execute(
+        "SELECT embed_color, bg_url, castle_icon FROM user_cosmetics WHERE user_id = ?", (user_id,)
+    ) as c:
+        cos = await c.fetchone()
+    cos_color = (cos[0] if cos and cos[0] else 0x3498db)
+    cos_bg = cos[1] if cos else None
+    cos_icon = cos[2] if cos else None
+
     embed = discord.Embed(
         title=f"{cos_icon or '👤'} Профиль — {interaction.user.name}",
         description="Подробная информация о твоих успехах.",
         color=cos_color
+    )
+    if cos_bg:
+        embed.set_image(url=cos_bg)
     )
     if cos_bg:
         embed.set_image(url=cos_bg)
@@ -3845,7 +3866,7 @@ class ShopHubView(BaseView):
         await interaction.edit_original_response(embed=embed, view=CatalystSelectView(self.author_id))
 
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
-    async def back(self, interaction: discord.Interaction):
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(
             title="🛒 Магазин",
@@ -7708,32 +7729,6 @@ class UserSettingsView(BaseView):
     async def btn_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(UserResetModal(self.author_id))
 
-    @discord.ui.button(label="Сменить цвет", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
-    async def btn_color(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(UserColorModal(self.author_id))
-
-    @discord.ui.button(label="Экспорт данных", emoji="📤", style=discord.ButtonStyle.success, row=1)
-    async def btn_export(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        async with bot.db.execute("""
-            SELECT inv.slot, i.name, inv.stars, inv.location 
-            FROM inventory inv JOIN items i ON inv.item_id = i.id 
-            WHERE inv.user_id = ?
-        """, (interaction.user.id,)) as c:
-            inv_rows = await c.fetchall()
-
-        data = {
-            "user_id": interaction.user.id,
-            "inventory": [{"slot": r[0], "name": r[1], "stars": r[2], "loc": r[3]} for r in inv_rows]
-        }
-
-        import io
-        file = discord.File(
-            io.BytesIO(json.dumps(data, ensure_ascii=False, indent=4).encode()),
-            filename="my_profile.json"
-        )
-        await interaction.followup.send("Вот твои данные:", file=file, ephemeral=True)
-
     @discord.ui.button(label="Уведомления", emoji="📬", style=discord.ButtonStyle.primary, row=1)
     async def btn_notifications(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -7760,9 +7755,10 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
         if self.confirm.value.strip() != "УДАЛИТЬ":
             await interaction.followup.send("❌ Сброс отменён.", ephemeral=True)
             return
-        
-        # Сбрасываем только СВОЙ прогресс
+
         uid = interaction.user.id
+
+        # players
         await bot.db.execute("""
             UPDATE players SET
                 coins = 3, gems = 0, catalysts = 0,
@@ -7772,16 +7768,55 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                 last_gem_collected = CURRENT_TIMESTAMP,
                 daily_quest_date = NULL,
                 daily_quest_progress = '{}',
-                daily_quest_claimed = '[]'
+                daily_quest_claimed = '[]',
+                streak_days = 0,
+                last_daily = NULL,
+                title = 'Новичок',
+                active_pet = NULL
             WHERE user_id = ?
         """, (uid,))
-        await bot.db.execute("DELETE FROM inventory WHERE user_id = ?", (uid,))
-        await bot.db.execute("DELETE FROM player_achievements WHERE user_id = ?", (uid,))
-        await bot.db.execute("DELETE FROM player_upgrades WHERE user_id = ?", (uid,))
-        await bot.db.execute("DELETE FROM craft_log WHERE user_id = ?", (uid,))
+
+        # остальные таблицы
+        for table in (
+            "inventory", "player_achievements", "player_upgrades", "craft_log",
+            "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
+            "bank_deposits", "bank_history", "user_notifications",
+            "player_quests", "user_cosmetics",
+        ):
+            await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
+
+                # выход из клана
+        async with bot.db.execute("SELECT clan_id FROM clan_members WHERE user_id = ?", (uid,)) as c:
+            row = await c.fetchone()
+        if row:
+            clan_id = row[0]
+            await bot.db.execute("DELETE FROM clan_members WHERE user_id = ?", (uid,))
+            # если был лидером — передать лидерство или распустить
+            async with bot.db.execute("SELECT leader_id FROM clans WHERE id = ?", (clan_id,)) as c:
+                leader = (await c.fetchone())[0]
+            if leader == uid:
+                async with bot.db.execute(
+                    "SELECT user_id FROM clan_members WHERE clan_id = ? LIMIT 1", (clan_id,)
+                ) as c:
+                    new_leader = await c.fetchone()
+                if new_leader:
+                    await bot.db.execute(
+                        "UPDATE clans SET leader_id = ? WHERE id = ?", (new_leader[0], clan_id)
+                    )
+                    await bot.db.execute(
+                        "UPDATE clan_members SET role = 'leader' WHERE user_id = ? AND clan_id = ?",
+                        (new_leader[0], clan_id)
+                    )
+                else:
+                    # никого не осталось — распустить
+                    await bot.db.execute("DELETE FROM clans WHERE id = ?", (clan_id,))
+                    await bot.db.execute("DELETE FROM clan_inventory WHERE clan_id = ?", (clan_id,))
+                    await bot.db.execute("DELETE FROM clan_quests WHERE clan_id = ?", (clan_id,))
+
         await bot.db.commit()
-        
-        await interaction.followup.send("🗑️ Твой прогресс полностью сброшен. Начни заново!", ephemeral=True)
+        await interaction.followup.send(
+            "🗑️ Твой прогресс полностью сброшен. Начни заново!", ephemeral=True
+        )
 
 class UserColorModal(discord.ui.Modal, title="Смена цвета профиля"):
     color = discord.ui.TextInput(label="HEX-код цвета (например, #FF0000)", required=True)
