@@ -183,13 +183,17 @@ BOT_BTN_EMOJIS = {
     "_swap":         discord.PartialEmoji(name="swap", id=1566419668393132114),
     "_sell":         discord.PartialEmoji(name="sell", id=1566419660709040268),
     "_buy":          discord.PartialEmoji(name="buy", id=1566419640085909564),
-    "_synthesis":    discord.PartialEmoji(name="synthesis", id=1566419672067481781),
+    "_synthesis":    discord.PartialEmoji(name="synthesis", id=1566455344295706794),
     "_stars":        discord.PartialEmoji(name="stars", id=1566419664903344159),
     "_market":       discord.PartialEmoji(name="bank", id=1566419638626025584),
     "_clan":         discord.PartialEmoji(name="clan", id=1566419646914236517),
     "_raid":         discord.PartialEmoji(name="raid", id=1566419659337769000),
     "_duel":         discord.PartialEmoji(name="duel", id=1566419652404318279),
-    "_switch":       discord.PartialEmoji(name="switch", id=1566288872185401436)
+    "_switch":       discord.PartialEmoji(name="switch", id=1566288872185401436),
+    "_profile":      discord.PartialEmoji(name="profile", id=1566452852593787010),
+    "_coop":         discord.PartialEmoji(name="coop", id=1566419650575605801),
+    "_echange":      discord.PartialEmoji(name="swapmoney", id=1566419670154612756),
+    "_catalyst":     discord.PartialEmoji(name="catalyst", id=1566419672067481781),
 }
 
 # Функция, которая безопасно подставляет кастомный эмодзи
@@ -755,22 +759,245 @@ class CastleBot(commands.Bot):
 
         star_emojis = {
             "basic_gen": {
-                "0": "<:basic_gen:1565443870773215404>",
-                "1": "<:basic_gen1:1566161008270114816>",
-                "2": "<:basic_gen2:1566161041824555129>",
-                "3": "<:basic_gen3:1566161043191758878>",
-                "4": "<:basic_gen4:1566161044546650183>",
-                "5": "<:basic_gen5:1566161045842821221>",
+                "0": "<:basic_gen:1566478391631282176>",
+                "1": "<:basic_1:1566478381833392319>",
+                "2": "<:basic_2:1566478383855042630>",
+                "3": "<:basic_3:1566478385650208838>",
+                "4": "<:basic_4:1566478388091297882>",
+                "5": "<:basic_5:1566478390247039026>",
             },
             "copper_gen": {
-                "0": "<:copper_gen:1566139443939647620>",
-                "1": "<:copper_gen1:1566161721855447221>",
-                "2": "<:copper_gen2:1566161723340357803>",
-                "3": "<:copper_gen3:1566161724942581770>",
-                "4": "<:copper_gen4:1566161726448205855>",
-                "5": "<:copper_gen5:1566161728025141430>",
+                "0": "<:copper_gen:1566478413102063726>",
+                "1": "<:copper_1:1566478405002854481>",
+                "2": "<:copper_2:1566478406793560064>",
+                "3": "<:copper_3:1566478408475607281>",
+                "4": "<:copper_4:1566478410044280862>",
+                "5": "<:copper_5:1566478411571134678>",
             },
-            # ... для остальных 29 генераторов ...
+            "bronze_gen": {
+                "0": "<:bronze_gen:1566478402834272449>",
+                "1": "<:bronze_1:1566478393677979740>",
+                "2": "<:bronze_2:1566478396681097387>",
+                "3": "<:bronze_3:1566478398149370016>",
+                "4": "<:bronze_4:1566478399671898112>",
+                "5": "<:bronze_5:1566478401525653525>",
+            },
+            "iron_gen": {
+                "0": "<:iron_gen:1566478516118225096>",
+                "1": "<:iron_1:1566478507779952671>",
+                "2": "<:iron_2:1566478509747208283>",
+                "3": "<:iron_3:1566478511437381683>",
+                "4": "<:iron_4:1566478513190735964>",
+                "5": "<:iron_5:1566478514696360138>",
+            },
+            "steel_gen": {
+                "0": "<:steel_gen:1566478696217444412>",
+                "1": "<:steel_1:1566478670728667196>",
+                "2": "<:steel_2:1566478672423292948>",
+                "3": "<:steel_3:1566478675015368794>",
+                "4": "<:steel_4:1566478692941697035>",
+                "5": "<:steel_5:1566478694652838019>",
+            },
+            "silver_gen": {
+                "0": "<:silver_gen:1566478638172471536>",
+                "1": "<:silver_1:1566478629670752256>",
+                "2": "<:silver_2:1566478631717306468>",
+                "3": "<:silver_3:1566478633416003735>",
+                "4": "<:silver_4:1566478634867237104>",
+                "5": "<:silver_5:1566478636381507777>",
+            },
+            "gold_gen": {
+                "0": "<:gold_gen:1566478505812959332>",
+                "1": "<:gold_1:1566478497793445998>",
+                "2": "<:gold_2:1566478499383087204>",
+                "3": "<:gold_3:1566478501257936977>",
+                "4": "<:gold_4:1566478502671159336>",
+                "5": "<:gold_5:1566478504025915442>",
+            },
+            "platinum_gen": {
+                "0": "<:platinum_gen:1566478585802264757>",
+                "1": "<:platinum_1:1566478577938071693>",
+                "2": "<:platinum_2:1566478579464806511>",
+                "3": "<:platinum_3:1566478580916027472>",
+                "4": "<:platinum_4:1566478581985706016>",
+                "5": "<:platinum_5:1566478584133062677>",
+            },
+            "emerald_gen": {
+                "0": "<:emerald_gen:1566478485898272930>",
+                "1": "<:emerald_1:1566478477450944593>",
+                "2": "<:emerald_2:1566478478898110494>",
+                "3": "<:emerald_3:1566478480172912802>",
+                "4": "<:emerald_4:1566478481444048917>",
+                "5": "<:emerald_5:1566478483255726162>",
+            },
+            "ruby_gen": {
+                "0": "<:ruby_gen:1566478607658786916>",
+                "1": "<:ruby_1:1566478598242574446>",
+                "2": "<:ruby_2:1566478600171954276>",
+                "3": "<:ruby_3:1566478601908388022>",
+                "4": "<:ruby_4:1566478603380592762>",
+                "5": "<:ruby_5:1566478605259645008>",
+            },
+            "sapphire_gen": {
+                "0": "<:sapphire_gen:1566478618773823669>",
+                "1": "<:sapphire_1:1566478610309709874>",
+                "2": "<:sapphire_2:1566478612108935268>",
+                "3": "<:sapphire_3:1566478613811961886>",
+                "4": "<:sapphire_4:1566478615107870873>",
+                "5": "<:sapphire_5:1566478617196757082>",
+            },
+            "diamond_gen": {
+                "0": "<:diamond_gen:1566478454990577664>",
+                "1": "<:diamond_1:1566478445649862867>",
+                "2": "<:diamond_2:1566478447541354536>",
+                "3": "<:diamond_3:1566478449281990716>",
+                "4": "<:diamond_4:1566478451433545818>",
+                "5": "<:diamond_5:1566478453476294706>",
+            },
+            "crystal_gen": {
+                "0": "<:crystal_gen:1566478433385447535>",
+                "1": "<:crystal_1:1566478425202499624>",
+                "2": "<:crystal_2:1566478427081539735>",
+                "3": "<:crystal_3:1566478428700680376>",
+                "4": "<:crystal_4:1566478430235656283>",
+                "5": "<:crystal_5:1566478431863181515>",
+            },
+            "mithril_gen": {
+                "0": "<:mithril_gen:1566478545973411920>",
+                "1": "<:mithril_1:1566478538096255016>",
+                "2": "<:mithril_2:1566478539765715034>",
+                "3": "<:mithril_3:1566478541451821217>",
+                "4": "<:mithril_4:1566478543087607979>",
+                "5": "<:mithril_5:1566478544463204422>",
+            },
+            "adamantite_gen": {
+                "0": "<:adamantite_gen:1566478341408817282>",
+                "1": "<:adamantite_1:1566478332407709926>",
+                "2": "<:adamantite_2:1566478333930373241>",
+                "3": "<:adamantite_3:1566478335960158478>",
+                "4": "<:adamantite_4:1566478337935810763>",
+                "5": "<:adamantite_5:1566478339454271528>",
+            },
+            "obsidian_gen": {
+                "0": "<:obsidian_gen:1566478566336757790>",
+                "1": "<:obsidian_1:1566478557449035897>",
+                "2": "<:obsidian_2:1566478558870769765>",
+                "3": "<:obsidian_3:1566478560573792256>",
+                "4": "<:obsidian_4:1566478562041663651>",
+                "5": "<:obsidian_5:1566478563589226587>",
+            },
+            "dragon_gen": {
+                "0": "<:dragon_gen:1566478476146384906>",
+                "1": "<:dragon_1:1566478468047179917>",
+                "2": "<:dragon_2:1566478469733552128>",
+                "3": "<:dragon_3:1566478471234982020>",
+                "4": "<:dragon_4:1566478473336197340>",
+                "5": "<:dragon_5:1566478474716127484>",
+            },
+            "sky_gen": {
+                "0": "<:sky_gen:1566478648632938556>",
+                "1": "<:sky_1:1566478640387067964>",
+                "2": "<:sky_2:1566478642148548668>",
+                "3": "<:sky_3:1566478643587186858>",
+                "4": "<:sky_4:1566478645038424144>",
+                "5": "<:sky_5:1566478647022321774>",
+            },
+            "star_gen": {
+                "0": "<:star_gen:1566478669239681195>",
+                "1": "<:star_1:1566478660330987591>",
+                "2": "<:star_2:1566478661966893218>",
+                "3": "<:star_3:1566478664093143150>",
+                "4": "<:star_4:1566478666001547436>",
+                "5": "<:star_5:1566478667712823416>",
+            },
+            "cosmic_gen": {
+                "0": "<:cosmic_gen:1566478423658864801>",
+                "1": "<:cosmic_1:1566478414393639024>",
+                "2": "<:cosmic_2:1566478416797106308>",
+                "3": "<:cosmic_3:1566478418797658264>",
+                "4": "<:cosmic_4:1566478420286767326>",
+                "5": "<:cosmic_5:1566478422031470662>",
+            },
+            "galaxy_gen": {
+                "0": "<:galaxy_gen:1566478496413257778>",
+                "1": "<:galaxy_1:1566478487781646426>",
+                "2": "<:galaxy_2:1566478489731731466>",
+                "3": "<:galaxy_3:1566478491460047058>",
+                "4": "<:galaxy_4:1566478493045497966>",
+                "5": "<:galaxy_5:1566478495075532930>",
+            },
+            "nebula_gen": {
+                "0": "<:nebula_gen:1566478555767111741>",
+                "1": "<:nebula_1:1566478547546275890>",
+                "2": "<:nebula_2:1566478549521535006>",
+                "3": "<:nebula_3:1566478551190872084>",
+                "4": "<:nebula_4:1566478552633839807>",
+                "5": "<:nebula_5:1566478554265551058>",
+            },
+            "quantum_gen": {
+                "0": "<:quantum_gen:1566478596627759104>",
+                "1": "<:quantum_1:1566478587727446167>",
+                "2": "<:quantum_2:1566478589556293692>",
+                "3": "<:quantum_3:1566478591246471270>",
+                "4": "<:quantum_4:1566478592794173593>",
+                "5": "<:quantum_5:1566478594790662214>",
+            },
+            "plasma_gen": {
+                "0": "<:plasma_gen:1566478576423936120>",
+                "1": "<:plasma_1:1566478568538509443>",
+                "2": "<:plasma_2:1566478570027745340>",
+                "3": "<:plasma_3:1566478571617132687>",
+                "4": "<:plasma_4:1566478573353570424>",
+                "5": "<:plasma_5:1566478574691680448>",
+            },
+            "dark_gen": {
+                "0": "<:dark_gen:1566478444110418000>",
+                "1": "<:dark_1:1566478435042205900>",
+                "2": "<:dark_2:1566478436224999576>",
+                "3": "<:dark_3:1566478438230134984>",
+                "4": "<:dark_4:1566478440180355073>",
+                "5": "<:dark_5:1566478442331902012>",
+            },
+            "light_gen": {
+                "0": "<:light_gen:1566478536389300394>",
+                "1": "<:light_1:1566478528155746385>",
+                "2": "<:light_2:1566478530080936026>",
+                "3": "<:light_3:1566478531821576273>",
+                "4": "<:light_4:1566478533424062594>",
+                "5": "<:light_5:1566478534845665280>",
+            },
+            "time_gen": {
+                "0": "<:time_gen:1566478710192734389>",
+                "1": "<:time_1:1566478698410938479>",
+                "2": "<:time_2:1566478700718071888>",
+                "3": "<:time_3:1566478704878817400>",
+                "4": "<:time_4:1566478706560602162>",
+                "5": "<:time_5:1566478708389187594>",
+            },
+            "space_gen": {
+                "0": "<:space_gen:1566478658305265765>",
+                "1": "<:space_1:1566478650180894770>",
+                "2": "<:space_2:1566478651787317459>",
+                "3": "<:space_3:1566478653364248606>",
+                "4": "<:space_4:1566478655067000903>",
+                "5": "<:space_5:1566478656325427313>",
+            },
+            "divine_gen": {
+                "0": "<:divine_gen:1566478466465927338>",
+                "1": "<:divine_1:1566478457108570152>",
+                "2": "<:divine_2:1566478458891014144>",
+                "3": "<:divine_3:1566478460589834400>",
+                "4": "<:divine_4:1566478462355644537>",
+                "5": "<:divine_5:1566478464171909232>",
+            },
+            "legendary_gen": {
+                "0": "<:legendary_gen:1566478526461255821>",
+                "1": "<:legendary_1:1566478517825314907>",
+                "2": "<:legendary_2:1566478519360426095>",
+                "3": "<:legendary_3:1566478521197662258>",
+                "4": "<:legendary_4:1566478523131109537>",
+                "5": "<:legendary_5:1566478524917882992>",
+            }
         }
 
         GEM_INCOME = {
@@ -4425,7 +4652,7 @@ class GuideSectionView(BaseView):
         super().__init__(author_id, timeout)
         self.page = page
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
@@ -4434,7 +4661,7 @@ class GuideSectionView(BaseView):
         )
 
 class GeneratorDetailView(BaseView):
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.secondary)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
@@ -4496,7 +4723,7 @@ class QuestsHubView(BaseView):
             embed=embed, view=StoryQuestsView(self.author_id, return_to="quests")
         )
 
-    @discord.ui.button(label="Ежедневные задания", emoji="📅", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Ежедневные задания", emoji=BOT_BTN_EMOJIS.get("_quests", "📅", style=discord.ButtonStyle.success, row=0)
     async def btn_daily_tasks(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_quests_embed(interaction)
@@ -4504,14 +4731,14 @@ class QuestsHubView(BaseView):
             embed=embed, view=QuestsView(self.author_id, return_to="quests")
         )
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Назад",emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
 class AutocollectorView(BaseView):
-    @discord.ui.button(label="Купить", emoji="🛒", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Купить", emoji=BOT_BTN_EMOJIS.get("_buy", "🛒", style=discord.ButtonStyle.success, row=0)
     async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         ok, msg = await buy_autocollector(self.author_id)
@@ -4531,7 +4758,7 @@ class AutocollectorView(BaseView):
         embed = await build_autocollector_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=AutocollectorView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(
@@ -4569,11 +4796,11 @@ class TopView(BaseView):
             self.add_item(btn)
 
         # Ряд 3: обновить + назад
-        refresh = discord.ui.Button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.secondary, row=3)
+        refresh = discord.ui.Button(label="Обновить", emoji=BOT_BTN_EMOJIS.get("_spaw", "🔄", style=discord.ButtonStyle.secondary, row=3)
         refresh.callback = self.btn_refresh
         self.add_item(refresh)
 
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=3)
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.danger, row=3)
         back.callback = self.btn_back
         self.add_item(back)
 
@@ -4638,7 +4865,7 @@ class AdventView(BaseView):
             self.add_item(nxt)
 
         # Ряд 2: назад
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️", style=discord.ButtonStyle.danger, row=2)
         back.callback = self.btn_back
         self.add_item(back)
 
@@ -4698,7 +4925,7 @@ class AnalyticsView(BaseView):
         super().__init__(author_id, timeout)
         self.return_to = return_to
 
-    @discord.ui.button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Обновить", emoji=BOT_BTN_EMOJIS.get("_swap", "🔄", style=discord.ButtonStyle.primary, row=0)
     async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_analytics_embed(interaction)
