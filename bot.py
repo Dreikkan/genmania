@@ -8541,7 +8541,7 @@ class ShopBuySelectView(discord.ui.View):
             rows = await c.fetchall()
         await open_shop_buy_select(interaction, self.author_id, rows, self.page + 1)
 
-    async def back(self, interaction: discord.Interaction):
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed, _ = await build_shop_page(interaction, 0)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
@@ -8641,7 +8641,7 @@ class BuyItemQuantityView(discord.ui.View):
 
         await update_story_quests(user_id, "buy", qty)
 
-    async def fail(self, interaction: discord.Interaction, msg: str):
+    async def fail(self, interaction: discord.Interaction, button: discord.ui.Button, msg: str = ""):
         embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
