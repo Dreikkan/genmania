@@ -4086,7 +4086,7 @@ async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Em
 async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
-    custom = settings["custom_emojis"]
+    custom = settings["custom_emojis"] 
     coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
     gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
     shop_emoji = str(BOT_BTN_EMOJIS.get("_shop", "🛒"))
