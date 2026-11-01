@@ -437,7 +437,7 @@ class CastleBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.db = None
 
-        async def setup_hook(self):
+    async def setup_hook(self):
         # 1. Создаём папку data (если её нет)
         DATA_DIR = Path("/app/data")
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1676,58 +1676,7 @@ async def get_settings(guild_id: int) -> dict:
         "admin_role_id": row[10],
     }
 
-async def apply_custom_emojis_to_db():
-    """Автоматически проставляет кастомные эмодзи сервера в настройки бота"""
-    # Вставь сюда ID твоего сервера, где загружены эмодзи
-    GUILD_ID = 123456789012345678  # <--- ЗАМЕНИ НА СВОЙ ID СЕРВЕРА
 
-    # Словарь: название в боте -> ID эмодзи с твоего скриншота
-    emojis_map = {
-        # Валюты и общие
-        "_coin":          "<:coin:1566288877369434122>",
-        "_gem":           "<:gem:1566288868158738452>",
-        "_castle":        "<:castle:156628869484142712>",
-        "_storage":       "<:storage:1566288893849116712>",
-        
-        # Меню
-        "_shop":          "<:buy:1566288887691874304>",
-        "_upgrades":      "<:upgrade:1566288897057755146>",
-        "_achievements":  "<:achiv:1566288895526834266>",
-        "_quests":        "<:quests:156628885984526376>",
-        "_stats":         "<:analytic:1566288866409848874>",
-        "_analytics":     "<:analytic:1566288866409848874>",
-        
-        # Действия
-        "_back":          "<:back:1566288863582887946>",
-        "_forward":       "<:forward:156628864950362153>",
-        "_settings":      "<:settings:1566288873947009115>",
-        "_move":          "<:changeplace:1566288884579434607>",
-        "_swap":          "<:swap:156628889172205788>",
-        "_sell":          "<:sell:1566288878690639999>",
-        "_buy":           "<:buy:1566288887691874304>",
-        "_synthesis":     "<:synthesis:1566288883174342826>",
-        "_stars":         "<:stars:1566288892351610890>",
-        "_market":        "<:market:1566288881609867354>",
-        "_clan":          "<:clan:1566288880263630898>",
-        "_raid":          "<:raidicon:1566288890917163068>",
-        "_duel":          "<:duel:1566288898458390551>",
-        "_switch":        "<:switch:1566288872185401436>",
-    }
-
-    if not GUILD_ID or GUILD_ID == 123456789012345678:
-        print("[EMOJI] ⚠️ Не указан ID сервера! Кастомные эмодзи не применены.")
-        return
-
-    # Получаем текущие настройки
-    settings = await get_settings(GUILD_ID)
-    custom = settings.get("custom_emojis", {})
-    
-    # Обновляем словарь
-    custom.update(emojis_map)
-    
-    # Сохраняем обратно в БД
-    await save_setting(GUILD_ID, "custom_emojis", custom)
-    print(f"[EMOJI] ✅ Установлено {len(emojis_map)} кастомных эмодзи для сервера {GUILD_ID}.")
 
 async def get_btn_emoji(guild_id: int, key: str, default: str) -> discord.PartialEmoji | str:
     """Возвращает кастомный эмодзи для кнопки (если настроен) или стандартный."""
