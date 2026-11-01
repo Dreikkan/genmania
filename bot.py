@@ -220,6 +220,29 @@ BOT_BTN_EMOJIS = {
     "_phoenix":      discord.PartialEmoji(name="phoenix", id=1566487123782275124), # Новое
     "_wolf":         discord.PartialEmoji(name="wolf", id=1566487133668122714), # Новое
     "_pets":         discord.PartialEmoji(name="pets", id=1566487122414665759), # Новое
+
+    # Статусы
+    "_vip":          discord.PartialEmoji(name="vipbadge", id=1566521581054853130),
+    "_platinum":     discord.PartialEmoji(name="platinumbadge", id=1566521579125604372),
+    "_gold":         discord.PartialEmoji(name="goldbadge", id=1566521576952959009),
+    "_diamond":      discord.PartialEmoji(name="diamondbadge", id=1566521575505793205),
+    
+    # Титул
+    "_title":        discord.PartialEmoji(name="titlerank", id=1566487132233666730),
+    
+    # Достижения
+    "_ach_first":    discord.PartialEmoji(name="firstsynthesis", id=1566521417971794050),
+    "_ach_star1":    discord.PartialEmoji(name="firststar", id=1566521416663437413),
+    "_ach_chemist":  discord.PartialEmoji(name="chemist", id=1566521415010615366),
+    "_ach_rich":     discord.PartialEmoji(name="rich", id=1566521429460127894),
+    "_ach_million":  discord.PartialEmoji(name="millionaire", id=1566521428071940256),
+    "_ach_master":   discord.PartialEmoji(name="masteralchemist", id=1566521426247286874),
+    "_ach_lucky":    discord.PartialEmoji(name="lucky", id=1566521424451993790),
+    "_ach_fortune":  discord.PartialEmoji(name="fortunesfavorite", id=1566521419452653628),
+    "_ach_legend":   discord.PartialEmoji(name="legend", id=1566521422644519042),
+    "_ach_unlucky":  discord.PartialEmoji(name="unlucky", id=1566521432119189525),
+    "_ach_starcol":  discord.PartialEmoji(name="starcollector", id=1566521430806495352),
+    "_ach_gem":      discord.PartialEmoji(name="gemtycoon", id=1566521421029449738),
 }
 
 # Функция, которая безопасно подставляет кастомный эмодзи
@@ -749,7 +772,6 @@ class CastleBot(commands.Bot):
 
         grid_emoji = str(BOT_BTN_EMOJIS.get("_inventory", "📐"))
         grid_items = [
-            ("grid_3x3", "Сетка 3×3", "Стартовая сетка", 0, 9, grid_emoji),
             ("grid_4x4", "Сетка 4×4", "Увеличивает замок до 16 слотов", 500,   16, grid_emoji),
             ("grid_5x5", "Сетка 5×5", "Увеличивает замок до 25 слотов", 1250,  25, grid_emoji),
             ("grid_6x6", "Сетка 6×6", "Увеличивает замок до 36 слотов", 1750,  36, grid_emoji),
@@ -1050,6 +1072,18 @@ class CastleBot(commands.Bot):
             )
         """)
         
+        def round_price(p: float) -> int:
+            if p < 100:
+                return int(p)
+            elif p < 1000:
+                return int(p / 10) * 10
+            elif p < 10000:
+                return int(p / 100) * 100
+            elif p < 100000:
+                return int(p / 1000) * 1000
+            else:
+                return int(p / 10000) * 10000
+
         base_price = 10
         base_income_hour = 1.5
         price = base_price
@@ -1058,9 +1092,9 @@ class CastleBot(commands.Bot):
         for item_id, name, emoji, rarity, is_gem in gen_names:
             if is_gem:
                 gem_income = GEM_INCOME.get(item_id, 0.02)
-                items_data.append((item_id, name, int(price * 10), 0, emoji, rarity, 1, gem_income / 3600))
+                items_data.append((item_id, name, round_price(price * 10), 0, emoji, rarity, 1, gem_income / 3600))
             else:
-                items_data.append((item_id, name, int(price), income_hour / 3600, emoji, rarity, 1, 0))
+                items_data.append((item_id, name, round_price(price), income_hour / 3600, emoji, rarity, 1, 0))
             price *= 2.2
             income_hour *= 1.5
 
@@ -1080,34 +1114,33 @@ class CastleBot(commands.Bot):
         await self.db.commit()
 
         achievements_data = [
-            ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  "⚗️"),
-            ("star_1", "Первая звезда", "Улучши любой генератор до 1★", 10, "⭐"),
-            ("craft_10",      "Алхимик",         "Сделай 10 синтезов",                  15, "🧪"),
-            ("star_3", "Звёздный магнат", "Имей генератор с 3★", 25, "🌟"),
-            ("craft_50",      "Мастер-алхимик",  "Сделай 50 синтезов",                  50, "🔮"),
-            ("star_3x3", "Звёздный коллекционер", "Имей 3 генератора с 3★", 50, "💫"),
-            ("success_10",    "Удачливый",       "Успешно синтезируй 10 раз",           20, "🍀"),
-            ("success_50",    "Любимец фортуны", "Успешно синтезируй 50 раз",           75, "🎰"),
-            ("star_5", "Легенда", "Имей генератор с 5★", 100, "🌠"),
-            ("fail_5",        "Не везёт",        "Провали 5 синтезов",                  10, "💥"),
-            ("first_gem_gen", "Гемовый магнат",  "Получи свой первый гемовый генератор",30, "💎"),
-            ("rich_1000",     "Богач",           "Накопи 1000 монет",                   10, "🪙"),
-            ("rich_10000",    "Миллионер",       "Накопи 10000 монет",                  50, "💰"),
-            ("catalyst_10",   "Химик",           "Используй 10 катализаторов",          25, "🧫"),
-            
+            ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  str(BOT_BTN_EMOJIS.get("_ach_first", "⚗️"))),
+            ("star_1",        "Первая звезда",   "Улучши любой генератор до 1★",       10,  str(BOT_BTN_EMOJIS.get("_ach_star1", "⭐"))),
+            ("craft_10",      "Алхимик",         "Сделай 10 синтезов",                  15,  str(BOT_BTN_EMOJIS.get("_ach_chemist", "🧪"))),
+            ("star_3",        "Звёздный магнат", "Имей генератор с 3★",                 25,  str(BOT_BTN_EMOJIS.get("_ach_starcol", "🌟"))),
+            ("craft_50",      "Мастер-алхимик",  "Сделай 50 синтезов",                  50,  str(BOT_BTN_EMOJIS.get("_ach_master", "🔮"))),
+            ("star_3x3",      "Звёздный коллекционер", "Имей 3 генератора с 3★",       50,  str(BOT_BTN_EMOJIS.get("_ach_starcol", "💫"))),
+            ("success_10",    "Удачливый",       "Успешно синтезируй 10 раз",           20,  str(BOT_BTN_EMOJIS.get("_ach_lucky", "🍀"))),
+            ("success_50",    "Любимец фортуны", "Успешно синтезируй 50 раз",           75,  str(BOT_BTN_EMOJIS.get("_ach_fortune", "🎰"))),
+            ("star_5",        "Легенда",         "Имей генератор с 5★",                100,  str(BOT_BTN_EMOJIS.get("_ach_legend", "🌠"))),
+            ("fail_5",        "Не везёт",        "Провали 5 синтезов",                  10,  str(BOT_BTN_EMOJIS.get("_ach_unlucky", "💥"))),
+            ("first_gem_gen", "Гемовый магнат",  "Получи свой первый гемовый генератор",30,  str(BOT_BTN_EMOJIS.get("_ach_gem", "💎"))),
+            ("rich_1000",     "Богач",           "Накопи 1000 монет",                   10,  str(BOT_BTN_EMOJIS.get("_ach_rich", "🪙"))),
+            ("rich_10000",    "Миллионер",       "Накопи 10000 монет",                  50,  str(BOT_BTN_EMOJIS.get("_ach_million", "💰"))),
+            ("catalyst_10",   "Химик",           "Используй 10 катализаторов",          25,  str(BOT_BTN_EMOJIS.get("_ach_chemist", "🧫"))),
         ]
         for a in achievements_data:
             await self.db.execute("INSERT OR IGNORE INTO achievements VALUES (?, ?, ?, ?, ?)", a)
 
         gem_items = [
-            ("grid_7x7",   "Сетка 7×7",   "Увеличивает замок до 49 слотов",  100,  "📐", "upgrade", 1),
-            ("grid_8x8",   "Сетка 8×8",   "Увеличивает замок до 64 слотов",  250,  "📐", "upgrade", 1),
-            ("grid_9x9",   "Сетка 9×9",   "Увеличивает замок до 81 слота",   400,  "📐", "upgrade", 1),
-            ("grid_10x10", "Сетка 10×10", "Увеличивает замок до 100 слотов",1000,  "📐", "upgrade", 1),
-            ("vip",        "VIP",         "+15% к доходу навсегда",             100,  "⭐", "status", 1),
-            ("gold",       "Gold",        "+25% к доходу навсегда",             300,  "🥇", "status", 1),
-            ("platinum",   "Platinum",    "+35% к доходу навсегда",             700,  "💠", "status", 1),
-            ("diamond",    "Diamond",     "+45% к доходу навсегда",            1500,  "💎", "status", 1),
+            ("grid_7x7",   "Сетка 7×7",   "Увеличивает замок до 49 слотов",  100,  grid_emoji, "upgrade", 1),
+            ("grid_8x8",   "Сетка 8×8",   "Увеличивает замок до 64 слотов",  250,  grid_emoji, "upgrade", 1),
+            ("grid_9x9",   "Сетка 9×9",   "Увеличивает замок до 81 слота",   400,  grid_emoji, "upgrade", 1),
+            ("grid_10x10", "Сетка 10×10", "Увеличивает замок до 100 слотов",1000,  grid_emoji, "upgrade", 1),
+            ("vip",        "VIP",         "+15% к доходу навсегда",             100,  str(BOT_BTN_EMOJIS.get("_vip", "⭐")), "status", 1),
+            ("gold",       "Gold",        "+25% к доходу навсегда",             300,  str(BOT_BTN_EMOJIS.get("_gold", "🥇")), "status", 1),
+            ("platinum",   "Platinum",    "+35% к доходу навсегда",             700,  str(BOT_BTN_EMOJIS.get("_platinum", "💠")), "status", 1),
+            ("diamond",    "Diamond",     "+45% к доходу навсегда",            1500,  str(BOT_BTN_EMOJIS.get("_diamond", "💎")), "status", 1),
         ]
         for g in gem_items:
             await self.db.execute("INSERT OR IGNORE INTO gem_shop VALUES (?, ?, ?, ?, ?, ?, ?)", g)
@@ -1950,6 +1983,10 @@ async def get_settings(guild_id: int) -> dict:
         "admin_role_id": row[10],
     }
 
+def format_price(price: int) -> str:
+    """Форматирует цену: 1500 -> '1 500', 100000 -> '100 000'."""
+    return f"{price:,}".replace(",", " ")
+
 def replace_emojis_in_text(text: str) -> str:
     if not isinstance(text, str):
         return text
@@ -2346,6 +2383,56 @@ async def collect_income(user_id: int, guild_id: int = None):
     await update_story_quests(user_id, "collect_income", 1)
 
     return coins_earned, gems_earned
+
+async def get_menu_welcome_notification(user_id: int, guild_id: int = None) -> str | None:
+    """Проверяет, сколько прошло времени с последнего сбора, и возвращает текст уведомления."""
+    async with bot.db.execute(
+        "SELECT last_collected FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    
+    if not row or not row[0]:
+        return None
+        
+    last_collected = datetime.datetime.fromisoformat(row[0])
+    now = datetime.datetime.now()
+    seconds_passed = (now - last_collected).total_seconds()
+    
+    # Если прошло меньше 30 минут, уведомление не нужно (чтобы не спамить)
+    if seconds_passed < 1800:
+        return None
+        
+    # Считаем доход (не собирая его, просто для отображения)
+    coins_earned, gems_earned = await calculate_passive_income(user_id, guild_id)
+    
+    if coins_earned == 0 and gems_earned == 0:
+        return None
+        
+    # Форматируем время
+    hours = int(seconds_passed // 3600)
+    minutes = int((seconds_passed % 3600) // 60)
+    
+    if hours > 0:
+        time_str = f"{hours} ч {minutes} мин"
+    else:
+        time_str = f"{minutes} мин"
+        
+    coin_emoji = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
+    gem_emoji = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
+    
+    parts = []
+    if coins_earned > 0:
+        parts.append(f"{coin_emoji} {coins_earned}")
+    if gems_earned > 0:
+        parts.append(f"{gem_emoji} {gems_earned}")
+        
+    income_str = " и ".join(parts)
+    
+    return (
+        f"👋 С возвращением! Пока тебя не было ({time_str}), твои генераторы заработали:\n\n"
+        f"**{income_str}**\n\n"
+        f"*(Доход уже добавлен в кошелёк, он отображён в меню ниже).*"
+    )
 
 
 async def place_items(user_id: int, item_id: str, quantity: int) -> tuple[int, int]:
@@ -3962,7 +4049,7 @@ async def build_generator_details_embed(interaction: discord.Interaction) -> dis
         rows = await c.fetchall()
 
     embed = discord.Embed(
-        title="📋 Детали генераторов",
+        title=f"{BOT_BTN_EMOJIS.get('_generatorparts', '📋')} Детали генераторов",
         description="Доход указан с учётом звёзд и всех бонусов (статус, клан, питомец, титул).",
         color=0x3498db
     )
@@ -4117,7 +4204,7 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
         inc_str = " ".join(inc) if inc else "без дохода"
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
-            value=f"Цена: {coin} {price} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
+            value=f"Цена: {coin} {format_price(price)} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",,
             inline=False
         )
 
@@ -4200,7 +4287,7 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     )
     for gid, name, desc, price, emoji, currency in chunk:
         status = "✅ Куплено" if gid in owned else "🔒 Не куплено"
-        price_str = f"{coin} {price}" if currency == "coins" else f"{gem} {price}"
+        price_str = f"{coin} {format_price(price)}" if currency == "coins" else f"{gem} {format_price(price)}"
         embed.add_field(
             name=f"{emoji} {name} (`{gid}`)",
             value=f"{desc}\nЦена: {price_str}\n{status}",
@@ -4343,7 +4430,7 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
             bonus_line = f"\n+{int(bval*100)}% {BTYPE_NAMES.get(btype, btype)}"
 
     embed.add_field(
-        name="🏅 Титул",
+        name=f"{BOT_BTN_EMOJIS.get('_title', '🏅')} Титул",
         value=f"{title}{bonus_line}\nОткрыто: **{len(unlocked_titles)}/{len(TITLES)}**",
         inline=True
     )
@@ -6066,7 +6153,7 @@ async def open_titles_view(interaction: discord.Interaction, author_id: int, pag
             options.append(discord.SelectOption(label=f"{mark} {name}"[:100], value=tid, description=desc_full))
 
     embed = discord.Embed(
-        title="🏅 Титулы",
+        title=f"{BOT_BTN_EMOJIS.get('_title', '🏅')} Титулы",
         description=f"Текущий: **{current}**\nСтраница {page+1}/{total_pages}",
         color=0xf1c40f
     )
@@ -6720,7 +6807,7 @@ class ProfileView(BaseView):
         embed = discord.Embed(title="🔄 Сортировка генераторов", description="Выбери, как упорядочить генераторы в замке:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=SortMenuView(self.author_id))
 
-    @discord.ui.button(label="Детали", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Детали", emoji=BOT_BTN_EMOJIS.get("_generatorparts", "📋"), style=discord.ButtonStyle.secondary, row=2)
     async def details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_generator_details_embed(interaction)
@@ -11588,10 +11675,25 @@ class StarEmojiModal2(discord.ui.Modal, title="Эмодзи по звёздам 
 
 @bot.tree.command(name="меню", description="Открыть главное меню замка")
 async def main_menu(interaction: discord.Interaction):
+    guild_id = interaction.guild_id
+    user_id = interaction.user.id
+    
+    # 1. Проверяем, нужно ли показать уведомление о доходе
+    notification = await get_menu_welcome_notification(user_id, guild_id)
+    
+    # 2. Автоматически собираем доход (чтобы он попал в кошелёк)
+    await collect_income(user_id, guild_id)
+    
     embed = await build_main_embed(interaction)
-    embed = await fix_embed_emojis(embed) 
     view = MainMenuView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    if notification:
+        # Если есть уведомление, отправляем его скрыто, а меню следом
+        await interaction.response.send_message(notification, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    else:
+        # Если нет, просто открываем меню
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @bot.tree.command(name="админ_панель", description="Панель администратора")
