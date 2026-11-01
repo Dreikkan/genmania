@@ -2623,7 +2623,6 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         ),
         inline=True
     )
-    )
 
     # Замок
     embed.add_field(
