@@ -15,7 +15,6 @@ from pathlib import Path
 import asyncio
 from contextlib import asynccontextmanager
 
-from duel_ui import ensure_duel_schema, open_duel_setup
 
 # ============================================================
 #  📦 КОНСТАНТЫ
@@ -1173,7 +1172,6 @@ class CastleBot(commands.Bot):
                 winner_id INTEGER, loser_id INTEGER, bet INTEGER, type TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        await ensure_duel_schema(self.db)
 
         # --- КЛАНЫ ---
         await self.db.execute("""
