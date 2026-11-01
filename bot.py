@@ -2049,7 +2049,7 @@ class CastleBot(commands.Bot):
                 print(f"[NOTIFICATION_TASK] Ошибка: {e}")
                 await asyncio.sleep(600)
 
-        async def load_application_emojis(self):
+    async def load_application_emojis(self):
         """Загружает application emojis и подменяет BOT_BTN_EMOJIS на реальные объекты."""
         try:
             app_emojis = await self.fetch_application_emojis()
@@ -6113,6 +6113,10 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
 
         embed = discord.Embed(title="Результат дуэли", description=msg, color=0x2ecc71 if winner == self.author_id else 0xe74c3c)
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def open_duel_setup(interaction: discord.Interaction, author_id: int):
+    """Открывает модальное окно для вызова на дуэль."""
+    await interaction.response.send_modal(DuelModal(author_id))
 
 
 class BackOnlyView(BaseView):
