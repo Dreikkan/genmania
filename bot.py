@@ -8445,7 +8445,6 @@ class ShopView(BaseView):
         
         prev = discord.ui.Button(
             label="◀️ Стр.", 
-            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
             style=discord.ButtonStyle.secondary, 
             row=1
         )
@@ -8454,13 +8453,13 @@ class ShopView(BaseView):
         
         nxt = discord.ui.Button(
             label="Стр. ▶️", 
-            emoji=BOT_BTN_EMOJIS.get("_forward", "▶️"), 
             style=discord.ButtonStyle.secondary, 
             row=1
         )
         nxt.callback = self.next_page
         self.add_item(nxt)
 
+    # ВОТ ЗДЕСЬ ВАЖНО ДОБАВИТЬ button: discord.ui.Button
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
@@ -8488,25 +8487,6 @@ class ShopView(BaseView):
         embed, total = await build_shop_page(interaction, self.page + 1)
         self.page = min(total - 1, self.page + 1)
         await interaction.edit_original_response(embed=embed, view=self)
-
-
-async def open_shop_buy_select(interaction: discord.Interaction, author_id: int, rows: list, page: int):
-    guild_id = interaction.guild_id
-    custom = (await get_settings(guild_id))["custom_emojis"]
-    total = len(rows)
-    total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
-
-    options = []
-    for item_id, name, price, default_emoji in chunk:
-        emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji(emoji_str) or "⚙️"
-        options.append(discord.SelectOption(label=f"{name} — 🪙 {format_price(price)}", value=item_id, emoji=emoji_obj))
-        
-    embed = discord.Embed(title="🛒 Выбери предмет", description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из списка:", color=0xf1c40f)
-    await interaction.edit_original_response(embed=embed, view=ShopBuySelectView(author_id, options, page, total_pages))
-
 
 class ShopBuySelectView(discord.ui.View):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
