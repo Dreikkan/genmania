@@ -1243,15 +1243,34 @@ class CastleBot(commands.Bot):
                                 "VALUES (?, ?, ?, 'profile', ?)",
                                 (bidder, free[0], item_id, stars)
                             )
+                        else:
+                            # у победителя профиль полон — в хранилище
+                            async with self.db.execute(
+                                "SELECT slot FROM inventory WHERE user_id = ? AND location = 'storage'",
+                                (bidder,)
+                            ) as c:
+                                used_storage = {r[0] for r in await c.fetchall()}
+                            free_storage = [s for s in range(36) if s not in used_storage]
+                            if free_storage:
+                                await self.db.execute(
+                                    "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                                    "VALUES (?, ?, ?, 'storage', ?)",
+                                    (bidder, free_storage[0], item_id, stars)
+                                )
+                            else:
+                                await self.db.execute(
+                                    "INSERT INTO admin_log (admin_id, target_id, action, details) "
+                                    "VALUES (0, ?, 'auction_lost', ?)",
+                                    (bidder, f"item={item_id}, stars={stars}, lot={aid}")
+                                )
                         # Продавцу — деньги с комиссией 5%
                         fee = int(current_bid * 0.05)
                         await self.db.execute(
                             "UPDATE players SET coins = coins + ? WHERE user_id = ?",
                             (current_bid - fee, seller_id)
                         )
-                                       else:
+                    else:
                         # Никто не купил — возвращаем предмет
-                        # сначала в профиль, если нет места — в хранилище
                         async with self.db.execute(
                             "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'",
                             (seller_id,)
@@ -1286,6 +1305,9 @@ class CastleBot(commands.Bot):
                                     "VALUES (0, ?, 'auction_lost', ?)",
                                     (seller_id, f"item={item_id}, stars={stars}, lot={aid}")
                                 )
+                    await self.db.execute(
+                        "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
+                    )
                     await self.db.execute(
                         "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
                     )
