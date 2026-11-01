@@ -437,7 +437,7 @@ class CastleBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.db = None
 
-    async def setup_hook(self):
+        async def setup_hook(self):
         # 1. Создаём папку data (если её нет)
         DATA_DIR = Path("/app/data")
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -454,28 +454,34 @@ class CastleBot(commands.Bot):
         await self.init_db()
         await self.tree.sync()
 
-        settings = await get_settings(GUILD_ID) # или взять из bot.guilds
-        custom = settings.get("custom_emojis", {})
-        
-        for k, v in custom.items():
-            if v.startswith("<"):
-                m = re.search(r":(\d+)>$", v)
-                if m:
-                    BOT_BTN_EMOJIS[k] = discord.PartialEmoji(name="custom", id=int(m.group(1)))
-                else:
-                    BOT_BTN_EMOJIS[k] = v
-            else:
-                BOT_BTN_EMOJIS[k] = v
+        # 5. Загружаем эмодзи для кнопок (через fetch_guilds, т.к. self.guilds пуст)
+        try:
+            guilds = [g async for g in self.fetch_guilds(limit=1)]
+            if guilds:
+                guild_id = guilds[0].id
+                settings = await get_settings(guild_id)
+                custom = settings.get("custom_emojis", {})
+                
+                for k, v in custom.items():
+                    if isinstance(v, str) and v.startswith("<"):
+                        m = re.search(r":(\d+)>$", v)
+                        if m:
+                            BOT_BTN_EMOJIS[k] = discord.PartialEmoji(name="custom", id=int(m.group(1)))
+                        else:
+                            BOT_BTN_EMOJIS[k] = v
+                    else:
+                        BOT_BTN_EMOJIS[k] = v
+                print(f"[EMOJI] Загружено {len(BOT_BTN_EMOJIS)} кастомных эмодзи для кнопок.")
+        except Exception as e:
+            print(f"[EMOJI] Ошибка загрузки эмодзи: {e}")
 
-        # 5. Запускаем фоновые задачи (asyncio, а не self.loop)
+        # 6. Запускаем фоновые задачи
         asyncio.create_task(self.auction_closer())
         asyncio.create_task(self.market_updater())
         asyncio.create_task(self.tax_collector())
         asyncio.create_task(self.autocollector_task())
         asyncio.create_task(self.notification_task())
         asyncio.create_task(self.war_closer())
-
-        await apply_custom_emojis_to_db()
 
     async def war_closer(self):
         await self.wait_until_ready()
