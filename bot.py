@@ -3488,9 +3488,6 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
     )
     if cos_bg:
         embed.set_image(url=cos_bg)
-    )
-    if cos_bg:
-        embed.set_image(url=cos_bg)
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
 
     async with bot.db.execute("SELECT title FROM players WHERE user_id = ?", (user_id,)) as c:
