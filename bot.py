@@ -5193,7 +5193,7 @@ class NotificationsView(BaseView):
         )
 
 class SocialView(BaseView):
-    @discord.ui.button(label="Рейд", emoji=BOT_BTN_EMOJIS.get("_raid", "🏰"), style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Рейд", emoji=get_emoji("_raid"), style=discord.ButtonStyle.primary, row=0)
     async def btn_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Подготовка к рейду", description="Выбери режим:", color=0xe74c3c)
@@ -5213,11 +5213,11 @@ class SocialView(BaseView):
 
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Дуэль", emoji=BOT_BTN_EMOJIS.get("_duel", "🤺"), style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Дуэль", emoji=get_emoji("_duel"), style=discord.ButtonStyle.success, row=0)
     async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await open_duel_setup(interaction, self.author_id)
 
-    @discord.ui.button(label="Клан", emoji=BOT_BTN_EMOJIS.get("_clan", "🏰"), style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Клан", emoji=get_emoji("_clan"), style=discord.ButtonStyle.success, row=0)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         clan = await get_clan(self.author_id)
@@ -5233,13 +5233,13 @@ class SocialView(BaseView):
             view = NoClanView(self.author_id)
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Топы", emoji=BOT_BTN_EMOJIS.get("_leaderboards", "📊"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Топы", emoji=get_emoji("_leaderboards"), style=discord.ButtonStyle.primary, row=1)
     async def btn_tops(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_top_embed(interaction, "coins", 10)
         await interaction.edit_original_response(embed=embed, view=TopView(self.author_id, "coins", 10))
 
-    @discord.ui.button(label="Аукцион", emoji=BOT_BTN_EMOJIS.get("_market", "🏛️"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
     async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         async with bot.db.execute(
@@ -5263,12 +5263,12 @@ class SocialView(BaseView):
         b = discord.ui.Button(label="Ставка", emoji="💸", style=discord.ButtonStyle.primary)
         b.callback = lambda i: i.response.send_modal(AuctionBidModal(self.author_id))
         view.add_item(b)
-        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         back.callback = lambda i: self._back_to_social(i)
         view.add_item(back)
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Биржа", emoji=BOT_BTN_EMOJIS.get("_stats", "📈"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Биржа", emoji=get_emoji("_stats"), style=discord.ButtonStyle.primary, row=1)
     async def btn_market(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         async with bot.db.execute(
@@ -5283,13 +5283,13 @@ class SocialView(BaseView):
                 value=f"Текущая: 🪙 {current} (база {base})\nСпрос: {demand} | Предл.: {supply}",
                 inline=False
             )
-        b = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         b.callback = lambda i: self._back_to_social(i)
         view = discord.ui.View()
         view.add_item(b)
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Банк", emoji=BOT_BTN_EMOJIS.get("_bank", "🏦"), style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Банк", emoji=get_emoji("_bank"), style=discord.ButtonStyle.primary, row=2)
     async def btn_bank(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         deposit = await get_deposit(self.author_id)
@@ -5311,7 +5311,7 @@ class SocialView(BaseView):
             d = discord.ui.Button(label="Открыть вклад", emoji="📥", style=discord.ButtonStyle.success)
             d.callback = lambda i: i.response.send_modal(BankDepositModal(self.author_id))
             view.add_item(d)
-        b = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         b.callback = lambda i: self._back_to_social(i)
         view.add_item(b)
         await interaction.edit_original_response(embed=embed, view=view)
@@ -5330,7 +5330,7 @@ class SocialView(BaseView):
                 embed.add_field(name=f"`{ttype}`", value=f"🪙 {amt} | {ts}", inline=False)
         else:
             embed.description = "Налогов пока не было."
-        b = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         b.callback = lambda i: self._back_to_social(i)
         view = discord.ui.View()
         view.add_item(b)
@@ -5341,7 +5341,7 @@ class SocialView(BaseView):
         embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
