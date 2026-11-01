@@ -4812,7 +4812,7 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
         """, (target, now.isoformat(), now.isoformat()))
         await bot.db.commit()
 
-                if success:
+        if success:
             # Забираем 15% баланса
             async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (target,)) as c:
                 victim_coins = (await c.fetchone())[0]
