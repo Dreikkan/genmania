@@ -1662,6 +1662,17 @@ class CastleBot(commands.Bot):
             )
         """)
 
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                target_id INTEGER,
+                action TEXT,
+                details TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 
     async def auction_closer(self):
