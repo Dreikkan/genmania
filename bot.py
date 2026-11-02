@@ -96,6 +96,19 @@ DUEL_CHALLENGE_TIMEOUT = 120          # сколько ждём согласия
 DUEL_CHALLENGE_DELETE_SECONDS = 30    # автоудаление после результата
 DUEL_CHALLENGE_DECLINE_SECONDS = 15   # автоудаление после отказа/таймаута
 
+# --- КОЛЛЕКЦИЯ ---
+COLLECTION_BONUS_PER_ITEM = 0.005     # +0.5% к доходу за каждый открытый генератор
+
+# --- КЛАНОВЫЕ ВОЙНЫ ---
+CLAN_WAR_REWARD = 1000                # монеты в сундук победителя
+CLAN_WAR_ATTACK_COOLDOWN_HOURS = 1    # кулдаун атаки
+CLAN_WAR_DURATION_HOURS = 24          # длительность войны
+CLAN_WAR_DAMAGE_RATE = 0.15           # 15% мощи в урон
+CLAN_WAR_DECLARE_COST = 500           # стоимость объявления войны из сундука
+
+# --- БИРЖА ---
+MARKET_SELL_RATE = 0.70               # продажа на бирже — 70% текущей цены
+
 CRAFT_SETTINGS = {
     "basic_gen":      {"chance": 1.00, "gems": 0},
     "copper_gen":     {"chance": 1.00, "gems": 0},
@@ -756,12 +769,13 @@ class CastleBot(commands.Bot):
                 await asyncio.sleep(1800)  # раз в 30 минут
                 now = datetime.datetime.now()
                 async with self.db.execute("""
-                    SELECT id, clan1_id, clan2_id, start_time
+                    SELECT id, clan1_id, clan2_id, start_time,
+                           clan1_hp, clan2_hp, clan1_damage, clan2_damage
                     FROM clan_wars WHERE status = 'active'
                 """) as c:
                     wars = await c.fetchall()
 
-                for war_id, c1, c2, start_time in wars:
+                for war_id, c1, c2, start_time, c1_hp, c2_hp, c1_dmg, c2_dmg in wars:
                     # проверяем, что оба клана ещё существуют
                     async with self.db.execute(
                         "SELECT 1 FROM clans WHERE id IN (?, ?)", (c1, c2)
@@ -776,18 +790,37 @@ class CastleBot(commands.Bot):
                         continue
 
                     start = datetime.datetime.fromisoformat(start_time)
-                    if (now - start).total_seconds() < 86400:
+                    if (now - start).total_seconds() < CLAN_WAR_DURATION_HOURS * 3600:
                         continue
 
-                    p1 = await get_clan_power(c1)
-                    p2 = await get_clan_power(c2)
-                    winner = c1 if p1 > p2 else (c2 if p2 > p1 else None)
+                    c1_hp = c1_hp or 0
+                    c2_hp = c2_hp or 0
+                    c1_dmg = c1_dmg or 0
+                    c2_dmg = c2_dmg or 0
+
+                    if c1_hp or c2_hp:
+                        winner = (
+                            c1 if c1_hp > c2_hp
+                            else c2 if c2_hp > c1_hp
+                            else c1 if c1_dmg > c2_dmg
+                            else c2 if c2_dmg > c1_dmg
+                            else None
+                        )
+                    else:
+                        # совместимость со старыми войнами без HP
+                        p1 = await get_clan_power(c1)
+                        p2 = await get_clan_power(c2)
+                        winner = c1 if p1 > p2 else (c2 if p2 > p1 else None)
 
                     await self.db.execute(
                         "UPDATE clan_wars SET status = 'finished', winner_id = ?, end_time = ? WHERE id = ?",
                         (winner, now.isoformat(), war_id)
                     )
                     if winner:
+                        await self.db.execute(
+                            "UPDATE clans SET treasury = treasury + ? WHERE id = ?",
+                            (CLAN_WAR_REWARD, winner),
+                        )
                         await log_clan(winner, "war_win", f"Победа над кланом {c2 if winner == c1 else c1}")
                         await update_clan_quest(winner, "war", 1)
                         await add_clan_xp(winner, 200)
@@ -899,6 +932,19 @@ class CastleBot(commands.Bot):
                 unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (user_id, achievement_id)
             )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS player_collection (
+                user_id INTEGER,
+                item_id TEXT,
+                first_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, item_id)
+            )
+        """)
+        # Задним числом заполняем коллекцию по текущему инвентарю.
+        await self.db.execute("""
+            INSERT OR IGNORE INTO player_collection (user_id, item_id)
+            SELECT DISTINCT user_id, item_id FROM inventory
         """)
 
         await self.db.execute("""
@@ -1530,7 +1576,35 @@ class CastleBot(commands.Bot):
                 winner_id INTEGER,
                 start_time TIMESTAMP,
                 end_time TIMESTAMP,
-                status TEXT DEFAULT 'active'
+                status TEXT DEFAULT 'active',
+                clan1_hp INTEGER DEFAULT 0,
+                clan2_hp INTEGER DEFAULT 0,
+                clan1_max_hp INTEGER DEFAULT 0,
+                clan2_max_hp INTEGER DEFAULT 0,
+                clan1_damage INTEGER DEFAULT 0,
+                clan2_damage INTEGER DEFAULT 0
+            )
+        """)
+        for column, definition in [
+            ("clan1_hp", "INTEGER DEFAULT 0"),
+            ("clan2_hp", "INTEGER DEFAULT 0"),
+            ("clan1_max_hp", "INTEGER DEFAULT 0"),
+            ("clan2_max_hp", "INTEGER DEFAULT 0"),
+            ("clan1_damage", "INTEGER DEFAULT 0"),
+            ("clan2_damage", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await self.db.execute(f"ALTER TABLE clan_wars ADD COLUMN {column} {definition}")
+            except Exception:
+                pass
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS clan_war_attacks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                war_id INTEGER,
+                attacker_id INTEGER,
+                attacker_clan_id INTEGER,
+                damage INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await self.db.execute("""
@@ -1782,6 +1856,7 @@ class CastleBot(commands.Bot):
             "CREATE INDEX IF NOT EXISTS idx_clan_members_clan ON clan_members(clan_id)",
             "CREATE INDEX IF NOT EXISTS idx_clan_quests_clan ON clan_quests(clan_id, week_start)",
             "CREATE INDEX IF NOT EXISTS idx_clan_wars_status ON clan_wars(status)",
+            "CREATE INDEX IF NOT EXISTS idx_clan_war_attacks_war ON clan_war_attacks(war_id, attacker_id)",
             "CREATE INDEX IF NOT EXISTS idx_raid_loot_user_date ON raid_loot_log(user_id, date)",
             "CREATE INDEX IF NOT EXISTS idx_tax_log_user ON tax_log(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_player_quests_user ON player_quests(user_id)",
@@ -2550,6 +2625,161 @@ async def add_clan_xp(clan_id: int, amount: int) -> tuple[int, int, float]:
     return await get_clan_level_info(clan_id)
 
 
+async def get_active_clan_war(clan_id: int):
+    async with bot.db.execute("""
+        SELECT id, clan1_id, clan2_id, start_time,
+               clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
+               clan1_damage, clan2_damage
+        FROM clan_wars
+        WHERE status = 'active' AND (clan1_id = ? OR clan2_id = ?)
+        ORDER BY id DESC
+        LIMIT 1
+    """, (clan_id, clan_id)) as c:
+        return await c.fetchone()
+
+
+async def start_clan_war(clan_id: int, enemy_id: int) -> int:
+    if clan_id == enemy_id:
+        raise ValueError("Нельзя объявить войну самому себе.")
+    if await get_active_clan_war(clan_id):
+        raise ValueError("У твоего клана уже есть активная война.")
+    if await get_active_clan_war(enemy_id):
+        raise ValueError("У этого клана уже есть активная война.")
+
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT treasury FROM clans WHERE id = ?", (clan_id,)
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            raise ValueError("Клан не найден.")
+        if (row[0] or 0) < CLAN_WAR_DECLARE_COST:
+            raise ValueError(
+                f"Нужно 🪙 {CLAN_WAR_DECLARE_COST} в сундуке для объявления войны."
+            )
+        async with bot.db.execute(
+            "SELECT 1 FROM clans WHERE id = ?", (enemy_id,)
+        ) as c:
+            if not await c.fetchone():
+                raise ValueError("Клан-противник не найден.")
+
+        p1 = await get_clan_power(clan_id)
+        p2 = await get_clan_power(enemy_id)
+        hp1 = max(100, int(p1 * 0.5))
+        hp2 = max(100, int(p2 * 0.5))
+
+        await bot.db.execute(
+            "UPDATE clans SET treasury = treasury - ? WHERE id = ?",
+            (CLAN_WAR_DECLARE_COST, clan_id),
+        )
+        cursor = await bot.db.execute("""
+            INSERT INTO clan_wars
+            (clan1_id, clan2_id, start_time, status,
+             clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
+             clan1_damage, clan2_damage)
+            VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 0, 0)
+        """, (
+            clan_id, enemy_id, datetime.datetime.now().isoformat(),
+            hp1, hp2, hp1, hp2,
+        ))
+        war_id = cursor.lastrowid
+
+    await log_clan(clan_id, "war_declared", f"Против клана {enemy_id}")
+    await log_clan(enemy_id, "war_declared", f"Война с кланом {clan_id}")
+    return war_id
+
+
+async def attack_clan_war(war_id: int, user_id: int) -> tuple[bool, str, bool]:
+    clan = await get_clan(user_id)
+    if not clan:
+        return False, "❌ Ты не в клане.", False
+    clan_id = clan[0]
+
+    async with bot.db.execute("""
+        SELECT id, clan1_id, clan2_id, status,
+               clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
+               clan1_damage, clan2_damage
+        FROM clan_wars WHERE id = ?
+    """, (war_id,)) as c:
+        war = await c.fetchone()
+    if not war:
+        return False, "❌ Война не найдена.", False
+    (_, c1, c2, status, c1_hp, c2_hp, c1_max, c2_max, c1_dmg, c2_dmg) = war
+    c1_hp = c1_hp or 0
+    c2_hp = c2_hp or 0
+    c1_dmg = c1_dmg or 0
+    c2_dmg = c2_dmg or 0
+    if status != "active":
+        return False, "❌ Война уже завершена.", False
+    if clan_id not in (c1, c2):
+        return False, "❌ Твой клан не участвует в этой войне.", False
+
+    async with bot.db.execute("""
+        SELECT timestamp FROM clan_war_attacks
+        WHERE war_id = ? AND attacker_id = ?
+        ORDER BY id DESC LIMIT 1
+    """, (war_id, user_id)) as c:
+        last_attack = await c.fetchone()
+    now = datetime.datetime.now()
+    if last_attack and last_attack[0]:
+        last = datetime.datetime.fromisoformat(last_attack[0])
+        left = CLAN_WAR_ATTACK_COOLDOWN_HOURS * 3600 - (now - last).total_seconds()
+        if left > 0:
+            return False, f"⏳ Атака будет доступна через {int(left // 60)} мин.", False
+
+    power = await get_combat_power(user_id)
+    if power <= 0:
+        return False, "❌ У тебя нет генераторов в замке.", False
+
+    level, _, _ = await get_clan_level_info(clan_id)
+    level_mult = 1 + max(0, level - 1) * 0.01
+    damage = max(1, int(power * CLAN_WAR_DAMAGE_RATE * random.uniform(0.8, 1.2) * level_mult))
+
+    if clan_id == c1:
+        enemy_hp = c2_hp
+        new_enemy_hp = max(0, enemy_hp - damage)
+        own_damage = c1_dmg + damage
+        await bot.db.execute(
+            "UPDATE clan_wars SET clan2_hp = ?, clan1_damage = ? WHERE id = ?",
+            (new_enemy_hp, own_damage, war_id),
+        )
+    else:
+        enemy_hp = c1_hp
+        new_enemy_hp = max(0, enemy_hp - damage)
+        own_damage = c2_dmg + damage
+        await bot.db.execute(
+            "UPDATE clan_wars SET clan1_hp = ?, clan2_damage = ? WHERE id = ?",
+            (new_enemy_hp, own_damage, war_id),
+        )
+
+    await bot.db.execute(
+        "INSERT INTO clan_war_attacks (war_id, attacker_id, attacker_clan_id, damage, timestamp) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (war_id, user_id, clan_id, damage, now.isoformat()),
+    )
+
+    finished = new_enemy_hp <= 0
+    if finished:
+        await bot.db.execute(
+            "UPDATE clan_wars SET status = 'finished', winner_id = ?, end_time = ? WHERE id = ?",
+            (clan_id, now.isoformat(), war_id),
+        )
+    await bot.db.commit()
+
+    if finished:
+        await bot.db.execute(
+            "UPDATE clans SET treasury = treasury + ? WHERE id = ?",
+            (CLAN_WAR_REWARD, clan_id),
+        )
+        await bot.db.commit()
+        await log_clan(clan_id, "war_win", f"Война #{war_id}, урон {damage}")
+        await add_clan_xp(clan_id, 200)
+        await update_clan_quest(clan_id, "war", 1)
+        return True, f"🏆 Победа! Урон {damage}. Клан получает 🪙 {CLAN_WAR_REWARD} в сундук.", True
+
+    return True, f"⚔️ Удар на **{damage}** урона. У врага осталось **{new_enemy_hp}** HP.", False
+
+
 def has_clan_permission(role: str, action: str) -> bool:
     perms = {
         "leader": ["invite", "kick", "promote", "buy", "war", "treasury", "disband"],
@@ -2597,11 +2827,16 @@ async def get_per_second_income(user_id: int) -> tuple[float, float]:
     title_coins = await get_title_bonus(user_id, "income_coins")
     title_gems = await get_title_bonus(user_id, "income_gems")
 
-    # бонус престижа
+    # бонус престижа и коллекции
     prestige_bonus = await get_prestige_bonus(user_id)
+    collection_bonus = await get_collection_bonus(user_id)
 
-    multiplier_coins = multiplier * (1 + pet_coins + title_coins + prestige_bonus)
-    multiplier_gems = multiplier * (1 + pet_gems + title_gems + prestige_bonus)
+    multiplier_coins = multiplier * (
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
+    )
+    multiplier_gems = multiplier * (
+        1 + pet_gems + title_gems + prestige_bonus + collection_bonus
+    )
 
     async with bot.db.execute("""
         SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
@@ -2788,6 +3023,10 @@ async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = 
             "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', ?)",
             (user_id, free_storage[i], item_id, stars)
         )
+    await bot.db.execute(
+        "INSERT OR IGNORE INTO player_collection (user_id, item_id) VALUES (?, ?)",
+        (user_id, item_id),
+    )
     if commit:
         await bot.db.commit()
     return to_profile, to_storage
@@ -3039,7 +3278,7 @@ async def get_unlocked_titles(user_id: int) -> set:
             (SELECT grid_size FROM players WHERE user_id = ?) AS grid_size
     """, (user_id,)*7) as c:
         row = await c.fetchone()
-    gens, five_star, distinct_gens, crafts, coins, gems, grid_size = row or (0,)*7
+    gens, five_star, _distinct_gens, crafts, coins, gems, grid_size = row or (0,)*7
 
     # --- Рейды (отдельный счётчик побед) ---
     async with bot.db.execute(
@@ -3105,6 +3344,7 @@ async def get_unlocked_titles(user_id: int) -> set:
         ach_count = (await c.fetchone())[0] or 0
 
     prestige_points = await get_prestige_points(user_id)
+    collection_count = await get_collection_count(user_id)
 
     # --- Формируем set ---
     unlocked = {"novice"}
@@ -3114,7 +3354,7 @@ async def get_unlocked_titles(user_id: int) -> set:
     if coins >= 10000: unlocked.add("rich")
     if raid_wins >= 5: unlocked.add("raider")
     if duel_wins >= 10: unlocked.add("duelist")
-    if distinct_gens >= 20: unlocked.add("collector")
+    if collection_count >= 20: unlocked.add("collector")
 
     if pet_count >= 3: unlocked.add("pet_lover")
     if pet_max_level >= 10: unlocked.add("pet_master")
@@ -3595,6 +3835,7 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         ach_count = (await c.fetchone())[0] or 0
 
     prestige_points = await get_prestige_points(user_id)
+    collection_count = await get_collection_count(user_id)
 
     # --- Строим embed ---
     embed = discord.Embed(
@@ -3695,6 +3936,7 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         value=(
             f"Достижений: **{ach_count}**\n"
             f"Престиж: **{prestige_points}** очк.\n"
+            f"Коллекция: **{collection_count}**\n"
             f"Гемов: **{gems}**\n"
             f"Монет: **{coins}**"
         ),
@@ -3896,12 +4138,13 @@ async def get_total_bonus_line(user_id: int) -> str:
     title_coins = await get_title_bonus(user_id, "income_coins")
     title_gems = await get_title_bonus(user_id, "income_gems")
     prestige_bonus = await get_prestige_bonus(user_id)
+    collection_bonus = await get_collection_bonus(user_id)
 
     mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (
-        1 + pet_coins + title_coins + prestige_bonus
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
     )
     mult_gems = (1 + status_bonus) * (1 + clan_bonus) * (
-        1 + pet_gems + title_gems + prestige_bonus
+        1 + pet_gems + title_gems + prestige_bonus + collection_bonus
     )
     coin_pct = int((mult_coins - 1) * 100)
     gem_pct = int((mult_gems - 1) * 100)
@@ -3917,6 +4160,8 @@ async def get_total_bonus_line(user_id: int) -> str:
         parts.append(f"титул +{int(title_coins*100)}%/+{int(title_gems*100)}%")
     if prestige_bonus > 0:
         parts.append(f"престиж +{int(prestige_bonus*100)}%")
+    if collection_bonus > 0:
+        parts.append(f"коллекция +{int(collection_bonus*100)}%")
 
     suffix = f" ({', '.join(parts)})" if parts else " (нет бонусов)"
     return f"**Монеты: +{coin_pct}%** | **Гемы: +{gem_pct}%**{suffix}"
@@ -3940,9 +4185,10 @@ async def get_total_bonus_percent(user_id: int) -> int:
     pet_coins = await get_pet_bonus(user_id, "income_coins")
     title_coins = await get_title_bonus(user_id, "income_coins")
     prestige_bonus = await get_prestige_bonus(user_id)
+    collection_bonus = await get_collection_bonus(user_id)
 
     mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (
-        1 + pet_coins + title_coins + prestige_bonus
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
     )
     return int((mult_coins - 1) * 100)
 
@@ -3962,6 +4208,20 @@ async def get_prestige_points(user_id: int) -> int:
 async def get_prestige_bonus(user_id: int) -> float:
     points = await get_prestige_points(user_id)
     return points * PRESTIGE_BONUS_PER_POINT
+
+
+async def get_collection_count(user_id: int) -> int:
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM player_collection pc "
+        "JOIN items i ON i.id = pc.item_id "
+        "WHERE pc.user_id = ? AND i.id LIKE '%\\_gen' ESCAPE '\\'",
+        (user_id,),
+    ) as c:
+        return (await c.fetchone())[0] or 0
+
+
+async def get_collection_bonus(user_id: int) -> float:
+    return (await get_collection_count(user_id)) * COLLECTION_BONUS_PER_ITEM
 
 
 async def calculate_prestige_gain(user_id: int) -> int:
@@ -4321,6 +4581,13 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Остаётся:** гемы, питомцы, титулы, достижения, клан, косметика, сюжетные квесты, статистика.\n\n"
             "**Где:** главное меню → «Перерождение»."
         ),
+        "collection": (
+            "📖 Коллекция",
+            "**Что это:** все генераторы, которые ты когда-либо получал.\n\n"
+            "**Бонус:** +0.5% к доходу за каждый открытый генератор.\n\n"
+            "**Как открыть:** купить, скрафтить, получить в дейли, адвенте или на аукционе.\n\n"
+            "**Где:** «Мой профиль» → «Коллекция»."
+        ),
         "generators": (
             "🏗️ Генераторы",
             "**Покупка:** «Магазин» → «Генераторы».\n\n"
@@ -4359,7 +4626,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Сундук:** общий банк клана.\n\n"
             "**Сетка:** 6×6, генераторы работают на клан.\n\n"
             "**Квесты:** недельные (синтезы, покупки, рейды, войны).\n\n"
-            "**Войны:** 24 ч, победитель по мощи клана. Закрываются автоматически.\n\n"
+            "**Войны:** 24 ч, у кланов есть HP. Участники атакуют раз в 1 ч; урон зависит от мощи. Победитель получает сундук и XP.\n\n"
             "**Где:** «Социум» → «Клан»."
         ),
         "pvp": (
@@ -4383,9 +4650,9 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "• Комиссия 5% с продавца.\n"
             "• При закрытии предмет передаётся победителю (или возвращается, если ставок нет).\n\n"
             "**Биржа:**\n"
+            "• Покупка — по текущей цене, продажа — 70% от неё.\n"
             "• Цены зависят от спроса/предложения.\n"
-            "• Обновление раз в 6 ч.\n"
-            "• ⚠️ Покупка/продажа на бирже пока не реализована (только просмотр).\n\n"
+            "• Обновление раз в 6 ч.\n\n"
             "**Где:** «Социум» → «Аукцион» / «Биржа»."
         ),
         "quests": (
@@ -4747,6 +5014,232 @@ async def build_clan_inventory_embed(clan) -> discord.Embed:
     return embed
 
 
+async def build_clan_war_embed(interaction: discord.Interaction, war, clan_id: int) -> discord.Embed:
+    (war_id, c1, c2, start_time, c1_hp, c2_hp,
+     c1_max, c2_max, c1_dmg, c2_dmg) = war
+
+    async with bot.db.execute(
+        "SELECT id, name FROM clans WHERE id IN (?, ?)", (c1, c2)
+    ) as c:
+        names = {r[0]: r[1] for r in await c.fetchall()}
+
+    own_id = clan_id
+    enemy_id = c2 if clan_id == c1 else c1
+    own_name = names.get(own_id, f"Клан {own_id}")
+    enemy_name = names.get(enemy_id, f"Клан {enemy_id}")
+
+    if clan_id == c1:
+        own_hp, own_max = c1_hp or 0, c1_max or 1
+        enemy_hp, enemy_max = c2_hp or 0, c2_max or 1
+        own_dmg, enemy_dmg = c1_dmg or 0, c2_dmg or 0
+    else:
+        own_hp, own_max = c2_hp or 0, c2_max or 1
+        enemy_hp, enemy_max = c1_hp or 0, c1_max or 1
+        own_dmg, enemy_dmg = c2_dmg or 0, c1_dmg or 0
+
+    def hp_bar(current: int, maximum: int) -> str:
+        pct = max(0.0, min(1.0, current / max(1, maximum)))
+        filled = int(pct * 10)
+        return "🟩" * filled + "⬛" * (10 - filled)
+
+    end = datetime.datetime.fromisoformat(start_time) + datetime.timedelta(
+        hours=CLAN_WAR_DURATION_HOURS
+    )
+    left = max(0, int((end - datetime.datetime.now()).total_seconds()))
+    hours = left // 3600
+    minutes = (left % 3600) // 60
+
+    embed = discord.Embed(
+        title=f"⚔️ Клановая война #{war_id}",
+        description=(
+            f"**{own_name}** против **{enemy_name}**\n"
+            f"До конца: **{hours} ч {minutes} мин**"
+        ),
+        color=0xe74c3c,
+    )
+    embed.add_field(
+        name=f"🏰 {own_name}",
+        value=f"HP: **{own_hp}/{own_max}**\n{hp_bar(own_hp, own_max)}\nУрон: **{own_dmg}**",
+        inline=False,
+    )
+    embed.add_field(
+        name=f"🏴 {enemy_name}",
+        value=f"HP: **{enemy_hp}/{enemy_max}**\n{hp_bar(enemy_hp, enemy_max)}\nУрон: **{enemy_dmg}**",
+        inline=False,
+    )
+    embed.add_field(
+        name="Правила",
+        value=(
+            f"• Одна атака раз в **{CLAN_WAR_ATTACK_COOLDOWN_HOURS} ч**\n"
+            f"• Урон — около **{int(CLAN_WAR_DAMAGE_RATE * 100)}%** мощи\n"
+            f"• Победитель забирает 🪙 **{CLAN_WAR_REWARD}** в сундук"
+        ),
+        inline=False,
+    )
+    embed = await fix_embed_emojis(embed)
+    return embed
+
+
+async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, str]:
+    if qty <= 0:
+        return False, "❌ Количество должно быть больше нуля."
+
+    async with bot.db.execute("""
+        SELECT i.name, i.price, mp.current_price, mp.base_price
+        FROM items i
+        JOIN market_prices mp ON mp.item_id = i.id
+        WHERE i.id = ?
+    """, (item_id,)) as c:
+        row = await c.fetchone()
+    if not row:
+        return False, "❌ Предмет не найден на бирже."
+    name, item_price, current_price, base_price = row
+    price = current_price or item_price or base_price or 1
+    total = int(price) * qty
+
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                coins_row = await c.fetchone()
+            coins = (coins_row[0] if coins_row else 0) or 0
+            if coins < total:
+                raise ValueError(f"Нужно 🪙 {total}, у тебя {coins}.")
+
+            cur = await bot.db.execute(
+                "UPDATE players SET coins = coins - ? "
+                "WHERE user_id = ? AND coins >= ?",
+                (total, user_id, total),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Недостаточно монет (баланс изменился).")
+
+            await place_items(user_id, item_id, qty, commit=False)
+
+            new_price = min(
+                int(base_price * 2) if base_price else int(price * 2),
+                max(1, int(price * (1 + 0.01 * qty))),
+            )
+            await bot.db.execute(
+                "UPDATE market_prices SET demand = demand + ?, "
+                "current_price = ?, last_update = ? WHERE item_id = ?",
+                (qty, new_price, datetime.datetime.now().isoformat(), item_id),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+
+    await update_quest_progress(user_id, "buy_3", qty)
+    await update_quest_progress(user_id, "buy_10", qty)
+    await update_quest_progress(user_id, "buy_25", qty)
+    await check_achievements(user_id)
+    return True, f"✅ Куплено **{name}** ×{qty} за 🪙 {total}."
+
+
+async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, str]:
+    if qty <= 0:
+        return False, "❌ Количество должно быть больше нуля."
+
+    async with bot.db.execute("""
+        SELECT i.name, i.price, i.rarity, mp.current_price, mp.base_price
+        FROM items i
+        JOIN market_prices mp ON mp.item_id = i.id
+        WHERE i.id = ?
+    """, (item_id,)) as c:
+        row = await c.fetchone()
+    if not row:
+        return False, "❌ Предмет не найден на бирже."
+    name, item_price, rarity, current_price, base_price = row
+    if rarity not in SELL_ALLOWED_RARITIES:
+        return False, "❌ Предметы этой редкости продаются только через аукцион."
+
+    price = current_price or item_price or base_price or 1
+    proceeds = max(1, int(price * MARKET_SELL_RATE)) * qty
+
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT slot FROM inventory "
+                "WHERE user_id = ? AND location = 'storage' AND item_id = ? "
+                "ORDER BY slot ASC LIMIT ?",
+                (user_id, item_id, qty),
+            ) as c:
+                slots = [r[0] for r in await c.fetchall()]
+            if len(slots) < qty:
+                raise ValueError(
+                    f"В хранилище только {len(slots)} шт. **{name}**, нужно {qty}."
+                )
+
+            for slot in slots:
+                cur = await bot.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = 'storage' AND slot = ? AND item_id = ?",
+                    (user_id, slot, item_id),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Предмет уже продан или перемещён.")
+
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ?, "
+                "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                (proceeds, proceeds, user_id),
+            )
+
+            new_price = max(
+                int(base_price * 0.5) if base_price else 1,
+                max(1, int(price * (1 - 0.01 * qty))),
+            )
+            await bot.db.execute(
+                "UPDATE market_prices SET supply = supply + ?, "
+                "current_price = ?, last_update = ? WHERE item_id = ?",
+                (qty, new_price, datetime.datetime.now().isoformat(), item_id),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+
+    await update_quest_progress(user_id, "sell_3", qty)
+    await check_achievements(user_id)
+    return True, f"✅ Продано **{name}** ×{qty} за 🪙 {proceeds}."
+
+
+async def build_market_embed(interaction: discord.Interaction) -> discord.Embed:
+    async with bot.db.execute("""
+        SELECT mp.item_id, i.name, i.emoji, mp.base_price, mp.current_price,
+               mp.demand, mp.supply
+        FROM market_prices mp
+        JOIN items i ON i.id = mp.item_id
+        ORDER BY ABS(mp.current_price - mp.base_price) DESC
+        LIMIT 10
+    """) as c:
+        rows = await c.fetchall()
+
+    embed = discord.Embed(
+        title="📈 Биржа",
+        description=(
+            "Покупка — по текущей цене. Продажа — "
+            f"**{int(MARKET_SELL_RATE * 100)}%** от текущей цены.\n"
+            "Цены меняются от спроса и предложения."
+        ),
+        color=0x9b59b6,
+    )
+    if not rows:
+        embed.add_field(name="Пусто", value="На бирже пока нет товаров.")
+        return await fix_embed_emojis(embed)
+
+    for item_id, name, emoji, base, current, demand, supply in rows:
+        trend = "🟢" if current > base else ("🔴" if current < base else "⚪")
+        embed.add_field(
+            name=f"{trend} {emoji} {name}",
+            value=(
+                f"Цена: 🪙 **{current}** (база {base})\n"
+                f"Спрос: **{demand}** | Предложение: **{supply}**"
+            ),
+            inline=False,
+        )
+    embed.set_footer(text="Обновление цен — раз в 6 часов")
+    return await fix_embed_emojis(embed)
+
+
 async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
@@ -4824,6 +5317,49 @@ async def build_achievements_page(interaction: discord.Interaction, page: int) -
             value=f"{desc}\nНаграда: {gem} {reward} — {status}",
             inline=False
         )
+    embed = await fix_embed_emojis(embed)
+    return embed, total_pages
+
+
+async def build_collection_embed(interaction: discord.Interaction, page: int = 0) -> tuple[discord.Embed, int]:
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT id, name, emoji, rarity, price FROM items "
+        "WHERE id LIKE '%\\_gen' ESCAPE '\\' ORDER BY price ASC"
+    ) as c:
+        all_items = await c.fetchall()
+
+    async with bot.db.execute(
+        "SELECT item_id FROM player_collection WHERE user_id = ?", (user_id,)
+    ) as c:
+        unlocked = {r[0] for r in await c.fetchall()}
+
+    total = len(all_items)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = all_items[page * PAGE_SIZE:page * PAGE_SIZE + PAGE_SIZE]
+    discovered = sum(1 for item_id, *_ in all_items if item_id in unlocked)
+    bonus_pct = discovered * COLLECTION_BONUS_PER_ITEM * 100
+
+    embed = discord.Embed(
+        title="📖 Коллекция генераторов",
+        description=(
+            f"Открыто: **{discovered}/{total}**\n"
+            f"Бонус к доходу: **+{bonus_pct:.1f}%**\n"
+            f"Страница {page + 1}/{total_pages}"
+        ),
+        color=0x3498db,
+    )
+    for item_id, name, emoji, rarity, price in chunk:
+        is_open = item_id in unlocked
+        status = "✅" if is_open else "🔒"
+        display = name if is_open else "???"
+        embed.add_field(
+            name=f"{status} {emoji} {display}"[:100],
+            value=RARITY_NAMES.get(rarity, rarity),
+            inline=True,
+        )
+    embed.set_footer(text="Каждый новый генератор даёт +0.5% к доходу")
     embed = await fix_embed_emojis(embed)
     return embed, total_pages
 
@@ -5514,6 +6050,7 @@ class PrestigeConfirmModal(discord.ui.Modal, title="Подтверждение �
 GUIDE_SECTIONS = {
     "economy": ("💰 Экономика", "Монеты, гемы, доход, обмен, банк, налоги"),
     "prestige": ("🔁 Перерождение", "Сброс замка, очки престижа, постоянный бонус"),
+    "collection": ("📖 Коллекция", "Открытые генераторы и бонус к доходу"),
     "generators": ("🏗️ Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
     "pets": ("🐾 Питомцы", "5 видов, кормление, уровни, бонусы"),
     "titles": ("🏅 Титулы", "21 титул, условия, бонусы"),
@@ -5899,6 +6436,226 @@ class NotificationsView(BaseView):
             embed=embed, view=UserSettingsView(self.author_id)
         )
 
+class MarketView(BaseView):
+    @discord.ui.button(label="Купить", emoji="🛒", style=discord.ButtonStyle.success, row=0)
+    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_buy_select(interaction, self.author_id, 0)
+
+    @discord.ui.button(label="Продать", emoji="💰", style=discord.ButtonStyle.primary, row=0)
+    async def btn_sell(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_sell_select(interaction, self.author_id, 0)
+
+    @discord.ui.button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_market_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+async def open_market_buy_select(interaction: discord.Interaction, author_id: int, page: int = 0):
+    async with bot.db.execute("""
+        SELECT mp.item_id, i.name, i.emoji, mp.current_price
+        FROM market_prices mp
+        JOIN items i ON i.id = mp.item_id
+        ORDER BY i.name ASC
+    """) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return await interaction.followup.send("❌ На бирже нет товаров.", ephemeral=True)
+
+    page_size = 10
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+    options = [
+        discord.SelectOption(
+            label=f"{name} — 🪙 {current}"[:100],
+            value=item_id,
+            emoji=parse_emoji_safe(emoji),
+        )
+        for item_id, name, emoji, current in chunk
+    ]
+    embed = discord.Embed(
+        title="🛒 Биржа — покупка",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет.",
+        color=0x2ecc71,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketBuySelectView(author_id, options, page, total_pages),
+    )
+
+
+class MarketBuySelectView(discord.ui.View):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self.add_item(make_select("Выбери предмет", options, self.select, row=0))
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    async def select(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        await interaction.response.send_modal(MarketBuyModal(self.author_id, item_id))
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_buy_select(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_buy_select(interaction, self.author_id, self.page + 1)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_market_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+
+
+class MarketBuyModal(discord.ui.Modal, title="Купить на бирже"):
+    qty = discord.ui.TextInput(label="Количество", default="1", required=True)
+
+    def __init__(self, author_id: int, item_id: str):
+        super().__init__()
+        self.author_id = author_id
+        self.item_id = item_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            qty = int(self.qty.value)
+        except ValueError:
+            return await interaction.followup.send("❌ Количество — число.", ephemeral=True)
+        ok, msg = await buy_market_item(self.author_id, self.item_id, qty)
+        await interaction.followup.send(msg, ephemeral=True)
+        if ok:
+            embed = await build_market_embed(interaction)
+            await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+
+
+async def open_market_sell_select(interaction: discord.Interaction, author_id: int, page: int = 0):
+    async with bot.db.execute("""
+        SELECT inv.item_id, i.name, i.emoji, COUNT(*) AS cnt, mp.current_price
+        FROM inventory inv
+        JOIN items i ON i.id = inv.item_id
+        JOIN market_prices mp ON mp.item_id = inv.item_id
+        WHERE inv.user_id = ? AND inv.location = 'storage'
+          AND i.rarity IN ('common', 'uncommon', 'rare')
+        GROUP BY inv.item_id
+        ORDER BY i.name ASC
+    """, (author_id,)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return await interaction.followup.send(
+            "❌ В хранилище нет предметов для продажи.", ephemeral=True
+        )
+
+    page_size = 10
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+    options = [
+        discord.SelectOption(
+            label=f"{name} ×{cnt} — 🪙 {current}"[:100],
+            value=item_id,
+            emoji=parse_emoji_safe(emoji),
+        )
+        for item_id, name, emoji, cnt, current in chunk
+    ]
+    embed = discord.Embed(
+        title="💰 Биржа — продажа",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет.",
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketSellSelectView(author_id, options, page, total_pages),
+    )
+
+
+class MarketSellSelectView(discord.ui.View):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self.add_item(make_select("Выбери предмет", options, self.select, row=0))
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    async def select(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        await interaction.response.send_modal(MarketSellModal(self.author_id, item_id))
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_sell_select(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_sell_select(interaction, self.author_id, self.page + 1)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_market_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+
+
+class MarketSellModal(discord.ui.Modal, title="Продать на бирже"):
+    qty = discord.ui.TextInput(label="Количество", default="1", required=True)
+
+    def __init__(self, author_id: int, item_id: str):
+        super().__init__()
+        self.author_id = author_id
+        self.item_id = item_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            qty = int(self.qty.value)
+        except ValueError:
+            return await interaction.followup.send("❌ Количество — число.", ephemeral=True)
+        ok, msg = await sell_market_item(self.author_id, self.item_id, qty)
+        await interaction.followup.send(msg, ephemeral=True)
+        if ok:
+            embed = await build_market_embed(interaction)
+            await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+
+
 class SocialView(BaseView):
     @discord.ui.button(label="Рейд", emoji=get_emoji("_raid"), style=discord.ButtonStyle.primary, row=0)
     async def btn_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5992,23 +6749,10 @@ class SocialView(BaseView):
     @discord.ui.button(label="Биржа", emoji=get_emoji("_stats"), style=discord.ButtonStyle.primary, row=1)
     async def btn_market(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT item_id, base_price, current_price, demand, supply FROM market_prices ORDER BY ABS(current_price - base_price) DESC LIMIT 10"
-        ) as c:
-            rows = await c.fetchall()
-        embed = discord.Embed(title="📈 Биржа (самые волатильные)", color=0x9b59b6)
-        for item_id, base, current, demand, supply in rows:
-            trend = "🟢" if current > base else ("🔴" if current < base else "⚪")
-            embed.add_field(
-                name=f"{trend} {item_id}",
-                value=f"Текущая: 🪙 {current} (база {base})\nСпрос: {demand} | Предл.: {supply}",
-                inline=False
-            )
-        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
-        b.callback = lambda i: self._back_to_social(i)
-        view = discord.ui.View()
-        view.add_item(b)
-        await interaction.edit_original_response(embed=embed, view=view)
+        embed = await build_market_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=MarketView(self.author_id)
+        )
 
     @discord.ui.button(label="Банк", emoji=get_emoji("_bank"), style=discord.ButtonStyle.primary, row=2)
     async def btn_bank(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6225,19 +6969,39 @@ class ClanMenuView(BaseView):
         if not await self._check(interaction, "war"):
             return
         await interaction.response.defer()
-        clan = await get_clan(self.author_id)
-        async with bot.db.execute("SELECT id, name FROM clans WHERE id != ? ORDER BY RANDOM() LIMIT 1", (self.clan_id,)) as c:
+
+        war = await get_active_clan_war(self.clan_id)
+        if war:
+            embed = await build_clan_war_embed(interaction, war, self.clan_id)
+            await interaction.edit_original_response(
+                embed=embed,
+                view=ClanWarView(self.author_id, self.clan_id, war[0]),
+            )
+            return
+
+        async with bot.db.execute(
+            "SELECT id, name FROM clans WHERE id != ? ORDER BY RANDOM() LIMIT 1",
+            (self.clan_id,),
+        ) as c:
             enemy = await c.fetchone()
         if not enemy:
             return await interaction.followup.send("❌ Нет других кланов.", ephemeral=True)
-        await bot.db.execute(
-            "INSERT INTO clan_wars (clan1_id, clan2_id, start_time, status) VALUES (?, ?, ?, 'active')",
-            (self.clan_id, enemy[0], datetime.datetime.now().isoformat())
+
+        try:
+            await start_clan_war(self.clan_id, enemy[0])
+        except ValueError as e:
+            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+
+        war = await get_active_clan_war(self.clan_id)
+        if not war:
+            return await interaction.followup.send(
+                "❌ Не удалось начать войну.", ephemeral=True
+            )
+        embed = await build_clan_war_embed(interaction, war, self.clan_id)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClanWarView(self.author_id, self.clan_id, war[0]),
         )
-        await bot.db.commit()
-        await log_clan(self.clan_id, "war", f"Против {enemy[1]}")
-        embed = discord.Embed(title="🔥 Война объявлена!", description=f"Клан против **{enemy[1]}**.", color=0xe74c3c)
-        await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="Квесты", emoji="📜", style=discord.ButtonStyle.secondary, row=1)
     async def btn_quests(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6323,6 +7087,74 @@ class ClanInventoryView(BaseView):
         await interaction.edit_original_response(
             embed=embed,
             view=ClanMenuView(self.author_id, self.clan_id),
+        )
+
+
+class ClanWarView(BaseView):
+    def __init__(self, author_id: int, clan_id: int, war_id: int):
+        super().__init__(author_id)
+        self.clan_id = clan_id
+        self.war_id = war_id
+
+    @discord.ui.button(label="Атаковать", emoji="⚔️", style=discord.ButtonStyle.danger, row=0)
+    async def btn_attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, msg, finished = await attack_clan_war(self.war_id, self.author_id)
+        if not ok:
+            return await interaction.followup.send(msg, ephemeral=True)
+
+        await interaction.followup.send(msg, ephemeral=True)
+
+        if finished:
+            clan = await get_clan(self.author_id)
+            if clan:
+                embed = await build_clan_embed(interaction, clan)
+                await interaction.edit_original_response(
+                    embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+                )
+            return
+
+        war = await get_active_clan_war(self.clan_id)
+        if not war:
+            clan = await get_clan(self.author_id)
+            if clan:
+                embed = await build_clan_embed(interaction, clan)
+                await interaction.edit_original_response(
+                    embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+                )
+            return
+
+        embed = await build_clan_war_embed(interaction, war, self.clan_id)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanWarView(self.author_id, self.clan_id, war[0])
+        )
+
+    @discord.ui.button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        war = await get_active_clan_war(self.clan_id)
+        if not war:
+            clan = await get_clan(self.author_id)
+            if clan:
+                embed = await build_clan_embed(interaction, clan)
+                await interaction.edit_original_response(
+                    embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+                )
+            return
+        embed = await build_clan_war_embed(interaction, war, self.clan_id)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanWarView(self.author_id, self.clan_id, war[0])
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            return await interaction.followup.send("❌ Ты не в клане.", ephemeral=True)
+        embed = await build_clan_embed(interaction, clan)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
         )
 
 
@@ -6986,16 +7818,8 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
 
         sent = False
 
-        # Сначала пробуем ЛС: это приватнее и не засоряет канал.
-        try:
-            user = bot.get_user(target) or await bot.fetch_user(target)
-            view.message = await user.send(embed=embed, view=view)
-            sent = True
-        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-            sent = False
-
-        # Если ЛС закрыты — публикуем в канал.
-        if not sent and interaction.channel:
+        # Вызов всегда публикуется в канал. ЛС не используем.
+        if interaction.channel:
             try:
                 view.message = await interaction.channel.send(
                     content=f"<@{target}>", embed=embed, view=view
@@ -7006,8 +7830,8 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
 
         if not sent:
             return await interaction.followup.send(
-                "❌ Не удалось отправить вызов: у противника закрыты ЛС, "
-                "а канал недоступен.",
+                "❌ Не удалось отправить вызов в канал. "
+                "Проверь права бота на отправку сообщений.",
                 ephemeral=True,
             )
 
@@ -7253,23 +8077,10 @@ class EconomyView(BaseView):
     @discord.ui.button(label="Биржа", emoji="📈", style=discord.ButtonStyle.primary, row=1)
     async def btn_market(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT item_id, base_price, current_price, demand, supply FROM market_prices ORDER BY ABS(current_price - base_price) DESC LIMIT 10"
-        ) as c:
-            rows = await c.fetchall()
-        embed = discord.Embed(title="📈 Биржа (самые волатильные)", color=0x9b59b6)
-        for item_id, base, current, demand, supply in rows:
-            trend = "🟢" if current > base else ("🔴" if current < base else "⚪")
-            embed.add_field(
-                name=f"{trend} {item_id}",
-                value=f"Текущая: 🪙 {current} (база {base})\nСпрос: {demand} | Предл.: {supply}",
-                inline=False
-            )
-        b = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
-        b.callback = lambda i: self._back(i)
-        view = discord.ui.View()
-        view.add_item(b)
-        await interaction.edit_original_response(embed=embed, view=view)
+        embed = await build_market_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=MarketView(self.author_id)
+        )
 
     @discord.ui.button(label="Налоги", emoji="🏦", style=discord.ButtonStyle.danger, row=1)
     async def btn_taxes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -10619,12 +11430,64 @@ class UserProfileView(BaseView):
         embed = discord.Embed(title="⚙️ Личные настройки", description="Здесь ты можешь управлять профилем и кастомизацией.", color=0x808080)
         await interaction.edit_original_response(embed=embed, view=UserSettingsView(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Коллекция", emoji=get_emoji("_inventory"), style=discord.ButtonStyle.primary, row=2)
+    async def btn_collection(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed, total_pages = await build_collection_embed(interaction, 0)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=CollectionView(self.author_id, 0, total_pages),
+        )
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
-        
+
+
+class CollectionView(BaseView):
+    def __init__(self, author_id: int, page: int, total_pages: int):
+        super().__init__(author_id)
+        self.page = page
+        self.total_pages = total_pages
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=0)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=0)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        page = max(0, self.page - 1)
+        embed, total_pages = await build_collection_embed(interaction, page)
+        await interaction.edit_original_response(
+            embed=embed, view=CollectionView(self.author_id, page, total_pages)
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        page = min(self.total_pages - 1, self.page + 1)
+        embed, total_pages = await build_collection_embed(interaction, page)
+        await interaction.edit_original_response(
+            embed=embed, view=CollectionView(self.author_id, page, total_pages)
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=UserProfileView(self.author_id)
+        )
+
+
 class CustomizationHubView(BaseView):
     @discord.ui.button(
         label="Титулы",
@@ -12650,6 +13513,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                 "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
                 "bank_deposits", "bank_history", "user_notifications",
                 "player_quests", "user_cosmetics", "tax_log", "raid_cooldowns",
+                "player_collection",
             ):
                 await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
 
@@ -12727,6 +13591,10 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
                     "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', 0)",
                     (uid, free[i], item_id)
                 )
+            await bot.db.execute(
+                "INSERT OR IGNORE INTO player_collection (user_id, item_id) VALUES (?, ?)",
+                (uid, item_id),
+            )
             await bot.db.commit()
             msg = f"✅ Выдано {qty}×{emoji} {name} в хранилище <@{uid}>."
 
