@@ -96,6 +96,9 @@ DUEL_CHALLENGE_TIMEOUT = 120          # сколько ждём согласия
 DUEL_CHALLENGE_DELETE_SECONDS = 30    # автоудаление после результата
 DUEL_CHALLENGE_DECLINE_SECONDS = 15   # автоудаление после отказа/таймаута
 
+# Публичные (не-ephemeral) сообщения бота
+PUBLIC_MESSAGE_DELETE_SECONDS = 30
+
 # --- КОЛЛЕКЦИЯ ---
 COLLECTION_BONUS_PER_ITEM = 0.005     # +0.5% к доходу за каждый открытый генератор
 
@@ -160,6 +163,14 @@ STAR_BONUS = {
 
 CATALYST_PRICE = 10
 CATALYST_BONUS = 0.15
+
+CRAFT_PITY_BONUS = 0.05       # +5% к шансу за каждый провал
+CRAFT_PITY_MAX = 0.50         # максимум +50% от pity
+CRAFT_HARD_PITY = 10          # 10-я попытка гарантирована
+
+STAR_PITY_BONUS = 0.05        # +5% к шансу звезды за провал
+STAR_PITY_MAX = 0.30          # максимум +30% от pity
+STAR_HARD_PITY = 10           # 10-я попытка гарантирована
 SELL_RATE = 0.10  # 10% от цены (было 35%)
 SELL_ALLOWED_RARITIES = {"common", "uncommon", "rare"}  # epic+ — только синтез/аукцион
 BANK_MAX_DEPOSIT = 50000       # максимум монет на вклад
@@ -167,6 +178,7 @@ BANK_DAILY_RATE = 0.02         # 2% в день (было 5%)
 BANK_MAX_DAYS = 30
 START_GRID = 9
 STORAGE_SIZE = 36
+TEMP_STORAGE_SIZE = 100
 PAGE_SIZE = 10
 SHOP_SELECT_PAGE_SIZE = 10
 SLOT_WIDTH = 8
@@ -642,11 +654,19 @@ AUTOCOLLECT_LEVELS = {
 # ============================================================
 
 NOTIFICATION_TYPES = {
-    "pet_hungry":   ("🐾 Питомец голоден", "Когда питомца можно покормить"),
-    "daily_ready":  (f"{BOT_BTN_EMOJIS.get('_quests', '📅')} Дейли доступен", "Когда можно забрать ежедневную награду"),
-    "auction_soon": ("🏛️ Аукцион скоро закончится", "За 1 час до конца лота, где ты участник/продавец"),
-    "autocollect":  ("🤖 Автосборщик собрал доход", "Раз в сутки, если автосборщик активен"),
-    "clan_war":     ("⚔️ Клановая война", "Когда твой клан начинает или заканчивает войну"),
+    "pet_hungry":   ("Питомец голоден", "Когда питомца можно покормить"),
+    "daily_ready":  ("Дейли доступен", "Когда можно забрать ежедневную награду"),
+    "auction_soon": ("Аукцион скоро закончится", "За 1 час до конца лота, где ты участник/продавец"),
+    "autocollect":  ("Автосборщик собрал доход", "Раз в сутки, если автосборщик активен"),
+    "clan_war":     ("Клановая война", "Когда твой клан начинает или заканчивает войну"),
+}
+
+NOTIFICATION_EMOJIS = {
+    "pet_hungry": "_pets",
+    "daily_ready": "_dailyquests",
+    "auction_soon": "_market",
+    "autocollect": "_autocollector",
+    "clan_war": "_clan",
 }
 
 NOTIFICATION_COOLDOWN_HOURS = 24   # не чаще 1 раза в сутки на каждый тип
@@ -656,12 +676,21 @@ NOTIFICATION_COOLDOWN_HOURS = 24   # не чаще 1 раза в сутки на
 # ============================================================
 
 TOP_TYPES = {
-    "coins":    (f"{BOT_BTN_EMOJIS.get('_coin', '🪙')} По монетам", "players.coins"),
-    "gems":     (f"{BOT_BTN_EMOJIS.get('_gem', '💎')} По гемам", "players.gems"),
-    "power":    ("⚔️ По мощи", "combat_power"),
-    "crafts":   (f"{BOT_BTN_EMOJIS.get('_synthesis', '⚗️')} По синтезам", "players.total_crafts"),
-    "pets":     ("🐾 По питомцам", "pet_count"),
-    "clans":    (f"{BOT_BTN_EMOJIS.get('_clan', '🏰')} По кланам", "clan_power"),
+    "coins":    ("По монетам", "players.coins"),
+    "gems":     ("По гемам", "players.gems"),
+    "power":    ("По мощи", "combat_power"),
+    "crafts":   ("По синтезам", "players.total_crafts"),
+    "pets":     ("По питомцам", "pet_count"),
+    "clans":    ("По кланам", "clan_power"),
+}
+
+TOP_TYPE_EMOJIS = {
+    "coins": "_coin",
+    "gems": "_gem",
+    "power": "_raid",
+    "crafts": "_synthesis",
+    "pets": "_pets",
+    "clans": "_clan",
 }
 
 TOP_PAGE_SIZES = (10, 20, 30)   # доступные размеры страницы
@@ -916,6 +945,23 @@ class CastleBot(commands.Bot):
             )
         """)
 
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS craft_pity (
+                user_id INTEGER,
+                item_id TEXT,
+                failures INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, item_id)
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS star_pity (
+                user_id INTEGER,
+                item_id TEXT,
+                target_star INTEGER,
+                failures INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, item_id, target_star)
+            )
+        """)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS achievements (
                 id TEXT PRIMARY KEY,
@@ -2990,9 +3036,10 @@ async def get_menu_welcome_notification(user_id: int, guild_id: int = None) -> s
     )
 
 
-async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = True, stars: int = 0) -> tuple[int, int]:
+async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = True, stars: int = 0) -> tuple[int, int, int]:
     grid_size = await get_grid_size(user_id)
     storage_size = await get_storage_size(user_id)
+    temp_size = TEMP_STORAGE_SIZE
 
     async with bot.db.execute(
         "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'", (user_id,)
@@ -3006,12 +3053,23 @@ async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = 
         used_storage = {r[0] for r in await c.fetchall()}
     free_storage = [s for s in range(storage_size) if s not in used_storage]
 
-    total_free = len(free_profile) + len(free_storage)
+    async with bot.db.execute(
+        "SELECT slot FROM inventory WHERE user_id = ? AND location = 'temp'", (user_id,)
+    ) as c:
+        used_temp = {r[0] for r in await c.fetchall()}
+    free_temp = [s for s in range(temp_size) if s not in used_temp]
+
+    total_free = len(free_profile) + len(free_storage) + len(free_temp)
     if total_free < quantity:
-        raise ValueError(f"Не хватает места: свободно {total_free}, нужно {quantity}.")
+        raise ValueError(
+            f"Не хватает места: свободно {total_free} "
+            f"(замок + хранилище + временное), нужно {quantity}."
+        )
 
     to_profile = min(quantity, len(free_profile))
-    to_storage = quantity - to_profile
+    remaining = quantity - to_profile
+    to_storage = min(remaining, len(free_storage))
+    to_temp = remaining - to_storage
 
     for i in range(to_profile):
         await bot.db.execute(
@@ -3023,13 +3081,18 @@ async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = 
             "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', ?)",
             (user_id, free_storage[i], item_id, stars)
         )
+    for i in range(to_temp):
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'temp', ?)",
+            (user_id, free_temp[i], item_id, stars)
+        )
     await bot.db.execute(
         "INSERT OR IGNORE INTO player_collection (user_id, item_id) VALUES (?, ?)",
         (user_id, item_id),
     )
     if commit:
         await bot.db.commit()
-    return to_profile, to_storage
+    return to_profile, to_storage, to_temp
 
 
 async def grant_item_or_compensation(user_id: int, item_id: str, quantity: int = 1, stars: int = 0) -> tuple[str, int]:
@@ -3599,11 +3662,12 @@ async def build_top_embed(interaction: discord.Interaction, top_type: str, limit
     if top_type not in TOP_TYPES:
         top_type = "coins"
     title, _ = TOP_TYPES[top_type]
+    top_emoji = get_emoji(TOP_TYPE_EMOJIS.get(top_type, "_stats"))
 
     rows = await get_top_players_cached(top_type, limit)
 
     embed = discord.Embed(
-        title=f"📊 Топ — {title}",
+        title=f"{top_emoji} Топ — {title}",
         description=f"Топ-{limit} игроков/кланов",
         color=0xf1c40f
     )
@@ -4015,6 +4079,15 @@ async def send_dm_notification(user_id: int, notif_type: str, text: str, embed: 
         return False
     except discord.HTTPException:
         return False
+
+
+async def delete_message_later(message, delay: int):
+    """Удаляет публичное сообщение бота через delay секунд."""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
 
 
 async def buy_autocollector(user_id: int) -> tuple[bool, str]:
@@ -4594,7 +4667,8 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Синтез:** 5 одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 4%). Стоимость в гемах растёт. Катализатор +15%.\n\n"
             "**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +110%, 2★ +290%, 3★ +650%, 4★ +1300%, 5★ +2500%.\n\n"
             "**Продажа:** только `common`/`uncommon`/`rare`, 10% от цены. `epic`+ — только синтез или аукцион.\n\n"
-            "**Хранилище:** «Замок» → «Хранилище». Генераторы там не дают доход."
+            "**Хранилище:** «Замок» → «Хранилище». Генераторы там не дают доход.\n\n"
+            "**Временное хранилище:** 100 слотов для предметов, которым не хватило места в замке и хранилище."
         ),
         "pets": (
             "🐾 Питомцы",
@@ -4842,12 +4916,14 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     embed = await fix_embed_emojis(embed)
     return embed
 
-async def build_generator_details_embed(interaction: discord.Interaction) -> discord.Embed:
+async def build_generator_details_embed(
+    interaction: discord.Interaction, page: int = 0
+) -> tuple[discord.Embed, int]:
     user_id = interaction.user.id
 
     async with bot.db.execute("""
-        SELECT inv.slot, inv.item_id, inv.stars, i.name, i.income_per_hour,
-               i.income_gems_per_hour, i.price, i.rarity
+        SELECT inv.slot, inv.item_id, inv.stars, i.name, i.emoji,
+               i.income_per_hour, i.income_gems_per_hour, i.price, i.rarity
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'profile'
@@ -4857,15 +4933,13 @@ async def build_generator_details_embed(interaction: discord.Interaction) -> dis
 
     embed = discord.Embed(
         title=f"{BOT_BTN_EMOJIS.get('_generatorparts', '📋')} Детали генераторов",
-        description="Доход указан с учётом звёзд и всех бонусов (статус, клан, питомец, титул).",
-        color=0x3498db
+        color=0x3498db,
     )
 
     if not rows:
         embed.description = "У тебя нет генераторов в замке."
-        return embed
+        return embed, 1
 
-    # получаем множители
     async with bot.db.execute(
         "SELECT income_bonus FROM players WHERE user_id = ?", (user_id,)
     ) as c:
@@ -4876,54 +4950,57 @@ async def build_generator_details_embed(interaction: discord.Interaction) -> dis
     pet_gems = await get_pet_bonus(user_id, "income_gems")
     title_coins = await get_title_bonus(user_id, "income_coins")
     title_gems = await get_title_bonus(user_id, "income_gems")
+    prestige_bonus = await get_prestige_bonus(user_id)
+    collection_bonus = await get_collection_bonus(user_id)
 
-    mult_coins = (1 + bonus) * (1 + clan_bonus) * (1 + pet_coins + title_coins)
-    mult_gems = (1 + bonus) * (1 + clan_bonus) * (1 + pet_gems + title_gems)
+    mult_coins = (1 + bonus) * (1 + clan_bonus) * (
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
+    )
+    mult_gems = (1 + bonus) * (1 + clan_bonus) * (
+        1 + pet_gems + title_gems + prestige_bonus + collection_bonus
+    )
 
-    lines = []
+    details = []
     total_coins = 0.0
     total_gems = 0.0
-    for slot, item_id, stars, name, inc_coins, inc_gems, price, rarity in rows:
+    for slot, item_id, stars, name, default_emoji, inc_coins, inc_gems, price, rarity in rows:
         star_mult = 1 + STAR_BONUS.get(stars, 0)
         eff_coins = inc_coins * star_mult * 3600 * mult_coins
         eff_gems = inc_gems * star_mult * 3600 * mult_gems
         total_coins += eff_coins
         total_gems += eff_gems
+        details.append((slot, name, default_emoji, stars, rarity, eff_coins, eff_gems))
 
+    page_size = PAGE_SIZE
+    total_pages = max(1, (len(details) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = details[page * page_size:page * page_size + page_size]
+
+    embed.description = (
+        f"Страница {page + 1}/{total_pages}. "
+        "Доход с учётом звёзд и всех бонусов (статус, клан, питомец, титул, престиж, коллекция)."
+    )
+
+    for slot, name, default_emoji, stars, rarity, eff_coins, eff_gems in chunk:
         star_str = f"{stars}★" if stars > 0 else "—"
         inc_str = f"🪙 {eff_coins:.2f}/час"
         if eff_gems > 0:
             inc_str += f" | 💎 {eff_gems:.4f}/час"
-        lines.append(
-            f"**Слот {slot}:** {name} ({star_str}, {RARITY_NAMES.get(rarity, rarity)})\n"
-            f"  {inc_str}"
-        )
-
-    # Ограничиваем размер embed'а, чтобы не упереться в лимит Discord (6000 символов)
-    MAX_DETAIL_LINES = 60
-    if len(lines) > MAX_DETAIL_LINES:
-        hidden = len(lines) - MAX_DETAIL_LINES
-        lines = lines[:MAX_DETAIL_LINES] + [f"…и ещё {hidden} генераторов"]
-
-    # разбиваем по 10, чтобы не превысить 1024 символа в поле
-    chunk_size = 10
-    for i in range(0, len(lines), chunk_size):
-        chunk = lines[i:i+chunk_size]
-        start = i + 1
-        end = i + len(chunk)
         embed.add_field(
-            name=f"Генераторы {start}–{end}",
-            value="\n".join(chunk),
-            inline=False
+            name=f"Слот {slot}: {default_emoji} {name} ({star_str})"[:256],
+            value=f"{RARITY_NAMES.get(rarity, rarity)}\n{inc_str}",
+            inline=False,
         )
 
     embed.add_field(
-        name="💰 Итого",
+        name="💰 Итого по замку",
         value=f"🪙 {total_coins:.2f}/час | 💎 {total_gems:.4f}/час",
-        inline=False
+        inline=False,
     )
+    embed.set_footer(text=f"Генераторов: {len(details)} | Доход на слот — в каждой строке")
     embed = await fix_embed_emojis(embed)
-    return embed
+    return embed, total_pages
+
 
 async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
@@ -4945,10 +5022,19 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
         emoji = await get_star_emoji(item_id, stars, emoji)
         items[slot] = emoji
 
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'temp'",
+        (user_id,),
+    ) as c:
+        temp_count = (await c.fetchone())[0] or 0
+
     storage_emoji = custom.get("_storage", "🎒")
     width = max(1, int(grid_size ** 0.5))
     embed = discord.Embed(title=f"{storage_emoji} Хранилище {interaction.user.name}", color=0x808080)
-    embed.description = f"Слотов: **{grid_size}**"
+    embed.description = (
+        f"Слотов: **{grid_size}** | "
+        f"Временное: **{temp_count}/{TEMP_STORAGE_SIZE}**"
+    )
 
     # Выводим сетку по рядам (поддерживает неквадратные размеры)
     for start in range(0, grid_size, width):
@@ -4956,6 +5042,41 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
         embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
     embed = await fix_embed_emojis(embed)
     return embed
+
+async def build_temp_storage_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    guild_id = interaction.guild_id
+    settings = await get_settings(guild_id)
+    custom = settings["custom_emojis"]
+
+    async with bot.db.execute("""
+        SELECT inv.slot, i.id, i.emoji, inv.stars FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = 'temp'
+    """, (user_id,)) as c:
+        rows = await c.fetchall()
+
+    items = {}
+    for slot, item_id, default_emoji, stars in rows:
+        emoji = custom.get(item_id, default_emoji)
+        emoji = await get_star_emoji(item_id, stars, emoji)
+        items[slot] = emoji
+
+    width = 10
+    embed = discord.Embed(
+        title=f"📦 Временное хранилище — {interaction.user.name}",
+        description=(
+            f"Занято: **{len(rows)}/{TEMP_STORAGE_SIZE}**\n"
+            "Сюда попадают предметы, которым не хватило слотов в замке и хранилище."
+        ),
+        color=0x808080,
+    )
+    for start in range(0, TEMP_STORAGE_SIZE, width):
+        row_items = [items.get(slot, "⬛") for slot in range(start, start + width)]
+        embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
+    embed = await fix_embed_emojis(embed)
+    return embed
+
 
 async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Embed:
     # clan = (id, name, leader_id, treasury, bonus, created_at)
@@ -5778,8 +5899,9 @@ async def build_notifications_embed(interaction: discord.Interaction) -> discord
         enabled, last_sent = notifs.get(ntype, (1, None))
         status = "✅ Вкл" if enabled else "❌ Выкл"
         last_str = f"\nПоследнее: `{last_sent}`" if last_sent else ""
+        notif_emoji = get_emoji(NOTIFICATION_EMOJIS.get(ntype, "_notifications"))
         embed.add_field(
-            name=f"{name} — {status}",
+            name=f"{notif_emoji} {name} — {status}",
             value=f"{desc}{last_str}",
             inline=False
         )
@@ -6146,7 +6268,44 @@ class GuideSectionView(BaseView):
         )
 
 class GeneratorDetailView(BaseView):
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
+    def __init__(self, author_id: int, page: int = 0, total_pages: int = 1):
+        super().__init__(author_id)
+        self.page = page
+        self.total_pages = total_pages
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=0)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=0)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"),
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        back.callback = self.btn_back
+        self.add_item(back)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        page = max(0, self.page - 1)
+        embed, total_pages = await build_generator_details_embed(interaction, page)
+        await interaction.edit_original_response(
+            embed=embed, view=GeneratorDetailView(self.author_id, page, total_pages)
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        page = min(self.total_pages - 1, self.page + 1)
+        embed, total_pages = await build_generator_details_embed(interaction, page)
+        await interaction.edit_original_response(
+            embed=embed, view=GeneratorDetailView(self.author_id, page, total_pages)
+        )
+
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
@@ -6269,6 +6428,7 @@ class TopView(BaseView):
         for idx, (ttype, (label, _)) in enumerate(types):
             btn = discord.ui.Button(
                 label=label[:80],
+                emoji=get_emoji(TOP_TYPE_EMOJIS.get(ttype, "_stats")),
                 style=discord.ButtonStyle.primary if ttype == self.top_type else discord.ButtonStyle.secondary,
                 row=0 if idx < 3 else 1,
             )
@@ -6402,6 +6562,7 @@ class NotificationsView(BaseView):
         for ntype, (name, _desc) in NOTIFICATION_TYPES.items():
             btn = discord.ui.Button(
                 label=name[:80],
+                emoji=get_emoji(NOTIFICATION_EMOJIS.get(ntype, "_notifications")),
                 style=discord.ButtonStyle.secondary,
                 row=0 if ntype in ("pet_hungry", "daily_ready") else 1,
             )
@@ -6842,6 +7003,7 @@ async def open_clan_invites(interaction: discord.Interaction, author_id: int):
     if not rows:
         return await interaction.followup.send("❌ У тебя нет приглашений.", ephemeral=True)
 
+    visible = rows[:25]
     options = [
         discord.SelectOption(
             label=name[:100],
@@ -6849,11 +7011,14 @@ async def open_clan_invites(interaction: discord.Interaction, author_id: int):
             description="Принять приглашение",
             emoji="🏰",
         )
-        for invite_id, clan_id, name in rows
+        for invite_id, clan_id, name in visible
     ]
+    description = "Выбери клан, чтобы вступить."
+    if len(rows) > 25:
+        description += f"\nПоказаны первые 25 из {len(rows)} приглашений."
     embed = discord.Embed(
         title="📩 Приглашения в клан",
-        description="Выбери клан, чтобы вступить.",
+        description=description,
         color=0x3498db,
     )
     await interaction.edit_original_response(
@@ -7763,7 +7928,10 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
             msg = f"💥 **Провал!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nТы ничего не украл."
 
         embed = discord.Embed(title="Результат рейда", description=msg, color=0x2ecc71 if success else 0xe74c3c)
-        await interaction.followup.send(embed=embed)
+        result_msg = await interaction.followup.send(embed=embed)
+        asyncio.create_task(
+            delete_message_later(result_msg, PUBLIC_MESSAGE_DELETE_SECONDS)
+        )
 
 class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
     opponent_id = discord.ui.TextInput(label="ID противника", required=True)
@@ -8233,8 +8401,9 @@ class PetsView(BaseView):
             if not ptype:
                 continue
             options.append(discord.SelectOption(
-                label=f"{ptype['emoji']} {ptype['name']} (ур. {level})",
-                value=pet_id
+                label=f"{ptype['name']} (ур. {level})"[:100],
+                value=pet_id,
+                emoji=parse_emoji_safe(ptype["emoji"]),
             ))
         embed = discord.Embed(title="🔄 Выбери активного питомца", color=0x9b59b6)
         await interaction.edit_original_response(
@@ -8809,8 +8978,10 @@ class ProfileView(BaseView):
     @discord.ui.button(label="Детали", emoji="📋", style=discord.ButtonStyle.secondary, row=2)
     async def details_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = await build_generator_details_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=GeneratorDetailView(self.author_id))
+        embed, total_pages = await build_generator_details_embed(interaction, 0)
+        await interaction.edit_original_response(
+            embed=embed, view=GeneratorDetailView(self.author_id, 0, total_pages)
+        )
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8933,7 +9104,15 @@ class StorageView(BaseView):
             embed=embed, view=StorageSortMenuView(self.author_id)
         )
 
-    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Временное", emoji="📦", style=discord.ButtonStyle.secondary, row=2)
+    async def temp_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_temp_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=TempStorageView(self.author_id)
+        )
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         if self.return_to == "profile":
@@ -8942,6 +9121,22 @@ class StorageView(BaseView):
         else:
             embed = await build_main_embed(interaction)
             await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+
+class TempStorageView(BaseView):
+    @discord.ui.button(label="Переместить", emoji="🔀", style=discord.ButtonStyle.primary, row=0)
+    async def btn_move(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_move_view(interaction, "temp", self.author_id)
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
+
 
 async def open_sell_view(interaction: discord.Interaction, author_id: int, page: int = 0):
     user_id = interaction.user.id
@@ -9161,9 +9356,13 @@ class SellConfirmView(discord.ui.View):
 #  ↔️ ОБМЕН СЛОТОВ
 # ============================================================
 
-async def open_swap_view(interaction: discord.Interaction, location: str, author_id: int):
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
+async def _build_swap_first_page(
+    location: str,
+    author_id: int,
+    guild_id: int,
+    page: int = 0,
+    main_message=None,
+):
     settings = await get_settings(guild_id)
     custom = settings["custom_emojis"]
 
@@ -9171,14 +9370,19 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
         SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
         FROM inventory inv JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = ? ORDER BY inv.slot ASC
-    """, (user_id, location)) as c:
+    """, (author_id, location)) as c:
         rows = await c.fetchall()
 
     if len(rows) < 2:
-        return await interaction.followup.send("❌ Нужно минимум 2 предмета для обмена.", ephemeral=True)
+        return None, None, "❌ Нужно минимум 2 предмета для обмена."
+
+    page_size = SHOP_SELECT_PAGE_SIZE
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
 
     options = []
-    for slot, item_id, name, default_emoji, stars in rows:
+    for slot, item_id, name, default_emoji, stars in chunk:
         emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
         stars_str = f" {stars}★" if stars > 0 else ""
         short_name = name[:40] + "..." if len(name) > 40 else name
@@ -9190,25 +9394,107 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
 
     embed = discord.Embed(
         title="↔️ Обмен местами",
-        description="Шаг 1: Выбери предмет, который хочешь **переместить** на другой слот.",
+        description=(
+            f"Шаг 1: Выбери предмет, который хочешь **переместить** на другой слот.\n"
+            f"Страница {page + 1}/{total_pages}"
+        ),
         color=0x3498db
     )
-    
-    await interaction.followup.send(
-        embed=embed,
-        view=SwapFirstView(author_id, location, options),
-        ephemeral=True
+    view = SwapFirstView(
+        author_id, location, options, page, total_pages, main_message
     )
+    return embed, view, None
+
+
+async def _build_swap_second_page(
+    location: str,
+    author_id: int,
+    first_slot: int,
+    guild_id: int,
+    page: int = 0,
+    main_message=None,
+):
+    settings = await get_settings(guild_id)
+    custom = settings["custom_emojis"]
+
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
+        FROM inventory inv JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = ? AND inv.slot != ?
+        ORDER BY inv.slot ASC
+    """, (author_id, location, first_slot)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return None, None, "❌ Нет других слотов для обмена."
+
+    page_size = SHOP_SELECT_PAGE_SIZE
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+
+    options = []
+    for slot, item_id2, name, default_emoji, stars2 in chunk:
+        emoji_obj = parse_emoji_safe(custom.get(item_id2, default_emoji))
+        stars_str = f" {stars2}★" if stars2 > 0 else ""
+        short_name = name[:40] + "..." if len(name) > 40 else name
+        options.append(discord.SelectOption(
+            label=f"Слот {slot}: {short_name}{stars_str}",
+            value=str(slot),
+            emoji=emoji_obj
+        ))
+
+    embed = discord.Embed(
+        title="↔️ Обмен местами",
+        description=(
+            f"Шаг 2: Выбран предмет из **слота {first_slot}**.\n"
+            f"Теперь выбери слот, с которым хочешь его **поменять**.\n"
+            f"Страница {page + 1}/{total_pages}"
+        ),
+        color=0x3498db
+    )
+    view = SwapSecondView(
+        author_id, location, first_slot, options, page, total_pages, main_message
+    )
+    return embed, view, None
+
+
+async def open_swap_view(interaction: discord.Interaction, location: str, author_id: int):
+    embed, view, error = await _build_swap_first_page(
+        location, author_id, interaction.guild_id, 0, interaction.message
+    )
+    if error:
+        return await interaction.followup.send(error, ephemeral=True)
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 class SwapFirstView(discord.ui.View):
-    def __init__(self, author_id: int, location: str, options: list[discord.SelectOption]):
+    def __init__(
+        self,
+        author_id: int,
+        location: str,
+        options: list[discord.SelectOption],
+        page: int = 0,
+        total_pages: int = 1,
+        main_message=None,
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.location = location
+        self.page = page
+        self.total_pages = total_pages
+        self.main_message = main_message
         self.add_item(make_select("Выбери предмет", options, self.first_select, row=0))
-        
-        close = discord.ui.Button(label="Закрыть", emoji="❌", style=discord.ButtonStyle.danger, row=1)
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        close = discord.ui.Button(label="Закрыть", emoji="❌", style=discord.ButtonStyle.danger, row=2)
         close.callback = self.close_window
         self.add_item(close)
 
@@ -9216,63 +9502,75 @@ class SwapFirstView(discord.ui.View):
         return interaction.user.id == self.author_id
 
     async def first_select(self, interaction: discord.Interaction):
-        value = interaction.data["values"][0]
-        parts = value.split(":")
-        first_slot = int(parts[0])
-        item_id = parts[1]
-        stars = int(parts[2]) if len(parts) > 2 else 0
-        
+        first_slot = int(interaction.data["values"][0].split(":", 1)[0])
         await interaction.response.defer()
-        
-        # Шаг 2: Показываем сетку со слотами, КУДА можно переместить
-        guild_id = interaction.guild_id
-        custom = (await get_settings(guild_id))["custom_emojis"]
-        
-        async with bot.db.execute("""
-            SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
-            FROM inventory inv JOIN items i ON inv.item_id = i.id
-            WHERE inv.user_id = ? AND inv.location = ? AND inv.slot != ?
-            ORDER BY inv.slot ASC
-        """, (self.author_id, self.location, first_slot)) as c:
-            rows = await c.fetchall()
 
-        options = []
-        for slot, item_id2, name, default_emoji, stars2 in rows:
-            emoji_obj = parse_emoji_safe(custom.get(item_id2, default_emoji))
-            stars_str = f" {stars2}★" if stars2 > 0 else ""
-            short_name = name[:40] + "..." if len(name) > 40 else name
-            options.append(discord.SelectOption(
-                label=f"Слот {slot}: {short_name}{stars_str}",
-                value=str(slot),
-                emoji=emoji_obj
-            ))
+        embed, view, error = await _build_swap_second_page(
+            self.location,
+            self.author_id,
+            first_slot,
+            interaction.guild_id,
+            0,
+            self.main_message,
+        )
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=view)
 
-        embed = discord.Embed(
-            title="↔️ Обмен местами",
-            description=f"Шаг 2: Выбран предмет из **слота {first_slot}**.\nТеперь выбери слот, с которым хочешь его **поменять**.",
-            color=0x3498db
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed, view, error = await _build_swap_first_page(
+            self.location, self.author_id, interaction.guild_id,
+            self.page - 1, self.main_message,
         )
-        
-        await interaction.edit_original_response(
-            embed=embed,
-            view=SwapSecondView(self.author_id, self.location, first_slot, options)
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed, view, error = await _build_swap_first_page(
+            self.location, self.author_id, interaction.guild_id,
+            self.page + 1, self.main_message,
         )
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=view)
 
     async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await interaction.delete_original_response()
 
 
-
 class SwapSecondView(discord.ui.View):
-    def __init__(self, author_id: int, location: str, first_slot: int, options: list[discord.SelectOption]):
+    def __init__(
+        self,
+        author_id: int,
+        location: str,
+        first_slot: int,
+        options: list[discord.SelectOption],
+        page: int = 0,
+        total_pages: int = 1,
+        main_message=None,
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.location = location
         self.first_slot = first_slot
+        self.page = page
+        self.total_pages = total_pages
+        self.main_message = main_message
         self.add_item(make_select("Выбери слот для обмена", options, self.second_select, row=0))
-        
-        close = discord.ui.Button(label="Отмена", emoji="❌", style=discord.ButtonStyle.danger, row=1)
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        close = discord.ui.Button(label="Отмена", emoji="❌", style=discord.ButtonStyle.danger, row=2)
         close.callback = self.close_window
         self.add_item(close)
 
@@ -9296,11 +9594,10 @@ class SwapSecondView(discord.ui.View):
 
         if not first or not second:
             return await interaction.edit_original_response(
-                embed=discord.Embed(title="❌ Ошибка", description="Один из слотов пуст.", color=0xe74c3c), 
+                embed=discord.Embed(title="❌ Ошибка", description="Один из слотов пуст.", color=0xe74c3c),
                 view=None
             )
 
-        # Меняем местами
         await bot.db.execute(
             "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot IN (?, ?)",
             (self.author_id, self.location, self.first_slot, second_slot)
@@ -9318,23 +9615,42 @@ class SwapSecondView(discord.ui.View):
 
         embed = discord.Embed(
             title="✅ Слоты поменяны",
-            description=f"Предметы в слотах **{self.first_slot}** и **{second_slot}** поменялись местами.\nОбнови основное меню, чтобы увидеть результат.",
+            description=f"Предметы в слотах **{self.first_slot}** и **{second_slot}** поменялись местами.",
             color=0x2ecc71
         )
         await interaction.edit_original_response(embed=embed, view=None)
 
-        # Обновляем ОСНОВНОЕ сообщение
-        if self.location == "profile":
-            main_embed = await build_profile_embed(interaction)
-            main_view = ProfileView(self.author_id)
-        else:
-            main_embed = await build_storage_embed(interaction)
-            main_view = StorageView(self.author_id)
+        if self.main_message:
+            if self.location == "profile":
+                main_embed = await build_profile_embed(interaction)
+                main_view = ProfileView(self.author_id)
+            else:
+                main_embed = await build_storage_embed(interaction)
+                main_view = StorageView(self.author_id)
+            try:
+                await self.main_message.edit(embed=main_embed, view=main_view)
+            except discord.HTTPException:
+                pass
 
-        try:
-            await interaction.message.edit(embed=main_embed, view=main_view)
-        except discord.HTTPException:
-            pass
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed, view, error = await _build_swap_second_page(
+            self.location, self.author_id, self.first_slot,
+            interaction.guild_id, self.page - 1, self.main_message,
+        )
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed, view, error = await _build_swap_second_page(
+            self.location, self.author_id, self.first_slot,
+            interaction.guild_id, self.page + 1, self.main_message,
+        )
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await interaction.edit_original_response(embed=embed, view=view)
 
     async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -9344,6 +9660,27 @@ class SwapSecondView(discord.ui.View):
 # ============================================================
 #  ⭐ УЛУЧШЕНИЕ ЗВЁЗД
 # ============================================================
+
+async def get_star_pity(user_id: int, item_id: str, target_star: int) -> int:
+    async with bot.db.execute(
+        "SELECT failures FROM star_pity "
+        "WHERE user_id = ? AND item_id = ? AND target_star = ?",
+        (user_id, item_id, target_star),
+    ) as c:
+        row = await c.fetchone()
+    return (row[0] if row else 0) or 0
+
+
+async def get_star_chance(user_id: int, item_id: str, target_star: int) -> tuple[float, int, bool]:
+    settings = STAR_UPGRADE.get(target_star, {"chance": 1.0})
+    pity = await get_star_pity(user_id, item_id, target_star)
+    pity_bonus = min(STAR_PITY_MAX, pity * STAR_PITY_BONUS)
+    final_chance = min(1.0, settings["chance"] + pity_bonus)
+    guaranteed = pity >= STAR_HARD_PITY - 1
+    if guaranteed:
+        final_chance = 1.0
+    return final_chance, pity, guaranteed
+
 
 async def open_star_view(interaction: discord.Interaction, author_id: int):
     user_id = interaction.user.id
@@ -9454,13 +9791,23 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
 
     need = settings_star["copies"]
     enough = have >= need
+    final_chance, pity, guaranteed = await get_star_chance(
+        interaction.user.id, item_id, next_star
+    )
+    chance_str = "100% (гарантия)" if guaranteed else f"{int(final_chance * 100)}%"
+    pity_str = (
+        f"\nPity: **{pity}/{STAR_HARD_PITY - 1}** "
+        f"(+{int(min(STAR_PITY_MAX, pity * STAR_PITY_BONUS) * 100)}%)"
+        if pity
+        else ""
+    )
 
     embed = discord.Embed(
         title=f"⭐ Улучшение до {next_star}★",
         description=(
             f"Генератор: {emoji} **{name}** (слот {slot}, {current_stars}★)\n\n"
             f"Нужно копий: **{have}/{need}**\n"
-            f"Шанс успеха: **{int(settings_star['chance'] * 100)}%**\n"
+            f"Шанс успеха: **{chance_str}**{pity_str}\n"
             f"Стоимость: **💎 {settings_star['gems']}**\n"
             f"Новый суммарный бонус: **+{int(STAR_BONUS[next_star] * 100)}%** к доходу.\n\n"
             f"При провале копии сгорают, но звезда **не понижается**."
@@ -9495,6 +9842,9 @@ class StarConfirmView(discord.ui.View):
         settings_star = STAR_UPGRADE[self.next_star]
         cost = settings_star["gems"]
         need = settings_star["copies"]
+        final_chance, pity, guaranteed = await get_star_chance(
+            user_id, self.item_id, self.next_star
+        )
 
         try:
             async with db_transaction():
@@ -9539,13 +9889,26 @@ class StarConfirmView(discord.ui.View):
                         (user_id, s),
                     )
 
-                success = random.random() < settings_star["chance"]
+                success = guaranteed or random.random() < final_chance
                 if success:
                     await bot.db.execute(
                         "UPDATE inventory SET stars = ? "
                         "WHERE user_id = ? AND location = 'profile' AND slot = ?",
                         (self.next_star, user_id, keep_slot),
                     )
+                    await bot.db.execute(
+                        "DELETE FROM star_pity "
+                        "WHERE user_id = ? AND item_id = ? AND target_star = ?",
+                        (user_id, self.item_id, self.next_star),
+                    )
+                else:
+                    await bot.db.execute("""
+                        INSERT INTO star_pity
+                        (user_id, item_id, target_star, failures)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT(user_id, item_id, target_star)
+                        DO UPDATE SET failures = failures + 1
+                    """, (user_id, self.item_id, self.next_star))
         except ValueError as e:
             return await self.fail(interaction, f"❌ {e}")
 
@@ -9624,7 +9987,11 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
             emoji=emoji_obj
         ))
 
-    location_name = "Замка" if source == "profile" else "Хранилища"
+    location_name = {
+        "profile": "Замка",
+        "storage": "Хранилища",
+        "temp": "Временного хранилища",
+    }.get(source, "Хранилища")
     embed = discord.Embed(
         title=f"🔀 Перемещение из {location_name}",
         description=f"Страница {page + 1}/{total_pages}\nВыбери предмет для перемещения:",
@@ -9633,18 +10000,27 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
     
     await interaction.followup.send(
         embed=embed,
-        view=MoveView(author_id, source, options, page, total_pages),
+        view=MoveView(author_id, source, options, page, total_pages, interaction.message),
         ephemeral=True
     )
 
 
 class MoveView(discord.ui.View):
-    def __init__(self, author_id: int, source: str, options: list[discord.SelectOption], page: int, total_pages: int):
+    def __init__(
+        self,
+        author_id: int,
+        source: str,
+        options: list[discord.SelectOption],
+        page: int,
+        total_pages: int,
+        main_message=None,
+    ):
         super().__init__(timeout=180)
         self.author_id = author_id
         self.source = source
         self.page = page
         self.total_pages = total_pages
+        self.main_message = main_message
 
         self.add_item(make_select("Выбери предмет", options, self.item_select, row=0))
 
@@ -9679,7 +10055,12 @@ class MoveView(discord.ui.View):
 
     async def do_move(self, interaction: discord.Interaction, slot: int, item_id: str, stars: int):
         user_id = interaction.user.id
-        target = "storage" if self.source == "profile" else "profile"
+        if self.source == "profile":
+            target = "storage"
+        elif self.source == "storage":
+            target = "profile"
+        else:
+            target = "storage"
         
         async with bot.db.execute(
             "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
@@ -9709,6 +10090,7 @@ class MoveView(discord.ui.View):
         await update_quest_progress(user_id, "move_5")
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
+        await sort_inventory(user_id, "temp")
 
         target_name = "Хранилище" if target == "storage" else "Замок"
         embed = discord.Embed(
@@ -9721,14 +10103,18 @@ class MoveView(discord.ui.View):
         if self.source == "profile":
             main_embed = await build_profile_embed(interaction)
             main_view = ProfileView(self.author_id)
+        elif self.source == "temp":
+            main_embed = await build_temp_storage_embed(interaction)
+            main_view = TempStorageView(self.author_id)
         else:
             main_embed = await build_storage_embed(interaction)
             main_view = StorageView(self.author_id)
-            
-        try:
-            await interaction.message.edit(embed=main_embed, view=main_view)
-        except discord.HTTPException:
-            pass
+
+        if self.main_message:
+            try:
+                await self.main_message.edit(embed=main_embed, view=main_view)
+            except discord.HTTPException:
+                pass
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -9751,7 +10137,7 @@ class MoveView(discord.ui.View):
             short_name = name[:45] + "..." if len(name) > 45 else name
             options.append(discord.SelectOption(label=f"{short_name}{stars_str}", value=f"{slot}:{item_id}:{stars}", emoji=emoji_obj))
             
-        await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages))
+        await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages, self.main_message))
 
     async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -9774,7 +10160,7 @@ class MoveView(discord.ui.View):
             short_name = name[:45] + "..." if len(name) > 45 else name
             options.append(discord.SelectOption(label=f"{short_name}{stars_str}", value=f"{slot}:{item_id}:{stars}", emoji=emoji_obj))
             
-        await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages))
+        await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages, self.main_message))
 
     async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -9784,6 +10170,36 @@ class MoveView(discord.ui.View):
 # ============================================================
 #  ⚗️ СИНТЕЗ (с пагинацией)
 # ============================================================
+
+async def get_craft_pity(user_id: int, item_id: str) -> int:
+    async with bot.db.execute(
+        "SELECT failures FROM craft_pity WHERE user_id = ? AND item_id = ?",
+        (user_id, item_id),
+    ) as c:
+        row = await c.fetchone()
+    return (row[0] if row else 0) or 0
+
+
+async def get_craft_chance(user_id: int, item_id: str, use_cat: bool) -> tuple[float, int, bool]:
+    settings = CRAFT_SETTINGS.get(item_id, {"chance": 1.0, "gems": 0})
+    base_chance = settings["chance"]
+    pet_chance = await get_pet_bonus(user_id, "craft_chance")
+    title_chance = await get_title_bonus(user_id, "craft_chance")
+    pity = await get_craft_pity(user_id, item_id)
+    pity_bonus = min(CRAFT_PITY_MAX, pity * CRAFT_PITY_BONUS)
+    final_chance = min(
+        1.0,
+        base_chance
+        + (CATALYST_BONUS if use_cat else 0)
+        + pet_chance
+        + title_chance
+        + pity_bonus,
+    )
+    guaranteed = pity >= CRAFT_HARD_PITY - 1
+    if guaranteed:
+        final_chance = 1.0
+    return final_chance, pity, guaranteed
+
 
 async def open_craft_view(interaction: discord.Interaction, author_id: int, page: int = 0):
     user_id = interaction.user.id
@@ -9869,11 +10285,22 @@ class CraftSelectView(discord.ui.View):
         async with bot.db.execute("SELECT catalysts FROM players WHERE user_id = ?", (interaction.user.id,)) as c:
             cats = (await c.fetchone())[0]
 
+        final_chance, pity, guaranteed = await get_craft_chance(
+            interaction.user.id, item_id, False
+        )
+        chance_str = "100% (гарантия)" if guaranteed else f"{int(final_chance * 100)}%"
+        pity_str = (
+            f"\nPity: **{pity}/{CRAFT_HARD_PITY - 1}** "
+            f"(+{int(min(CRAFT_PITY_MAX, pity * CRAFT_PITY_BONUS) * 100)}%)"
+            if pity
+            else ""
+        )
+
         embed = discord.Embed(
             title="⚗️ Синтез",
             description=(
                 f"Предмет: {src[1]} **{src[0]}**\n"
-                f"Шанс успеха: {int(settings['chance'] * 100)}%\n"
+                f"Шанс успеха: **{chance_str}**{pity_str}\n"
                 f"Стоимость: 💎 {settings['gems']}\n\n"
                 f"Использовать катализатор (+{int(CATALYST_BONUS * 100)}%)?\n"
                 f"У тебя катализаторов: **{cats}**"
@@ -9990,13 +10417,10 @@ class CraftConfirmView(discord.ui.View):
                         raise ValueError("Нет катализаторов.")
                     catalyst_used = 1
 
-                pet_chance = await get_pet_bonus(user_id, "craft_chance")
-                title_chance = await get_title_bonus(user_id, "craft_chance")
-                final_chance = min(
-                    1.0,
-                    base_chance + (CATALYST_BONUS if use_cat else 0) + pet_chance + title_chance,
+                final_chance, pity, guaranteed = await get_craft_chance(
+                    user_id, item_id, use_cat
                 )
-                success = random.random() < final_chance
+                success = guaranteed or random.random() < final_chance
 
                 await bot.db.execute(
                     "INSERT INTO craft_log "
@@ -10023,6 +10447,18 @@ class CraftConfirmView(discord.ui.View):
                     "total_successes = total_successes + ? WHERE user_id = ?",
                     (int(success), user_id),
                 )
+                if success:
+                    await bot.db.execute(
+                        "DELETE FROM craft_pity WHERE user_id = ? AND item_id = ?",
+                        (user_id, item_id),
+                    )
+                else:
+                    await bot.db.execute("""
+                        INSERT INTO craft_pity (user_id, item_id, failures)
+                        VALUES (?, ?, 1)
+                        ON CONFLICT(user_id, item_id)
+                        DO UPDATE SET failures = failures + 1
+                    """, (user_id, item_id))
         except ValueError as e:
             return await self.fail(interaction, f"❌ {e}")
 
@@ -10044,9 +10480,14 @@ class CraftConfirmView(discord.ui.View):
 
         unlocked = await check_achievements(user_id)
 
-        chance_str = f"🎲 {int(final_chance * 100)}%"
-        if use_cat:
-            chance_str += f" (база {int(base_chance * 100)}% + 🧪)"
+        if guaranteed:
+            chance_str = "🎲 100% (гарантия pity)"
+        else:
+            chance_str = f"🎲 {int(final_chance * 100)}%"
+            if pity:
+                chance_str += f" (pity {pity}/{CRAFT_HARD_PITY - 1})"
+            if use_cat:
+                chance_str += f" (база {int(base_chance * 100)}% + 🧪)"
         gem_str = f" | 💎 {gem_cost}" if gem_cost else ""
         if success:
             msg = (
@@ -11013,7 +11454,7 @@ class BuyItemQuantityView(discord.ui.View):
 
         # 2. Пытаемся выдать предметы
         try:
-            to_profile, to_storage = await place_items(user_id, self.item_id, qty)
+            to_profile, to_storage, to_temp = await place_items(user_id, self.item_id, qty)
         except ValueError as e:
             # Если не хватило места, откатываем списание
             await bot.db.rollback()
@@ -11033,8 +11474,11 @@ class BuyItemQuantityView(discord.ui.View):
         emoji = default_emoji or "⚙️" 
         
         msg = f"✅ Куплено {emoji} **{name}** x{qty} за {coin} {format_price(total_cost)}."
-        if to_storage > 0:
-            msg += f"\n📦 {to_profile} в замок, {to_storage} в хранилище (в замке не хватило места)."
+        if to_storage > 0 or to_temp > 0:
+            msg += (
+                f"\n📦 {to_profile} в замок, {to_storage} в хранилище, "
+                f"{to_temp} во временное хранилище."
+            )
         if unlocked:
             msg += "\n🏆 " + ", ".join(f"{e} {n}" for e, n, _ in unlocked)
             
@@ -11588,7 +12032,8 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
 
                 for table in (
                     "inventory", "player_achievements", "player_upgrades",
-                    "craft_log", "user_pets_v2", "autocollectors",
+                    "craft_log", "craft_pity", "star_pity",
+                    "user_pets_v2", "autocollectors",
                     "advent_progress", "advent_state", "bank_deposits",
                     "bank_history", "user_notifications", "player_quests",
                     "user_cosmetics", "tax_log", "raid_cooldowns",
@@ -13510,6 +13955,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
 
             for table in (
                 "inventory", "player_achievements", "player_upgrades", "craft_log",
+                "craft_pity", "star_pity",
                 "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
                 "bank_deposits", "bank_history", "user_notifications",
                 "player_quests", "user_cosmetics", "tax_log", "raid_cooldowns",
@@ -13569,13 +14015,16 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
 
         if loc == "profile":
             try:
-                to_profile, to_storage = await place_items(uid, item_id, qty)
+                to_profile, to_storage, to_temp = await place_items(uid, item_id, qty)
             except ValueError as e:
                 await interaction.followup.send(f"❌ {e}", ephemeral=True)
                 return
             msg = f"✅ Выдано {qty}×{emoji} {name} <@{uid}>."
-            if to_storage > 0:
-                msg += f"\n📦 {to_profile} в замок, {to_storage} в хранилище."
+            if to_storage > 0 or to_temp > 0:
+                msg += (
+                    f"\n📦 {to_profile} в замок, {to_storage} в хранилище, "
+                    f"{to_temp} во временное хранилище."
+                )
         else:
             storage_size = await get_storage_size(uid)
             async with bot.db.execute(
@@ -14288,7 +14737,10 @@ class SettingsEmojisView(discord.ui.View):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
-        options = [discord.SelectOption(label=name, value=key, emoji=default) for key, (name, default) in EMOJI_KEYS.items()]
+        options = [
+            discord.SelectOption(label=name, value=key, emoji=default)
+            for key, (name, default) in list(EMOJI_KEYS.items())[:25]
+        ]
         self.add_item(make_select("Что изменить?", options, self.emoji_select, row=0))
 
         # Кнопка "Эмодзи по звёздам"
