@@ -2147,8 +2147,8 @@ def format_price(price: int) -> str:
 def replace_emojis_in_text(text: str) -> str:
     if not isinstance(text, str):
         return text
-        
-    # Если эмодзи не в белом списке, функция get_emoji вернет стандартный Unicode
+    
+    # Словарь замен: ищем стандартный смайлик и меняем на кастомный
     replacements = {
         "🪙": get_emoji("_coin"),
         "💎": get_emoji("_gem"),
@@ -2162,9 +2162,14 @@ def replace_emojis_in_text(text: str) -> str:
         "🎨": get_emoji("_customization"),
         "🤖": get_emoji("_autocollector"),
         "🎄": get_emoji("_advent"),
+        # --- ДОБАВЛЕННЫЕ СМАЙЛИКИ ДЛЯ ПРИВЕТСТВИЯ ---
+        "⚗️": get_emoji("_synthesis"),  # Синтез
+        "⭐": get_emoji("_stars"),      # Звезды
+        "⚔️": get_emoji("_clan"),       # Социум (или _raid/_duel, если хотите отдельные)
+        "💰": get_emoji("_coin"),       # Экономика (или _bank)
+        "👑": get_emoji("_title"),        # Корона (или _title)
     }
     for old, new in replacements.items():
-        # Приводим к строке, так как replace требует строку
         text = text.replace(old, str(new))
     return text
 
@@ -12069,8 +12074,8 @@ async def main_menu(interaction: discord.Interaction):
         embed = discord.Embed(
             title=f"{welcome_emoji} Добро пожаловать в Gen Mania!",
             description=(
-                "Приветствую тебя, будущий повелитель замка! 👑\n\n"
-                "Этот бот — игра в жанре **инкрементального кликера**. Твоя цель — строить генераторы, "
+                "Приветствую тебя, искатель приключений! 👑\n\n"
+                "Этот бот — игра в жанре **инкрементального кликера**. Твоя цель — покупать генераторы,"
                 "синтезировать их в более мощные, собирать пассивный доход и сражаться с другими игроками.\n\n"
                 "**С чего начать:**\n"
                 "🛒 **Магазин** — купи свой первый генератор.\n"
