@@ -7610,15 +7610,18 @@ class StarSelectView(discord.ui.View):
     async def item_select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
         
-        # --- БЕЗОПАСНЫЙ ПАРСИНГ (спасает от старых сообщений) ---
+        # Парсинг для звезд: "slot:item_id:stars"
         parts = value.split(":")
         slot = int(parts[0])
         item_id = parts[1]
         stars = int(parts[2]) if len(parts) > 2 else 0
         
-        await interaction.response.defer()
-        await self.do_move(interaction, slot, item_id, stars)
+        next_star = stars + 1
+        if next_star > 5:
+            await interaction.response.defer()
+            await interaction.followup.send("❌ Уже 5★.", ephemeral=True)
             return
+            
         await interaction.response.defer()
         await show_star_confirm(interaction, slot, item_id, stars, next_star, self.author_id)
 
