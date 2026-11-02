@@ -15877,17 +15877,26 @@ async def main_menu(interaction: discord.Interaction):
 
 @bot.tree.command(name="админ_панель", description="Панель администратора")
 async def admin_panel(interaction: discord.Interaction):
+    # В ЛС interaction.user — User без guild_permissions. Панель только для сервера.
+    if interaction.guild is None:
+        return await interaction.response.send_message(
+            "❌ Команда доступна только на сервере.",
+            ephemeral=True,
+        )
+
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
     admin_role_id = settings["admin_role_id"]
 
-    is_owner = interaction.guild and interaction.guild.owner_id == interaction.user.id
-    is_discord_admin = interaction.user.guild_permissions.administrator
-    is_admin_role = False
-    if admin_role_id and interaction.guild:
-        member = interaction.guild.get_member(interaction.user.id)
-        if member:
-            is_admin_role = any(r.id == admin_role_id for r in member.roles)
+    member = interaction.guild.get_member(interaction.user.id) or interaction.user
+    permissions = getattr(member, "guild_permissions", None)
+
+    is_owner = interaction.guild.owner_id == interaction.user.id
+    is_discord_admin = bool(permissions and permissions.administrator)
+    is_admin_role = bool(
+        admin_role_id
+        and any(r.id == admin_role_id for r in getattr(member, "roles", ()))
+    )
 
     if not (is_owner or is_discord_admin or is_admin_role):
         return await interaction.response.send_message(
