@@ -1268,20 +1268,20 @@ class CastleBot(commands.Bot):
         await self.db.commit()
 
         achievements_data = [
-            ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  get_emoji("_ach_first")),
-            ("star_1",        "Первая звезда",   "Улучши любой генератор до 1★",       10,  get_emoji("_ach_star1")),
-            ("craft_10",      "Алхимик",         "Сделай 10 синтезов",                  15,  get_emoji("_ach_chemist")),
-            ("star_3",        "Звёздный магнат", "Имей генератор с 3★",                 25,  get_emoji("_ach_starcol")),
-            ("craft_50",      "Мастер-алхимик",  "Сделай 50 синтезов",                  50,  get_emoji("_ach_master")),
-            ("star_3x3",      "Звёздный коллекционер", "Имей 3 генератора с 3★",       50,  get_emoji("_ach_starcol")),
-            ("success_10",    "Удачливый",       "Успешно синтезируй 10 раз",           20,  get_emoji("_ach_lucky")),
-            ("success_50",    "Любимец фортуны", "Успешно синтезируй 50 раз",           75,  get_emoji("_ach_fortune")),
-            ("star_5",        "Легенда",         "Имей генератор с 5★",                80,  get_emoji("_ach_legend")),  
-            ("fail_5",        "Не везёт",        "Провали 5 синтезов",                  10,  get_emoji("_ach_unlucky")),
-            ("first_gem_gen", "Гемовый магнат",  "Получи свой первый гемовый генератор",20,  get_emoji("_ach_gem")),  
-            ("rich_1000",     "Богач",           "Накопи 1000 монет",                   10,  get_emoji("_ach_rich")),
-            ("rich_10000",    "Миллионер",       "Накопи 10000 монет",                  50,  get_emoji("_ach_million")),
-            ("catalyst_10",   "Химик",           "Используй 10 катализаторов",          25,  get_emoji("_ach_chemist")),
+            ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  str(get_emoji("_ach_first"))),
+            ("star_1",        "Первая звезда",   "Улучши любой генератор до 1★",       10,  str(get_emoji("_ach_star1"))),
+            ("craft_10",      "Алхимик",         "Сделай 10 синтезов",                  15,  str(get_emoji("_ach_chemist"))),
+            ("star_3",        "Звёздный магнат", "Имей генератор с 3★",                 25,  str(get_emoji("_ach_starcol"))),
+            ("craft_50",      "Мастер-алхимик",  "Сделай 50 синтезов",                  50,  str(get_emoji("_ach_master"))),
+            ("star_3x3",      "Звёздный коллекционер", "Имей 3 генератора с 3★",       50,  str(get_emoji("_ach_starcol"))),
+            ("success_10",    "Удачливый",       "Успешно синтезируй 10 раз",           20,  str(get_emoji("_ach_lucky"))),
+            ("success_50",    "Любимец фортуны", "Успешно синтезируй 50 раз",           75,  str(get_emoji("_ach_fortune"))),
+            ("star_5",        "Легенда",         "Имей генератор с 5★",                80,  str(get_emoji("_ach_legend"))),
+            ("fail_5",        "Не везёт",        "Провали 5 синтезов",                  10,  str(get_emoji("_ach_unlucky"))),
+            ("first_gem_gen", "Гемовый магнат",  "Получи свой первый гемовый генератор",20,  str(get_emoji("_ach_gem"))),
+            ("rich_1000",     "Богач",           "Накопи 1000 монет",                   10,  str(get_emoji("_ach_rich"))),
+            ("rich_10000",    "Миллионер",       "Накопи 10000 монет",                  50,  str(get_emoji("_ach_million"))),
+            ("catalyst_10",   "Химик",           "Используй 10 катализаторов",          25,  str(get_emoji("_ach_chemist"))),
         ]
         for a in achievements_data:
             await self.db.execute("INSERT OR IGNORE INTO achievements VALUES (?, ?, ?, ?, ?)", a)
