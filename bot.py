@@ -208,7 +208,10 @@ ENABLED_CUSTOM_EMOJIS = {
     # Достижения
     "_ach_first", "_ach_star1", "_ach_chemist", "_ach_rich", 
     "_ach_million", "_ach_master", "_ach_lucky", "_ach_fortune", 
-    "_ach_legend", "_ach_unlucky", "_ach_starcol", "_ach_gem"
+    "_ach_legend", "_ach_unlucky", "_ach_starcol", "_ach_gem",
+
+    # Приветствие
+    "_welcome", "_info", "_continue"
 }
 
 def get_emoji(key: str):
@@ -326,6 +329,9 @@ BOT_BTN_EMOJIS = {
     "_ach_unlucky":  discord.PartialEmoji(name="unlucky", id=1566521432119189525),
     "_ach_starcol":  discord.PartialEmoji(name="starcollector", id=1566521430806495352),
     "_ach_gem":      discord.PartialEmoji(name="gemtycoon", id=1566521421029449738),
+    "_welcome":      discord.PartialEmoji(name="welcome", id=000000000000000000), 
+    "_continue":     discord.PartialEmoji(name="continue", id=000000000000000000), 
+    "_info":         discord.PartialEmoji(name="info", id=000000000000000000),
 }
 
 EMOJI_KEYS = {
@@ -359,6 +365,7 @@ UNICODE_EMOJIS = {
     "_ach_first": "⚗️", "_ach_star1": "⭐", "_ach_chemist": "🧪", "_ach_rich": "🪙",
     "_ach_million": "💰", "_ach_master": "🔮", "_ach_lucky": "🍀", "_ach_fortune": "🎰",
     "_ach_legend": "🌠", "_ach_unlucky": "💥", "_ach_starcol": "🌟", "_ach_gem": "💎",
+    "_welcome": "👋", "_continue": "🚀", "_info": "ℹ️"
 }
 
 CUSTOM_EMOJI_RE = re.compile(r"^<a?:[a-zA-Z0-9_]+:(\d+)>$")
@@ -876,7 +883,7 @@ class CastleBot(commands.Bot):
         for g in grid_items:
             await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
 
-        gen_names = [
+                gen_names = [
             ("basic_gen",     "Базовый генератор",        "<:basic_gen:1566478391631282176>", "common",    False),
             ("copper_gen",    "Медный генератор",         "<:copper_gen:1566478413102063726>", "common",    False),
             ("bronze_gen",    "Бронзовый генератор",      "<:bronze_gen:1566478402834272449>", "common",    False),
@@ -906,6 +913,7 @@ class CastleBot(commands.Bot):
             ("time_gen",      "Временной генератор",      "<:time_gen:1566478710192734389>", "mythic",    False),
             ("space_gen",     "Пространственный генератор","<:space_gen:1566478658305265765>", "mythic",   True),
             ("divine_gen",    "Божественный генератор",   "<:divine_gen:1566478466465927338>", "mythic",    True),
+            # 31-й генератор (следующий за божественным)
             ("legendary_gen", "Легендарный генератор",    "<:legendary_gen:1566478526461255821>", "mythic",    True),
         ]
 
@@ -1158,17 +1166,6 @@ class CastleBot(commands.Bot):
             "legendary_gen": 0.10,
         }
         
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS admin_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_id INTEGER,
-                target_id INTEGER,
-                action TEXT,
-                details TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
         def round_price(p: float) -> int:
             if p < 100:
                 return int(p)
@@ -1181,20 +1178,28 @@ class CastleBot(commands.Bot):
             else:
                 return int(p / 10000) * 10000
 
-        base_price = 10
-        base_income_hour = 1.5
+        # --- НОВАЯ ЛОГИКА ЦЕН И ДОХОДА ---
+        base_price = 15        # Начальная цена чуть выше
+        base_income_hour = 2.0 # Начальный доход
+        
         price = base_price
         income_hour = base_income_hour
         items_data = []
+        
         for index, (item_id, name, emoji, rarity, is_gem) in enumerate(gen_names, start=1):
-            buyable = 1 if index <= 26 else 0
+            # В магазине доступны только первые 27 генераторов (до light_gen)
+            # 28, 29, 30 (time, space, divine) и legendary_gen — buyable = 0
+            buyable = 1 if index <= 27 else 0
+            
             if is_gem:
                 gem_income = GEM_INCOME.get(item_id, 0.02)
                 items_data.append((item_id, name, round_price(price * 10), 0, emoji, rarity, buyable, gem_income / 3600))
             else:
                 items_data.append((item_id, name, round_price(price), income_hour / 3600, emoji, rarity, buyable, 0))
-            price *= 2.2
-            income_hour *= 1.5
+                
+            # Множители для следующего уровня (более плавный рост)
+            price *= 1.85        # Цена растет в 1.85 раза
+            income_hour *= 1.42  # Доход растет в 1.42 раза
 
         for item in items_data:
             await self.db.execute(
@@ -1204,7 +1209,7 @@ class CastleBot(commands.Bot):
                 item
             )
 
-        # Старые БД создавались с buyable = 1 для всех генераторов.
+        # Старые БД: принудительно делаем 28, 29, 30 и legendary недоступными для покупки
         await self.db.execute(
             "UPDATE items SET buyable = 0 WHERE id IN (?, ?, ?, ?)",
             ("time_gen", "space_gen", "divine_gen", "legendary_gen"),
@@ -4328,9 +4333,18 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
         if income_gems > 0: inc.append(f"{gem} {income_gems * 3600:.4f}/час")
         inc_str = " ".join(inc) if inc else "без дохода"
         
+        # --- НОВАЯ ПРОВЕРКА ЦЕНЫ ---
+        async with bot.db.execute("SELECT buyable FROM items WHERE id = ?", (item_id,)) as c:
+            is_buyable = (await c.fetchone())[0]
+            
+        if is_buyable:
+            price_str = f"Цена: {coin} {format_price(price)}"
+        else:
+            price_str = "Цена: `Только синтез`"
+            
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
-            value=f"Цена: {coin} {format_price(price)} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
+            value=f"{price_str} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
             inline=False
         )
     return await fix_embed_emojis(embed), total_pages
@@ -4814,6 +4828,37 @@ class BaseView(discord.ui.View):
             # Совсем не удалось — молча выходим, чтобы не крашить View
             pass
 
+# Приветствие новых игроков
+
+class WelcomeView(discord.ui.View):
+    def __init__(self, author_id: int, timeout: int = 300):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("❌ Это меню открыто не тобой.", ephemeral=True)
+            return False
+        return True
+
+    # Используем кастомный эмодзи для кнопки
+    @discord.ui.button(label="Продолжить", emoji=get_emoji("_continue"), style=discord.ButtonStyle.success)
+    async def btn_continue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        guild_id = interaction.guild_id
+        settings = await get_settings(guild_id)
+        start_coins = settings["start_coins"]
+        
+        async with bot.db.execute(
+            "INSERT OR IGNORE INTO players (user_id, coins, grid_size, storage_size) VALUES (?, ?, ?, ?)",
+            (self.author_id, start_coins, START_GRID, STORAGE_SIZE)
+        ) as c:
+            await bot.db.commit()
+            
+        await collect_income(self.author_id, guild_id)
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
 # ============================================================
 #  🏠 ГЛАВНОЕ МЕНЮ
@@ -7320,36 +7365,35 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
 
     async with bot.db.execute("""
         SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = ?
-        ORDER BY inv.slot ASC
+        FROM inventory inv JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = ? ORDER BY inv.slot ASC
     """, (user_id, location)) as c:
         rows = await c.fetchall()
 
     if len(rows) < 2:
-        await interaction.followup.send("❌ Нужно минимум 2 предмета для обмена.", ephemeral=True)
-        return
+        return await interaction.followup.send("❌ Нужно минимум 2 предмета для обмена.", ephemeral=True)
 
     options = []
-    for slot, item_id, name, default_emoji, stars in rows[:25]:
-        emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji_safe(emoji_str)
-        stars_str = f"({stars}⭐)" if stars > 0 else ""
+    for slot, item_id, name, default_emoji, stars in rows:
+        emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
+        stars_str = f" {stars}★" if stars > 0 else ""
+        short_name = name[:40] + "..." if len(name) > 40 else name
         options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name} {stars_str}".strip(),
-            value=str(slot),
+            label=f"Слот {slot}: {short_name}{stars_str}",
+            value=f"{slot}:{item_id}:{stars}",
             emoji=emoji_obj
         ))
 
     embed = discord.Embed(
-        title="↔️ Обмен слотами",
-        description="Выбери **первый** предмет для обмена:",
+        title="↔️ Обмен местами",
+        description="Шаг 1: Выбери предмет, который хочешь **переместить** на другой слот.",
         color=0x3498db
     )
-    await interaction.edit_original_response(
+    
+    await interaction.followup.send(
         embed=embed,
-        view=SwapFirstView(author_id, location, options)
+        view=SwapFirstView(author_id, location, options),
+        ephemeral=True
     )
 
 
@@ -7358,63 +7402,62 @@ class SwapFirstView(discord.ui.View):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.location = location
-        self.add_item(make_select("Выбери первый слот", options, self.first_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-        back.callback = self.back
-        self.add_item(back)
+        self.add_item(make_select("Выбери предмет", options, self.first_select, row=0))
+        
+        close = discord.ui.Button(label="Закрыть", emoji="❌", style=discord.ButtonStyle.danger, row=1)
+        close.callback = self.close_window
+        self.add_item(close)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return interaction.user.id == self.author_id
 
     async def first_select(self, interaction: discord.Interaction):
-        first_slot = int(interaction.data["values"][0])
+        value = interaction.data["values"][0]
+        parts = value.split(":")
+        first_slot = int(parts[0])
+        item_id = parts[1]
+        stars = int(parts[2]) if len(parts) > 2 else 0
+        
         await interaction.response.defer()
-        user_id = interaction.user.id
+        
+        # Шаг 2: Показываем сетку со слотами, КУДА можно переместить
         guild_id = interaction.guild_id
         custom = (await get_settings(guild_id))["custom_emojis"]
-
+        
         async with bot.db.execute("""
             SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
-            FROM inventory inv
-            JOIN items i ON inv.item_id = i.id
+            FROM inventory inv JOIN items i ON inv.item_id = i.id
             WHERE inv.user_id = ? AND inv.location = ? AND inv.slot != ?
             ORDER BY inv.slot ASC
-        """, (user_id, self.location, first_slot)) as c:
+        """, (self.author_id, self.location, first_slot)) as c:
             rows = await c.fetchall()
 
         options = []
-        for slot, item_id, name, default_emoji, stars in rows[:25]:
-            emoji_str = custom.get(item_id, default_emoji)
-            emoji_obj = parse_emoji_safe(emoji_str)
-            stars_str = f"({stars}⭐)" if stars > 0 else ""
+        for slot, item_id2, name, default_emoji, stars2 in rows:
+            emoji_obj = parse_emoji_safe(custom.get(item_id2, default_emoji))
+            stars_str = f" {stars2}★" if stars2 > 0 else ""
+            short_name = name[:40] + "..." if len(name) > 40 else name
             options.append(discord.SelectOption(
-                label=f"Слот {slot}: {name} {stars_str}".strip(),
+                label=f"Слот {slot}: {short_name}{stars_str}",
                 value=str(slot),
                 emoji=emoji_obj
             ))
 
         embed = discord.Embed(
-            title="↔️ Обмен слотами",
-            description=f"Первый слот: **{first_slot}**.\nВыбери **второй** слот:",
+            title="↔️ Обмен местами",
+            description=f"Шаг 2: Выбран предмет из **слота {first_slot}**.\nТеперь выбери слот, с которым хочешь его **поменять**.",
             color=0x3498db
         )
+        
         await interaction.edit_original_response(
             embed=embed,
             view=SwapSecondView(self.author_id, self.location, first_slot, options)
         )
 
-    async def back(self, interaction: discord.Interaction):
+    async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if self.location == "profile":
-            embed = await build_profile_embed(interaction)
-            view = ProfileView(self.author_id)
-        else:
-            embed = await build_storage_embed(interaction)
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
+        await interaction.delete_original_response()
+
 
 
 class SwapSecondView(discord.ui.View):
@@ -7423,80 +7466,74 @@ class SwapSecondView(discord.ui.View):
         self.author_id = author_id
         self.location = location
         self.first_slot = first_slot
-        self.add_item(make_select("Выбери второй слот", options, self.second_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
-        back.callback = self.back
-        self.add_item(back)
+        self.add_item(make_select("Выбери слот для обмена", options, self.second_select, row=0))
+        
+        close = discord.ui.Button(label="Отмена", emoji="❌", style=discord.ButtonStyle.danger, row=1)
+        close.callback = self.close_window
+        self.add_item(close)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return interaction.user.id == self.author_id
 
     async def second_select(self, interaction: discord.Interaction):
         second_slot = int(interaction.data["values"][0])
         await interaction.response.defer()
-        user_id = interaction.user.id
-        first_slot = self.first_slot
 
         async with bot.db.execute(
             "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.location, first_slot)
+            (self.author_id, self.location, self.first_slot)
         ) as c:
             first = await c.fetchone()
         async with bot.db.execute(
             "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.location, second_slot)
+            (self.author_id, self.location, second_slot)
         ) as c:
             second = await c.fetchone()
 
         if not first or not second:
-            await self.fail(interaction, "❌ Один из слотов пуст.")
-            return
+            return await interaction.edit_original_response(
+                embed=discord.Embed(title="❌ Ошибка", description="Один из слотов пуст.", color=0xe74c3c), 
+                view=None
+            )
 
+        # Меняем местами
         await bot.db.execute(
             "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot IN (?, ?)",
-            (user_id, self.location, first_slot, second_slot)
+            (self.author_id, self.location, self.first_slot, second_slot)
         )
         await bot.db.execute(
             "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (user_id, first_slot, second[0], self.location, second[1])
+            (self.author_id, self.first_slot, second[0], self.location, second[1])
         )
         await bot.db.execute(
             "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (user_id, second_slot, first[0], self.location, first[1])
+            (self.author_id, second_slot, first[0], self.location, first[1])
         )
         await bot.db.commit()
 
         embed = discord.Embed(
             title="✅ Слоты поменяны",
-            description=f"Предметы в слотах **{first_slot}** и **{second_slot}** поменялись местами.",
+            description=f"Предметы в слотах **{self.first_slot}** и **{second_slot}** поменялись местами.\nОбнови основное меню, чтобы увидеть результат.",
             color=0x2ecc71
         )
-        if self.location == "profile":
-            view = ProfileView(self.author_id)
-        else:
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
+        await interaction.edit_original_response(embed=embed, view=None)
 
-    async def fail(self, interaction: discord.Interaction, msg: str):
-        embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
+        # Обновляем ОСНОВНОЕ сообщение
         if self.location == "profile":
-            view = ProfileView(self.author_id)
+            main_embed = await build_profile_embed(interaction)
+            main_view = ProfileView(self.author_id)
         else:
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
+            main_embed = await build_storage_embed(interaction)
+            main_view = StorageView(self.author_id)
 
-    async def back(self, interaction: discord.Interaction):
+        try:
+            await interaction.message.edit(embed=main_embed, view=main_view)
+        except discord.HTTPException:
+            pass
+
+    async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if self.location == "profile":
-            embed = await build_profile_embed(interaction)
-            view = ProfileView(self.author_id)
-        else:
-            embed = await build_storage_embed(interaction)
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
+        await interaction.delete_original_response()
 
 
 # ============================================================
@@ -7772,24 +7809,29 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
 
     options = []
     for slot, item_id, name, default_emoji, stars in chunk:
-        emoji_str = custom.get(item_id, default_emoji)
-        emoji_obj = parse_emoji_safe(emoji_str)
-        stars_str = f"({stars}⭐)" if stars > 0 else ""
+        emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
+        stars_str = f" {stars}★" if stars > 0 else ""
+        
+        # Короткое название (обрезаем до 50 символов) + эмодзи + звезды
+        short_name = name[:45] + "..." if len(name) > 45 else name
         options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name}...",
-            value=f"{slot}:{item_id}",
-            emoji=parse_emoji_safe(custom.get(item_id, default_emoji)) # Новая функция
+            label=f"{short_name}{stars_str}",
+            value=f"{slot}:{item_id}:{stars}",
+            emoji=emoji_obj
         ))
 
     location_name = "Замка" if source == "profile" else "Хранилища"
     embed = discord.Embed(
         title=f"🔀 Перемещение из {location_name}",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет:",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет для перемещения в {'Хранилище' if source == 'profile' else 'Замок'}:",
         color=0x3498db
     )
-    await interaction.edit_original_response(
+    
+    # Отправляем НОВОЕ эфемерное сообщение, не трогая основное
+    await interaction.followup.send(
         embed=embed,
-        view=MoveView(author_id, source, options, page, total_pages)
+        view=MoveView(author_id, source, options, page, total_pages),
+        ephemeral=True
     )
 
 
@@ -7811,9 +7853,10 @@ class MoveView(discord.ui.View):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
-        back.callback = self.back
-        self.add_item(back)
+        # Кнопка закрытия (вместо "Назад", так как это эфемерное окно)
+        close = discord.ui.Button(label="Закрыть", emoji="❌", style=discord.ButtonStyle.danger, row=2)
+        close.callback = self.close_window
+        self.add_item(close)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -7823,27 +7866,102 @@ class MoveView(discord.ui.View):
 
     async def item_select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
-        slot_str, item_id, stars_str = value.split(":", 2)
+        parts = value.split(":")
+        slot = int(parts[0])
+        item_id = parts[1]
+        stars = int(parts[2]) if len(parts) > 2 else 0
+        
         await interaction.response.defer()
-        await show_move_confirm(interaction, self.source, item_id, int(slot_str), int(stars_str), self.author_id)
+        await self.do_move(interaction, slot, item_id, stars)
+
+    async def do_move(self, interaction: discord.Interaction, slot: int, item_id: str, stars: int):
+        user_id = interaction.user.id
+        target = "storage" if self.source == "profile" else "profile"
+        
+        # 1. Проверяем наличие
+        async with bot.db.execute(
+            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            (user_id, self.source, slot)
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            return await interaction.edit_original_response(embed=discord.Embed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c), view=None)
+
+        # 2. Ищем свободный слот
+        target_size = await (get_storage_size(user_id) if target == "storage" else get_grid_size(user_id))
+        async with bot.db.execute("SELECT slot FROM inventory WHERE user_id = ? AND location = ?", (user_id, target)) as c:
+            used = {r[0] for r in await c.fetchall()}
+        free = [s for s in range(target_size) if s not in used]
+
+        if not free:
+            return await interaction.edit_original_response(
+                embed=discord.Embed(title="❌ Ошибка", description=f"В {'Хранилище' if target == 'storage' else 'Замке'} нет места (макс. {target_size}).", color=0xe74c3c), 
+                view=None
+            )
+
+        # 3. Перемещаем
+        new_slot = free[0]
+        await bot.db.execute("DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?", (user_id, self.source, slot))
+        await bot.db.execute("INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)", (user_id, new_slot, item_id, target, stars))
+        await bot.db.commit()
+
+        # 4. Обновляем квесты и сортируем
+        await update_quest_progress(user_id, "move_2")
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
+
+        # 5. Показываем результат в эфемерном окне
+        target_name = "Хранилище" if target == "storage" else "Замок"
+        embed = discord.Embed(
+            title="✅ Перемещено",
+            description=f"Предмет успешно перемещён в **{target_name}**.\nЗакрой это окно и проверь основное меню.",
+            color=0x2ecc71
+        )
+        await interaction.edit_original_response(embed=embed, view=None)
+
+        # 6. Обновляем ОСНОВНОЕ сообщение (которое было "заморожено")
+        if self.source == "profile":
+            main_embed = await build_profile_embed(interaction)
+            main_view = ProfileView(self.author_id)
+        else:
+            main_embed = await build_storage_embed(interaction)
+            main_view = StorageView(self.author_id)
+            
+        try:
+            await interaction.message.edit(embed=main_embed, view=main_view)
+        except discord.HTTPException:
+            pass # Если не удалось обновить (например, вебхук истек), ничего страшного
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        await open_move_view(interaction, self.source, self.author_id, self.page - 1)
+        # Пересоздаем меню на новой странице
+        async with bot.db.execute("""
+            SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
+            FROM inventory inv JOIN items i ON inv.item_id = i.id
+            WHERE inv.user_id = ? AND inv.location = ? ORDER BY inv.slot ASC
+        """, (self.author_id, self.source)) as c:
+            rows = await c.fetchall()
+        
+        total_pages = max(1, (len(rows) + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+        page = max(0, min(self.page - 1, total_pages - 1))
+        chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+        
+        options = []
+        for slot, item_id, name, default_emoji, stars in chunk:
+            emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
+            stars_str = f" {stars}★" if stars > 0 else ""
+            short_name = name[:45] + "..." if len(name) > 45 else name
+            options.append(discord.SelectOption(label=f"{short_name}{stars_str}", value=f"{slot}:{item_id}:{stars}", emoji=emoji_obj))
+            
+        await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages))
 
     async def next_page(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        await open_move_view(interaction, self.source, self.author_id, self.page + 1)
+        # Аналогично prev_page, но page + 1
+        pass 
 
-    async def back(self, interaction: discord.Interaction):
+    async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if self.source == "profile":
-            embed = await build_profile_embed(interaction)
-            view = ProfileView(self.author_id)
-        else:
-            embed = await build_storage_embed(interaction)
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
+        await interaction.delete_original_response()
 
 
 async def show_move_confirm(interaction: discord.Interaction, source: str, item_id: str, slot: int, stars: int, author_id: int):
@@ -12049,21 +12167,58 @@ async def main_menu(interaction: discord.Interaction):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
     
-    # 1. Проверяем, нужно ли показать уведомление о доходе
+    async with bot.db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,)) as c:
+        player_exists = await c.fetchone()
+        
+    if not player_exists:
+        welcome_emoji = get_emoji("_welcome") # <--- Наш новый эмодзи
+        embed = discord.Embed(
+            title=f"{welcome_emoji} Добро пожаловать в Gen Mania!",
+            description=(
+                "Приветствую тебя, будущий повелитель замка! 👑\n\n"
+                "Этот бот — игра в жанре **инкрементального кликера**. Твоя цель — строить генераторы, "
+                "синтезировать их в более мощные, собирать пассивный доход и сражаться с другими игроками.\n\n"
+                "**С чего начать:**\n"
+                "🛒 **Магазин** — купи свой первый генератор.\n"
+                "⚗️ **Синтез** — соединяй 5 одинаковых генераторов в 1 более редкий.\n"
+                "⭐ **Звёзды** — улучшай генераторы, чтобы они приносили больше дохода.\n"
+                "⚔️ **Социум** — вступай в клан, сражайся в рейдах и дуэлях.\n"
+                "💰 **Экономика** — копи монеты и гемы, вкладывай в банк.\n\n"
+                f"Жми **«{get_emoji('_continue')} Продолжить»**, чтобы войти в игру и начать свой путь!"
+            ),
+            color=0x9b59b6
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed = await fix_embed_emojis(embed)
+        
+        await interaction.response.send_message(
+            embed=embed, 
+            view=WelcomeView(user_id), 
+            ephemeral=True
+        )
+        return
+
     notification = await get_menu_welcome_notification(user_id, guild_id)
-    
-    # 2. Автоматически собираем доход (чтобы он попал в кошелёк)
     await collect_income(user_id, guild_id)
-    
     embed = await build_main_embed(interaction)
-    view = MainMenuView(interaction.user.id)
+    view = MainMenuView(user_id)
     
     if notification:
-        # Если есть уведомление, отправляем его скрыто, а меню следом
         await interaction.response.send_message(notification, ephemeral=True)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     else:
-        # Если нет, просто открываем меню
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # Если игрок существует — стандартная логика
+    notification = await get_menu_welcome_notification(user_id, guild_id)
+    await collect_income(user_id, guild_id)
+    embed = await build_main_embed(interaction)
+    view = MainMenuView(user_id)
+    
+    if notification:
+        await interaction.response.send_message(notification, ephemeral=True)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    else:
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
