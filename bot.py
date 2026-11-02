@@ -112,6 +112,16 @@ CLAN_WAR_DECLARE_COST = 500           # стоимость объявления 
 # --- БИРЖА ---
 MARKET_SELL_RATE = 0.70               # продажа на бирже — 70% текущей цены
 
+# --- ОТРЯДЫ РЕЙДОВ ---
+RAID_PARTY_MAX = 3                    # лидер + 2 участника
+RAID_PARTY_TTL_MINUTES = 30           # отряд распадается после 30 минут бездействия
+RAID_INVITE_TIMEOUT = 120             # сколько живёт приглашение в отряд
+RAID_INVITE_DELETE_SECONDS = 30       # автоудаление сообщения после решения
+RAID_MAX_PENDING_INVITES = 5          # максимум активных приглашений у отряда
+RAID_GROUP_SYNERGY = 0.10             # +10% к сумме мощи за каждого доп. участника
+RAID_LOOT_RATE = 0.15                 # базовая доля монет цели
+RAID_TARGET_SHIELD_HOURS = 6          # щит цели после атаки
+
 CRAFT_SETTINGS = {
     "basic_gen":      {"chance": 1.00, "gems": 0},
     "copper_gen":     {"chance": 1.00, "gems": 0},
@@ -1451,7 +1461,25 @@ class CastleBot(commands.Bot):
                 leader_id INTEGER,
                 member2_id INTEGER DEFAULT NULL,
                 member3_id INTEGER DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT NULL
+            )
+        """)
+        try:
+            await self.db.execute(
+                "ALTER TABLE raid_parties ADD COLUMN updated_at TIMESTAMP DEFAULT NULL"
+            )
+        except Exception:
+            pass
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS raid_party_invites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                party_id INTEGER,
+                inviter_id INTEGER,
+                target_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (party_id, target_id)
             )
         """)
         await self.db.execute("""
@@ -1904,6 +1932,9 @@ class CastleBot(commands.Bot):
             "CREATE INDEX IF NOT EXISTS idx_clan_wars_status ON clan_wars(status)",
             "CREATE INDEX IF NOT EXISTS idx_clan_war_attacks_war ON clan_war_attacks(war_id, attacker_id)",
             "CREATE INDEX IF NOT EXISTS idx_raid_loot_user_date ON raid_loot_log(user_id, date)",
+            "CREATE INDEX IF NOT EXISTS idx_raid_parties_leader ON raid_parties(leader_id)",
+            "CREATE INDEX IF NOT EXISTS idx_raid_party_invites_target ON raid_party_invites(target_id)",
+            "CREATE INDEX IF NOT EXISTS idx_raid_party_invites_party ON raid_party_invites(party_id)",
             "CREATE INDEX IF NOT EXISTS idx_tax_log_user ON tax_log(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_player_quests_user ON player_quests(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_player_achievements_user ON player_achievements(user_id)",
@@ -6821,31 +6852,7 @@ class SocialView(BaseView):
     @discord.ui.button(label="Рейд", emoji=get_emoji("_raid"), style=discord.ButtonStyle.primary, row=0)
     async def btn_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = discord.Embed(title="⚔️ Подготовка к рейду", description="Выбери режим:", color=0xe74c3c)
-        view = discord.ui.View()
-
-        solo = discord.ui.Button(label="В одиночку", emoji="1️⃣", style=discord.ButtonStyle.secondary)
-        solo.callback = lambda i: open_raid_targets(i, self.author_id, 1)
-        view.add_item(solo)
-
-        duo = discord.ui.Button(label="Группа (2 чел)", emoji="2️⃣", style=discord.ButtonStyle.secondary)
-        duo.callback = lambda i: open_raid_targets(i, self.author_id, 2)
-        view.add_item(duo)
-
-        trio = discord.ui.Button(label="Группа (3 чел)", emoji="3️⃣", style=discord.ButtonStyle.secondary)
-        trio.callback = lambda i: open_raid_targets(i, self.author_id, 3)
-        view.add_item(trio)
-
-        back = discord.ui.Button(
-            label="Назад",
-            emoji=get_emoji("_back"),
-            style=discord.ButtonStyle.secondary,
-            row=3,
-        )
-        back.callback = lambda i: self._back_to_social(i)
-        view.add_item(back)
-
-        await interaction.edit_original_response(embed=embed, view=view)
+        await open_raid_menu(interaction, self.author_id)
 
     @discord.ui.button(label="Дуэль", emoji=get_emoji("_duel"), style=discord.ButtonStyle.success, row=0)
     async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7754,16 +7761,1056 @@ class DepositClanModal(discord.ui.Modal, title="Пополнить сундук 
         await add_clan_xp(clan[0], max(1, amt // 100))
         await interaction.followup.send(f"✅ В сундук клана внесено 🪙 {amt}.", ephemeral=True)
 
-async def open_raid_targets(interaction: discord.Interaction, author_id: int, group_size: int):
-    await interaction.response.send_modal(RaidTargetModal(author_id, group_size))
+# ============================================================
+#  ⚔️ РЕЙДЫ И ОТРЯДЫ
+# ============================================================
+
+def _parse_db_time(value):
+    """Парсит дату из SQLite (CURRENT_TIMESTAMP или ISO) без падений."""
+    if not value:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+async def _handle_modal_error(interaction: discord.Interaction, error: Exception):
+    """Показывает понятную ошибку, если модалка упала до/после defer."""
+    log.exception("Ошибка модального окна рейда", exc_info=error)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "❌ Ошибка. Попробуй ещё раз.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ Ошибка. Попробуй ещё раз.", ephemeral=True
+            )
+    except discord.HTTPException:
+        pass
+
+
+def party_member_ids(party) -> list[int]:
+    """Достаёт участников отряда из строки raid_parties."""
+    if not party:
+        return []
+    members = []
+    for value in (party[1], party[2], party[3]):
+        if value and value not in members:
+            members.append(value)
+    return members
+
+
+async def cleanup_expired_raid_parties():
+    """Удаляет отряды, которые не проявляли активности дольше TTL."""
+    await cleanup_expired_raid_invites()
+    ttl = datetime.timedelta(minutes=RAID_PARTY_TTL_MINUTES)
+    cutoff_local = datetime.datetime.now() - ttl
+    cutoff_utc = datetime.datetime.now(datetime.timezone.utc) - ttl
+
+    async with bot.db.execute(
+        "SELECT id, created_at, updated_at FROM raid_parties"
+    ) as c:
+        rows = await c.fetchall()
+
+    expired = []
+    for party_id, created_at, updated_at in rows:
+        # updated_at пишем локальным временем. created_at у старых строк
+        # заполняется SQLite как UTC — обрабатываем его отдельно.
+        last_seen = _parse_db_time(updated_at)
+        if last_seen is not None:
+            is_expired = last_seen < cutoff_local
+        else:
+            created = _parse_db_time(created_at)
+            if created is None:
+                is_expired = True
+            else:
+                is_expired = created.replace(
+                    tzinfo=datetime.timezone.utc
+                ) < cutoff_utc
+        if is_expired:
+            expired.append(party_id)
+
+    if not expired:
+        return
+
+    placeholders = ",".join("?" for _ in expired)
+    await bot.db.execute(
+        f"DELETE FROM raid_party_invites WHERE party_id IN ({placeholders})", expired
+    )
+    await bot.db.execute(
+        f"DELETE FROM raid_parties WHERE id IN ({placeholders})", expired
+    )
+    await bot.db.commit()
+
+
+async def cleanup_expired_raid_invites():
+    """Удаляет приглашения, чьи кнопки уже неактуальны после таймаута."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(seconds=RAID_INVITE_TIMEOUT)
+    async with bot.db.execute(
+        "SELECT id, created_at FROM raid_party_invites"
+    ) as c:
+        rows = await c.fetchall()
+
+    expired = []
+    for invite_id, created_at in rows:
+        created = _parse_db_time(created_at)
+        if not created or created < cutoff:
+            expired.append(invite_id)
+    if not expired:
+        return
+
+    placeholders = ",".join("?" for _ in expired)
+    await bot.db.execute(
+        f"DELETE FROM raid_party_invites WHERE id IN ({placeholders})", expired
+    )
+    await bot.db.commit()
+
+
+async def get_raid_party(user_id: int):
+    """Возвращает активный отряд игрока или None."""
+    await cleanup_expired_raid_parties()
+    async with bot.db.execute(
+        "SELECT id, leader_id, member2_id, member3_id, created_at, updated_at "
+        "FROM raid_parties "
+        "WHERE leader_id = ? OR member2_id = ? OR member3_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id, user_id, user_id),
+    ) as c:
+        return await c.fetchone()
+
+
+async def get_raid_party_by_id(party_id: int):
+    async with bot.db.execute(
+        "SELECT id, leader_id, member2_id, member3_id, created_at, updated_at "
+        "FROM raid_parties WHERE id = ?",
+        (party_id,),
+    ) as c:
+        return await c.fetchone()
+
+
+async def touch_raid_party(party_id: int):
+    await bot.db.execute(
+        "UPDATE raid_parties SET updated_at = ? WHERE id = ?",
+        (datetime.datetime.now().isoformat(), party_id),
+    )
+
+
+async def create_raid_party(user_id: int) -> int:
+    """Создаёт отряд. Игрок может быть только в одном отряде."""
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT id FROM raid_parties "
+            "WHERE leader_id = ? OR member2_id = ? OR member3_id = ?",
+            (user_id, user_id, user_id),
+        ) as c:
+            if await c.fetchone():
+                raise ValueError("Ты уже состоишь в отряде.")
+
+        cur = await bot.db.execute(
+            "INSERT INTO raid_parties (leader_id, updated_at) VALUES (?, ?)",
+            (user_id, datetime.datetime.now().isoformat()),
+        )
+        party_id = cur.lastrowid
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE target_id = ?", (user_id,)
+        )
+    return party_id
+
+
+async def join_raid_party(party_id: int, user_id: int):
+    """Добавляет игрока в отряд после принятия приглашения."""
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT id, leader_id, member2_id, member3_id FROM raid_parties WHERE id = ?",
+            (party_id,),
+        ) as c:
+            party = await c.fetchone()
+
+        if not party:
+            raise ValueError("Отряд уже распался.")
+        members = party_member_ids(party)
+        if user_id in members:
+            raise ValueError("Ты уже в этом отряде.")
+        if len(members) >= RAID_PARTY_MAX:
+            raise ValueError("Отряд уже укомплектован.")
+
+        async with bot.db.execute(
+            "SELECT id FROM raid_parties "
+            "WHERE (leader_id = ? OR member2_id = ? OR member3_id = ?) AND id != ?",
+            (user_id, user_id, user_id, party_id),
+        ) as c:
+            if await c.fetchone():
+                raise ValueError("Ты уже состоишь в другом отряде.")
+
+        if party[2] is None:
+            await bot.db.execute(
+                "UPDATE raid_parties SET member2_id = ?, updated_at = ? WHERE id = ?",
+                (user_id, datetime.datetime.now().isoformat(), party_id),
+            )
+        elif party[3] is None:
+            await bot.db.execute(
+                "UPDATE raid_parties SET member3_id = ?, updated_at = ? WHERE id = ?",
+                (user_id, datetime.datetime.now().isoformat(), party_id),
+            )
+        else:
+            raise ValueError("В отряде нет свободного места.")
+
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE target_id = ?", (user_id,)
+        )
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
+            (party_id, user_id),
+        )
+
+        async with bot.db.execute(
+            "SELECT id, leader_id, member2_id, member3_id "
+            "FROM raid_parties WHERE id = ?",
+            (party_id,),
+        ) as c:
+            updated = await c.fetchone()
+        if updated and len(party_member_ids(updated)) >= RAID_PARTY_MAX:
+            await bot.db.execute(
+                "DELETE FROM raid_party_invites WHERE party_id = ?", (party_id,)
+            )
+
+
+async def detach_user_from_raid_party(user_id: int) -> str:
+    """Убирает игрока из отряда. Не коммитит — вызывающий код решает сам."""
+    async with bot.db.execute(
+        "SELECT id, leader_id, member2_id, member3_id FROM raid_parties "
+        "WHERE leader_id = ? OR member2_id = ? OR member3_id = ?",
+        (user_id, user_id, user_id),
+    ) as c:
+        party = await c.fetchone()
+
+    await bot.db.execute(
+        "DELETE FROM raid_party_invites WHERE target_id = ? OR inviter_id = ?",
+        (user_id, user_id),
+    )
+    if not party:
+        return "none"
+
+    party_id, leader_id, member2_id, member3_id = party
+    now = datetime.datetime.now().isoformat()
+
+    if leader_id == user_id:
+        if member2_id:
+            await bot.db.execute(
+                "UPDATE raid_parties SET leader_id = ?, member2_id = ?, "
+                "member3_id = NULL, updated_at = ? WHERE id = ?",
+                (member2_id, member3_id, now, party_id),
+            )
+            return "transferred"
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE party_id = ?", (party_id,)
+        )
+        await bot.db.execute("DELETE FROM raid_parties WHERE id = ?", (party_id,))
+        return "disbanded"
+
+    if member2_id == user_id:
+        await bot.db.execute(
+            "UPDATE raid_parties SET member2_id = ?, member3_id = NULL, "
+            "updated_at = ? WHERE id = ?",
+            (member3_id, now, party_id),
+        )
+        return "left"
+
+    if member3_id == user_id:
+        await bot.db.execute(
+            "UPDATE raid_parties SET member3_id = NULL, updated_at = ? WHERE id = ?",
+            (now, party_id),
+        )
+        return "left"
+
+    return "none"
+
+
+async def leave_raid_party(user_id: int) -> str:
+    async with db_transaction():
+        return await detach_user_from_raid_party(user_id)
+
+
+async def get_raid_cooldown_seconds(user_id: int) -> int:
+    """Сколько секунд осталось до следующего рейда игрока."""
+    async with bot.db.execute(
+        "SELECT last_raid_time FROM raid_cooldowns WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    last_raid = _parse_db_time(row[0]) if row else None
+    if not last_raid:
+        return 0
+    return max(0, int(3600 - (datetime.datetime.now() - last_raid).total_seconds()))
+
+
+async def perform_raid(attacker_ids: list[int], target_id: int):
+    """Проводит рейд. Возвращает (result, error).
+
+    result — словарь с деталями боя, error — текст ошибки для пользователя.
+    """
+    members = []
+    for uid in attacker_ids:
+        if uid not in members:
+            members.append(uid)
+
+    if not members:
+        return None, "❌ В отряде нет участников."
+    if target_id in members:
+        return None, "❌ Нельзя атаковать участника своего отряда."
+
+    now = datetime.datetime.now()
+    result = {
+        "members": members,
+        "target_id": target_id,
+        "powers": {},
+        "team_power": 0,
+        "def_power": 0,
+        "roll_atk": 0,
+        "roll_def": 0,
+        "success": False,
+        "loot": {},
+        "capped": [],
+        "daily": {},
+        "synergy_pct": int(round(RAID_GROUP_SYNERGY * 100 * (len(members) - 1))),
+    }
+
+    try:
+        async with db_transaction():
+            # --- Цель ---
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (target_id,)
+            ) as c:
+                target_row = await c.fetchone()
+            if not target_row:
+                raise ValueError("❌ Цель не найдена.")
+            target_coins = max(0, target_row[0] or 0)
+
+            # --- Кулдауны атакующих ---
+            placeholders = ",".join("?" for _ in members)
+            async with bot.db.execute(
+                f"SELECT user_id, last_raid_time FROM raid_cooldowns "
+                f"WHERE user_id IN ({placeholders})",
+                members,
+            ) as c:
+                cooldown_rows = await c.fetchall()
+            cooldowns = {uid: last for uid, last in cooldown_rows}
+
+            on_cooldown = []
+            for uid in members:
+                last_raid = _parse_db_time(cooldowns.get(uid))
+                if not last_raid:
+                    continue
+                remain = 3600 - (now - last_raid).total_seconds()
+                if remain > 0:
+                    on_cooldown.append(f"<@{uid}> (~{max(1, int(remain // 60) + 1)} мин.)")
+            if on_cooldown:
+                raise ValueError(
+                    "❌ Кулдаун рейда: " + ", ".join(on_cooldown) + "."
+                )
+
+            # Щит цели после предыдущей атаки.
+            async with bot.db.execute(
+                "SELECT last_attacked_time FROM raid_cooldowns WHERE user_id = ?",
+                (target_id,),
+            ) as c:
+                shield_row = await c.fetchone()
+            last_attacked = _parse_db_time(shield_row[0]) if shield_row else None
+            if last_attacked:
+                shield_left = RAID_TARGET_SHIELD_HOURS * 3600 - (
+                    now - last_attacked
+                ).total_seconds()
+                if shield_left > 0:
+                    minutes = max(1, int(shield_left // 60) + 1)
+                    raise ValueError(
+                        f"❌ У цели действует щит ещё {minutes} мин. "
+                        "Её недавно атаковали."
+                    )
+
+            # --- Мощь ---
+            powers = {}
+            for uid in members:
+                power = await get_combat_power(uid)
+                if power <= 0:
+                    raise ValueError(
+                        f"❌ У <@{uid}> нет генераторов в замке (мощь 0)."
+                    )
+                powers[uid] = power
+
+            def_power = await get_combat_power(target_id)
+            if def_power <= 0:
+                raise ValueError("❌ У цели нет генераторов. Атаковать нечего.")
+
+            team_power = sum(powers.values())
+            if len(members) > 1:
+                team_power = int(
+                    team_power * (1 + RAID_GROUP_SYNERGY * (len(members) - 1))
+                )
+
+            roll_atk = random.randint(1, team_power)
+            roll_def = random.randint(1, def_power)
+            success = roll_atk > roll_def
+
+            # --- Кулдауны после рейда ---
+            now_iso = now.isoformat()
+            for uid in members:
+                await bot.db.execute(
+                    "INSERT INTO raid_cooldowns (user_id, last_raid_time) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET last_raid_time = ?",
+                    (uid, now_iso, now_iso),
+                )
+            await bot.db.execute(
+                "INSERT INTO raid_cooldowns (user_id, last_attacked_time) "
+                "VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET last_attacked_time = ?",
+                (target_id, now_iso, now_iso),
+            )
+
+            # --- Добыча ---
+            loot = {}
+            capped = []
+            daily = {}
+            if success and target_coins > 0:
+                today = today_str()
+                total_loot = 0
+
+                for uid in members:
+                    bonus = (
+                        await get_pet_bonus(uid, "raid_loot")
+                        + await get_title_bonus(uid, "raid_loot")
+                    )
+                    wanted = int(
+                        target_coins * (RAID_LOOT_RATE + bonus)
+                    ) // len(members)
+
+                    async with bot.db.execute(
+                        "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log "
+                        "WHERE user_id = ? AND date = ?",
+                        (uid, today),
+                    ) as c:
+                        used = (await c.fetchone())[0] or 0
+
+                    async with bot.db.execute(
+                        "SELECT coins FROM players WHERE user_id = ?", (uid,)
+                    ) as c:
+                        row = await c.fetchone()
+                    my_coins = (row[0] if row else 0) or 0
+                    limit = max(1000, my_coins // 2)
+                    remaining = max(0, limit - used)
+                    actual = min(wanted, remaining)
+
+                    if actual < wanted:
+                        capped.append(uid)
+                    daily[uid] = (used, limit)
+                    if actual > 0:
+                        loot[uid] = actual
+                        total_loot += actual
+
+                if total_loot > 0:
+                    cur = await bot.db.execute(
+                        "UPDATE players SET coins = coins - ? "
+                        "WHERE user_id = ? AND coins >= ?",
+                        (total_loot, target_id, total_loot),
+                    )
+                    if cur.rowcount == 0:
+                        raise ValueError(
+                            "❌ Кошелёк цели изменился. Попробуй рейд ещё раз."
+                        )
+
+                    for uid, amount in loot.items():
+                        await bot.db.execute(
+                            "UPDATE players SET coins = coins + ?, "
+                            "total_coins_earned = total_coins_earned + ? "
+                            "WHERE user_id = ?",
+                            (amount, amount, uid),
+                        )
+                        await bot.db.execute(
+                            "INSERT INTO raid_loot_log "
+                            "(user_id, target_id, amount, date) VALUES (?, ?, ?, ?)",
+                            (uid, target_id, amount, today),
+                        )
+
+            result.update({
+                "powers": powers,
+                "team_power": team_power,
+                "def_power": def_power,
+                "roll_atk": roll_atk,
+                "roll_def": roll_def,
+                "success": success,
+                "loot": loot,
+                "capped": capped,
+                "daily": daily,
+            })
+    except ValueError as e:
+        return None, str(e)
+
+    return result, None
+
+
+async def finalize_raid(result: dict):
+    """Обновляет квесты, победы и достижения всех участников рейда."""
+    for uid in result["members"]:
+        try:
+            await update_quest_progress(uid, "raid_1")
+
+            clan = await get_clan(uid)
+            if clan:
+                await update_clan_quest(clan[0], "raid", 1)
+
+            if result["success"]:
+                await update_story_quests(uid, "raid_win", 1)
+                await bot.db.execute(
+                    "UPDATE players SET raid_wins = raid_wins + 1 WHERE user_id = ?",
+                    (uid,),
+                )
+                await bot.db.commit()
+                await check_achievements(uid)
+        except Exception:
+            log.exception("Не удалось обновить прогресс рейда для %s", uid)
+
+
+def build_raid_result_embed(result: dict) -> discord.Embed:
+    members = result["members"]
+    success = result["success"]
+    lines = []
+
+    if len(members) > 1:
+        lines.append("**Отряд:** " + ", ".join(f"<@{uid}>" for uid in members))
+        synergy = result["synergy_pct"]
+        lines.append(
+            f"Мощь отряда: **{result['team_power']}** (синергия +{synergy}%)"
+        )
+    else:
+        lines.append(f"Твоя мощь: **{result['team_power']}**")
+
+    lines.append(
+        f"Цель: <@{result['target_id']}> · защита **{result['def_power']}**"
+    )
+    lines.append(
+        f"Бросок атаки: **{result['roll_atk']}** · "
+        f"бросок защиты: **{result['roll_def']}**"
+    )
+
+    if success:
+        if result["loot"]:
+            lines.append("\n🏆 **Успешный рейд!**")
+            for uid, amount in result["loot"].items():
+                lines.append(f"<@{uid}>: 🪙 **{amount}**")
+            if result["capped"]:
+                lines.append(
+                    "⏳ Дневной лимит срезал добычу: "
+                    + ", ".join(f"<@{uid}>" for uid in result["capped"])
+                )
+        else:
+            lines.append(
+                "\n🏆 Победа, но украсть нечего: "
+                "пустой кошелёк или исчерпан дневной лимит."
+            )
+    else:
+        lines.append("\n💥 **Провал!** Ничего не украдено.")
+
+    lines.append("\n⏳ Следующий рейд будет доступен через 1 час.")
+    return discord.Embed(
+        title="Результат рейда",
+        description="\n".join(lines),
+        color=0x2ecc71 if success else 0xe74c3c,
+    )
+
+
+async def send_raid_result(interaction: discord.Interaction, result: dict):
+    await finalize_raid(result)
+    try:
+        message = await interaction.followup.send(
+            embed=build_raid_result_embed(result), ephemeral=False
+        )
+    except discord.HTTPException:
+        return
+    asyncio.create_task(delete_message_later(message, PUBLIC_MESSAGE_DELETE_SECONDS))
+
+
+async def build_raid_party_embed(party_id: int, viewer_id: int):
+    party = await get_raid_party_by_id(party_id)
+    if not party:
+        return None
+
+    members = party_member_ids(party)
+    powers = {}
+    for uid in members:
+        powers[uid] = await get_combat_power(uid)
+
+    lines = []
+    for uid in members:
+        crown = "👑 " if uid == party[1] else ""
+        cooldown = await get_raid_cooldown_seconds(uid)
+        status = f"⏳ ~{max(1, cooldown // 60 + 1)} мин." if cooldown else "✅ готов"
+        lines.append(f"{crown}<@{uid}> — {powers[uid]} мощи · {status}")
+
+    total_power = sum(powers.values())
+    if len(members) > 1:
+        total_power = int(
+            total_power * (1 + RAID_GROUP_SYNERGY * (len(members) - 1))
+        )
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM raid_party_invites WHERE party_id = ?", (party_id,)
+    ) as c:
+        pending_invites = (await c.fetchone())[0] or 0
+
+    is_leader = party[1] == viewer_id
+    embed = discord.Embed(
+        title="⚔️ Отряд",
+        description=(
+            "Ты лидер отряда. Приглашай игроков и начинай рейд."
+            if is_leader
+            else "Ты участник отряда. Лидер приглашает игроков и начинает рейд."
+        ),
+        color=0xe74c3c,
+    )
+    embed.add_field(name="Состав", value="\n".join(lines), inline=False)
+
+    power_text = f"**{total_power}**"
+    if len(members) > 1:
+        synergy = int(round(RAID_GROUP_SYNERGY * 100 * (len(members) - 1)))
+        power_text += f"\nСинергия: +{synergy}%"
+    embed.add_field(
+        name="Мощь отряда", value=power_text, inline=False
+    )
+    embed.add_field(
+        name="Свободные места",
+        value=f"{RAID_PARTY_MAX - len(members)} из {RAID_PARTY_MAX}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Приглашения",
+        value=str(pending_invites),
+        inline=True,
+    )
+    embed.set_footer(
+        text=f"Отряд распадается после {RAID_PARTY_TTL_MINUTES} минут бездействия."
+    )
+    return embed
+
+
+async def open_raid_menu(interaction: discord.Interaction, author_id: int):
+    embed = discord.Embed(
+        title="⚔️ Подготовка к рейду",
+        description=(
+            "Атакуй чужой замок и забери часть монет.\n\n"
+            "**В одиночку** — только твоя мощь.\n"
+            "**Собрать отряд** — до 3 игроков, общая мощь и синергия.\n"
+            "Базовая добыча делится поровну, бонусы применяются к доле каждого."
+        ),
+        color=0xe74c3c,
+    )
+    await interaction.edit_original_response(embed=embed, view=RaidMenuView(author_id))
+
+
+async def open_raid_party(interaction: discord.Interaction, author_id: int, create: bool = False):
+    party = await get_raid_party(author_id)
+    if not party and create:
+        try:
+            party_id = await create_raid_party(author_id)
+        except ValueError as e:
+            embed = discord.Embed(
+                title="⚔️ Подготовка к рейду",
+                description=f"❌ {e}",
+                color=0xe74c3c,
+            )
+            return await interaction.edit_original_response(
+                embed=embed, view=RaidMenuView(author_id)
+            )
+        party = await get_raid_party_by_id(party_id)
+
+    if not party:
+        embed = discord.Embed(
+            title="⚔️ Отряд",
+            description="Отряд не найден. Создай новый.",
+            color=0xe74c3c,
+        )
+        return await interaction.edit_original_response(
+            embed=embed, view=RaidMenuView(author_id)
+        )
+
+    await touch_raid_party(party[0])
+    await bot.db.commit()
+
+    embed = await build_raid_party_embed(party[0], author_id)
+    if embed is None:
+        embed = discord.Embed(
+            title="⚔️ Отряд",
+            description="Отряд уже распался.",
+            color=0xe74c3c,
+        )
+        return await interaction.edit_original_response(
+            embed=embed, view=RaidMenuView(author_id)
+        )
+
+    await interaction.edit_original_response(
+        embed=embed, view=RaidPartyView(author_id, party[0])
+    )
+
+
+class RaidMenuView(BaseView):
+    @discord.ui.button(label="В одиночку", emoji="1️⃣", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_solo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RaidTargetModal(self.author_id))
+
+    @discord.ui.button(label="Собрать отряд", emoji="👥", style=discord.ButtonStyle.primary, row=0)
+    async def btn_party(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_raid_party(interaction, self.author_id, create=True)
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+class RaidPartyView(BaseView):
+    def __init__(self, author_id: int, party_id: int):
+        super().__init__(author_id, timeout=900)
+        self.party_id = party_id
+
+    async def _leader_party(self, interaction: discord.Interaction):
+        party = await get_raid_party(self.author_id)
+        if not party or party[0] != self.party_id:
+            await interaction.response.send_message(
+                "❌ Отряд уже распался.", ephemeral=True
+            )
+            return None
+        if party[1] != interaction.user.id:
+            await interaction.response.send_message(
+                "❌ Только лидер отряда может это делать.", ephemeral=True
+            )
+            return None
+        return party
+
+    @discord.ui.button(label="Пригласить", emoji="📨", style=discord.ButtonStyle.primary, row=0)
+    async def btn_invite(self, interaction: discord.Interaction, button: discord.ui.Button):
+        party = await self._leader_party(interaction)
+        if not party:
+            return
+        if len(party_member_ids(party)) >= RAID_PARTY_MAX:
+            return await interaction.response.send_message(
+                "❌ В отряде уже нет свободных мест.", ephemeral=True
+            )
+        await interaction.response.send_modal(
+            RaidInviteModal(self.author_id, self.party_id)
+        )
+
+    @discord.ui.button(label="Начать рейд", emoji="⚔️", style=discord.ButtonStyle.success, row=0)
+    async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        party = await self._leader_party(interaction)
+        if not party:
+            return
+        await interaction.response.send_modal(
+            RaidTargetModal(self.author_id, self.party_id)
+        )
+
+    @discord.ui.button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_raid_party(interaction, self.author_id)
+
+    @discord.ui.button(label="Покинуть", emoji="🚪", style=discord.ButtonStyle.danger, row=1)
+    async def btn_leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        status = await leave_raid_party(self.author_id)
+
+        if status == "transferred":
+            text = "🚪 Ты покинул отряд. Лидерство передано следующему участнику."
+        elif status == "disbanded":
+            text = "🚪 Ты покинул отряд. Отряд распущен."
+        elif status == "left":
+            text = "🚪 Ты покинул отряд."
+        else:
+            text = "Отряд уже распался."
+
+        embed = discord.Embed(title="⚔️ Отряд", description=text, color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=RaidMenuView(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+class RaidInviteModal(discord.ui.Modal, title="Пригласить в отряд"):
+    target_id = discord.ui.TextInput(label="ID игрока", required=True)
+
+    def __init__(self, author_id: int, party_id: int):
+        super().__init__()
+        self.author_id = author_id
+        self.party_id = party_id
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await _handle_modal_error(interaction, error)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            target = int(self.target_id.value)
+        except ValueError:
+            return await interaction.followup.send("❌ Неверный ID.", ephemeral=True)
+
+        party = await get_raid_party(self.author_id)
+        if not party or party[0] != self.party_id:
+            return await interaction.followup.send("❌ Отряд уже распался.", ephemeral=True)
+        if party[1] != self.author_id:
+            return await interaction.followup.send(
+                "❌ Только лидер отряда может приглашать.", ephemeral=True
+            )
+        if target == self.author_id:
+            return await interaction.followup.send("❌ Нельзя пригласить себя.", ephemeral=True)
+        if target in party_member_ids(party):
+            return await interaction.followup.send(
+                "❌ Этот игрок уже в отряде.", ephemeral=True
+            )
+        if len(party_member_ids(party)) >= RAID_PARTY_MAX:
+            return await interaction.followup.send(
+                "❌ В отряде нет свободных мест.", ephemeral=True
+            )
+
+        async with bot.db.execute(
+            "SELECT 1 FROM players WHERE user_id = ?", (target,)
+        ) as c:
+            if not await c.fetchone():
+                return await interaction.followup.send(
+                    "❌ Игрок не найден.", ephemeral=True
+                )
+
+        other_party = await get_raid_party(target)
+        if other_party:
+            return await interaction.followup.send(
+                "❌ Этот игрок уже состоит в отряде.", ephemeral=True
+            )
+
+        async with bot.db.execute(
+            "SELECT COUNT(*) FROM raid_party_invites WHERE party_id = ?",
+            (self.party_id,),
+        ) as c:
+            pending = (await c.fetchone())[0] or 0
+        if pending >= RAID_MAX_PENDING_INVITES:
+            return await interaction.followup.send(
+                "❌ Слишком много активных приглашений. Подожди ответа.", ephemeral=True
+            )
+
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
+            (self.party_id, target),
+        )
+        await bot.db.execute(
+            "INSERT INTO raid_party_invites "
+            "(party_id, inviter_id, target_id, created_at) VALUES (?, ?, ?, ?)",
+            (
+                self.party_id,
+                self.author_id,
+                target,
+                datetime.datetime.now().isoformat(),
+            ),
+        )
+        await bot.db.commit()
+        await touch_raid_party(self.party_id)
+        await bot.db.commit()
+
+        if not isinstance(interaction.channel, discord.abc.Messageable):
+            await bot.db.execute(
+                "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
+                (self.party_id, target),
+            )
+            await bot.db.commit()
+            return await interaction.followup.send(
+                "❌ Не удалось отправить приглашение в канал.", ephemeral=True
+            )
+
+        view = RaidInviteView(self.party_id, self.author_id, target)
+        embed = discord.Embed(
+            title="⚔️ Приглашение в отряд",
+            description=(
+                f"<@{self.author_id}> приглашает <@{target}> в отряд для рейда.\n\n"
+                f"Согласие действует {RAID_INVITE_TIMEOUT // 60} мин."
+            ),
+            color=0xf1c40f,
+        )
+        try:
+            view.message = await interaction.channel.send(
+                content=f"<@{target}>", embed=embed, view=view
+            )
+        except discord.HTTPException:
+            await bot.db.execute(
+                "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
+                (self.party_id, target),
+            )
+            await bot.db.commit()
+            return await interaction.followup.send(
+                "❌ Не удалось отправить приглашение в канал.", ephemeral=True
+            )
+
+        await interaction.followup.send(
+            f"✅ Приглашение отправлено <@{target}>.", ephemeral=True
+        )
+
+
+class RaidInviteView(discord.ui.View):
+    def __init__(self, party_id: int, inviter_id: int, target_id: int):
+        super().__init__(timeout=RAID_INVITE_TIMEOUT)
+        self.party_id = party_id
+        self.inviter_id = inviter_id
+        self.target_id = target_id
+        self.resolved = False
+        self.message = None
+        self._delete_task = None
+
+    def _schedule_delete(self, delay: int):
+        if not self.message:
+            return
+        if self._delete_task and not self._delete_task.done():
+            return
+        self._delete_task = asyncio.create_task(self._delete_later(delay))
+
+    async def _delete_later(self, delay: int):
+        await asyncio.sleep(delay)
+        try:
+            await self.message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.target_id:
+            await interaction.response.send_message(
+                "❌ Это приглашение не для тебя.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        log.exception("Ошибка приглашения в отряд", exc_info=error)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "❌ Ошибка приглашения. Попробуй ещё раз.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ Ошибка приглашения. Попробуй ещё раз.", ephemeral=True
+                )
+        except discord.HTTPException:
+            pass
+
+    @discord.ui.button(label="Принять", emoji="✅", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.resolved:
+            return
+        self.resolved = True
+
+        try:
+            await join_raid_party(self.party_id, self.target_id)
+        except ValueError as e:
+            await bot.db.execute(
+                "DELETE FROM raid_party_invites "
+                "WHERE party_id = ? AND target_id = ?",
+                (self.party_id, self.target_id),
+            )
+            await bot.db.commit()
+            embed = discord.Embed(
+                title="Приглашение не принято",
+                description=f"❌ {e}",
+                color=0xe74c3c,
+            )
+            try:
+                await interaction.message.edit(embed=embed, view=None)
+            except discord.HTTPException:
+                pass
+            self._schedule_delete(15)
+            return
+
+        embed = discord.Embed(
+            title="✅ Приглашение принято",
+            description=(
+                f"<@{self.target_id}> вступил в отряд.\n"
+                "Лидер может начинать рейд."
+            ),
+            color=0x2ecc71,
+        )
+        try:
+            await interaction.message.edit(embed=embed, view=None)
+        except discord.HTTPException:
+            pass
+        self._schedule_delete(RAID_INVITE_DELETE_SECONDS)
+
+    @discord.ui.button(label="Отклонить", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.resolved:
+            return
+        self.resolved = True
+
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
+            (self.party_id, self.target_id),
+        )
+        await bot.db.commit()
+
+        embed = discord.Embed(
+            title="Приглашение отклонено",
+            description=f"<@{self.target_id}> отказался вступить в отряд.",
+            color=0x808080,
+        )
+        try:
+            await interaction.message.edit(embed=embed, view=None)
+        except discord.HTTPException:
+            pass
+        self._schedule_delete(DUEL_CHALLENGE_DECLINE_SECONDS)
+
+    async def on_timeout(self):
+        if self.resolved:
+            return
+        self.resolved = True
+        await bot.db.execute(
+            "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
+            (self.party_id, self.target_id),
+        )
+        await bot.db.commit()
+        if not self.message:
+            return
+        try:
+            embed = discord.Embed(
+                title="Приглашение истекло",
+                description=f"<@{self.target_id}> не ответил за 2 минуты.",
+                color=0x808080,
+            )
+            await self.message.edit(embed=embed, view=None)
+            self._schedule_delete(DUEL_CHALLENGE_DECLINE_SECONDS)
+        except discord.HTTPException:
+            pass
+
 
 class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
     target_id = discord.ui.TextInput(label="ID игрока для атаки", required=True)
 
-    def __init__(self, author_id: int, group_size: int):
+    def __init__(self, author_id: int, party_id: int | None = None):
         super().__init__()
         self.author_id = author_id
-        self.group_size = group_size
+        self.party_id = party_id
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        await _handle_modal_error(interaction, error)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -7771,167 +8818,25 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
             target = int(self.target_id.value)
         except ValueError:
             return await interaction.followup.send("❌ Неверный ID.", ephemeral=True)
-        
-        if target == self.author_id:
-            return await interaction.followup.send("❌ Нельзя атаковать себя.", ephemeral=True)
 
-        # 1. Кулдауны
-        async with bot.db.execute("SELECT last_raid_time, last_attacked_time FROM raid_cooldowns WHERE user_id = ?", (self.author_id,)) as c:
-            row = await c.fetchone()
-        
-        now = datetime.datetime.now()
-        if row:
-            if row[0]:
-                last_raid = datetime.datetime.fromisoformat(row[0])
-                if (now - last_raid).total_seconds() < 3600: # 1 час
-                    return await interaction.followup.send("❌ Кулдаун на рейд: 1 час.", ephemeral=True)
-            if row[1]:
-                last_attacked = datetime.datetime.fromisoformat(row[1])
-                if (now - last_attacked).total_seconds() < 21600: # 6 часов
-                    return await interaction.followup.send("❌ Этого игрока уже атаковали недавно (кулдаун 6 ч).", ephemeral=True)
-
-                # 2. Мощь атакующих
-        power_atk = await get_combat_power(self.author_id)
-        if power_atk <= 0:
-            return await interaction.followup.send(
-                "❌ У тебя нет генераторов в замке. Мощь = 0. Купи генераторы в магазине.",
-                ephemeral=True
-            )
-        # Групповой бонус: +50% за каждого дополнительного члена группы
-        if self.group_size > 1:
-            power_atk = int(power_atk * (1 + 0.5 * (self.group_size - 1)))
-
-        # 3. Мощь защиты
-        power_def = await get_combat_power(target)
-        if power_def <= 0:
-            return await interaction.followup.send(
-                "❌ У цели нет генераторов. Атаковать нечего.",
-                ephemeral=True
-            )
-            
-        # 4. Расчёт (рандом с учётом мощи)
-        roll_atk = random.randint(1, power_atk)
-        roll_def = random.randint(1, power_def)
-        
-        success = roll_atk > roll_def
-
-        # Запись кулдауна рейда. Не трогаем last_attacked_time:
-        # это щит жертвы, а не атакующего.
-        await bot.db.execute("""
-            INSERT INTO raid_cooldowns (user_id, last_raid_time) VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET last_raid_time = ?
-        """, (self.author_id, now.isoformat(), now.isoformat()))
-        
-        # Ставим кулдаун на жертву
-        await bot.db.execute("""
-            INSERT INTO raid_cooldowns (user_id, last_attacked_time) VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET last_attacked_time = ?
-        """, (target, now.isoformat(), now.isoformat()))
-        await bot.db.commit()
-
-        await update_quest_progress(self.author_id, "raid_1")
-
-        if success:
-            today = datetime.date.today().isoformat()
-
-            # дневной лимит краж: не более 50% от своего баланса, минимум 1000
-            async with bot.db.execute(
-                "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log WHERE user_id = ? AND date = ?",
-                (self.author_id, today)
-            ) as c:
-                today_loot = (await c.fetchone())[0] or 0
-
-            async with bot.db.execute(
-                "SELECT coins FROM players WHERE user_id = ?", (self.author_id,)
-            ) as c:
-                my_coins = (await c.fetchone())[0]
-
-            daily_limit = max(1000, my_coins // 2)
-
-            if today_loot >= daily_limit:
-                msg = (
-                    f"🏆 Победа, но дневной лимит краж исчерпан "
-                    f"({today_loot}/{daily_limit} 🪙). Возвращайся завтра."
+        members = [self.author_id]
+        if self.party_id is not None:
+            party = await get_raid_party(self.author_id)
+            if not party or party[0] != self.party_id:
+                return await interaction.followup.send(
+                    "❌ Отряд уже распался.", ephemeral=True
                 )
-            else:
-                async with bot.db.execute(
-                    "SELECT coins FROM players WHERE user_id = ?", (target,)
-                ) as c:
-                    victim_coins = (await c.fetchone())[0]
+            if party[1] != self.author_id:
+                return await interaction.followup.send(
+                    "❌ Только лидер отряда может начать рейд.", ephemeral=True
+                )
+            members = party_member_ids(party)
 
-                pet_loot = await get_pet_bonus(self.author_id, "raid_loot")
-                title_loot = await get_title_bonus(self.author_id, "raid_loot")
-                loot = int(victim_coins * (0.15 + pet_loot + title_loot))
+        result, error = await perform_raid(members, target)
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
 
-                # ограничиваем остатком лимита
-                remaining_limit = daily_limit - today_loot
-                loot = min(loot, remaining_limit)
-
-                if loot > 0:
-                    cursor = await bot.db.execute(
-                        "UPDATE players SET coins = coins - ? WHERE user_id = ? AND coins >= ?",
-                        (loot, target, loot)
-                    )
-                    if cursor.rowcount == 0:
-                        async with bot.db.execute(
-                            "SELECT coins FROM players WHERE user_id = ?", (target,)
-                        ) as c:
-                            real_coins = (await c.fetchone())[0]
-                        loot = min(real_coins, remaining_limit)
-                        if loot > 0:
-                            await bot.db.execute(
-                                "UPDATE players SET coins = 0 WHERE user_id = ?", (target,)
-                            )
-                            await bot.db.execute(
-                                "UPDATE players SET coins = coins + ?, "
-                                "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
-                                (loot, loot, self.author_id)
-                            )
-                    else:
-                        await bot.db.execute(
-                            "UPDATE players SET coins = coins + ?, "
-                            "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
-                            (loot, loot, self.author_id)
-                        )
-
-                    # записываем в лог
-                    await bot.db.execute(
-                        "INSERT INTO raid_loot_log (user_id, target_id, amount, date) "
-                        "VALUES (?, ?, ?, ?)",
-                        (self.author_id, target, loot, today)
-                    )
-                    await bot.db.commit()
-                    msg = (
-                        f"🏆 **Успешный рейд!**\n"
-                        f"Твоя мощь: {power_atk} (бросок {roll_atk})\n"
-                        f"Защита врага: {power_def} (бросок {roll_def})\n"
-                        f"Вы украли 🪙 **{loot}** монет!\n"
-                        f"Дневной лимит: {today_loot + loot}/{daily_limit}"
-                    )
-                else:
-                    msg = "🏆 Победа, но у врага пустой кошелёк."
-
-            # клановый квест
-            clan = await get_clan(self.author_id)
-            if clan:
-                await update_clan_quest(clan[0], "raid", 1)
-
-            # сюжетный квест и счётчик побед
-            await update_story_quests(self.author_id, "raid_win", 1)
-            await bot.db.execute(
-                "UPDATE players SET raid_wins = raid_wins + 1 WHERE user_id = ?",
-                (self.author_id,),
-            )
-            await bot.db.commit()
-            await check_achievements(self.author_id)
-        else:
-            msg = f"💥 **Провал!**\nТвоя мощь: {power_atk} (бросок {roll_atk})\nЗащита врага: {power_def} (бросок {roll_def})\nТы ничего не украл."
-
-        embed = discord.Embed(title="Результат рейда", description=msg, color=0x2ecc71 if success else 0xe74c3c)
-        result_msg = await interaction.followup.send(embed=embed)
-        asyncio.create_task(
-            delete_message_later(result_msg, PUBLIC_MESSAGE_DELETE_SECONDS)
-        )
+        await send_raid_result(interaction, result)
 
 class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
     opponent_id = discord.ui.TextInput(label="ID противника", required=True)
@@ -11992,6 +12897,9 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
 
         try:
             async with db_transaction():
+                # Убираем игрока из отряда и удаляем его приглашения.
+                await detach_user_from_raid_party(self.author_id)
+
                 # Возвращаем ставки по активным лотам игрока и удаляем лоты.
                 async with bot.db.execute(
                     "SELECT id, current_bidder, current_bid FROM auctions "
@@ -13914,6 +14822,9 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
             await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
             return
         async with db_transaction():
+            # Убираем игрока из отряда и удаляем его приглашения.
+            await detach_user_from_raid_party(uid)
+
             # Возвращаем ставки по активным лотам и удаляем лоты игрока.
             async with bot.db.execute(
                 "SELECT id, current_bidder, current_bid FROM auctions "
