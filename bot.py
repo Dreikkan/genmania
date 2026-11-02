@@ -1251,7 +1251,7 @@ class CastleBot(commands.Bot):
 
         # Старые БД: принудительно делаем 28, 29, 30 и legendary недоступными для покупки
         await self.db.execute(
-            "UPDATE items SET buyable = 0 WHERE id IN (?, ?, ?, ?)",
+            "UPDATE items SET buyable = 0 WHERE id IN (?, ?, ?)",
             ("space_gen", "divine_gen", "legendary_gen"),
         )
                 # Временная миграция: возвращаем time_gen в магазин
