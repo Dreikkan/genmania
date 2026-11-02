@@ -7812,22 +7812,20 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
         emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
         stars_str = f" {stars}★" if stars > 0 else ""
         
-        # Короткое название (обрезаем до 50 символов) + эмодзи + звезды
         short_name = name[:45] + "..." if len(name) > 45 else name
         options.append(discord.SelectOption(
             label=f"{short_name}{stars_str}",
-            value=f"{slot}:{item_id}:{stars}",
+            value=f"{slot}:{item_id}:{stars}",  # <--- ТРИ ЧАСТИ
             emoji=emoji_obj
         ))
 
     location_name = "Замка" if source == "profile" else "Хранилища"
     embed = discord.Embed(
         title=f"🔀 Перемещение из {location_name}",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет для перемещения в {'Хранилище' if source == 'profile' else 'Замок'}:",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет для перемещения:",
         color=0x3498db
     )
     
-    # Отправляем НОВОЕ эфемерное сообщение, не трогая основное
     await interaction.followup.send(
         embed=embed,
         view=MoveView(author_id, source, options, page, total_pages),
@@ -7853,7 +7851,6 @@ class MoveView(discord.ui.View):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        # Кнопка закрытия (вместо "Назад", так как это эфемерное окно)
         close = discord.ui.Button(label="Закрыть", emoji="❌", style=discord.ButtonStyle.danger, row=2)
         close.callback = self.close_window
         self.add_item(close)
@@ -7867,6 +7864,7 @@ class MoveView(discord.ui.View):
     async def item_select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
         parts = value.split(":")
+        
         slot = int(parts[0])
         item_id = parts[1]
         stars = int(parts[2]) if len(parts) > 2 else 0
@@ -7878,7 +7876,6 @@ class MoveView(discord.ui.View):
         user_id = interaction.user.id
         target = "storage" if self.source == "profile" else "profile"
         
-        # 1. Проверяем наличие
         async with bot.db.execute(
             "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
             (user_id, self.source, slot)
@@ -7887,7 +7884,6 @@ class MoveView(discord.ui.View):
         if not row:
             return await interaction.edit_original_response(embed=discord.Embed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c), view=None)
 
-        # 2. Ищем свободный слот
         target_size = await (get_storage_size(user_id) if target == "storage" else get_grid_size(user_id))
         async with bot.db.execute("SELECT slot FROM inventory WHERE user_id = ? AND location = ?", (user_id, target)) as c:
             used = {r[0] for r in await c.fetchall()}
@@ -7899,18 +7895,15 @@ class MoveView(discord.ui.View):
                 view=None
             )
 
-        # 3. Перемещаем
         new_slot = free[0]
         await bot.db.execute("DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?", (user_id, self.source, slot))
         await bot.db.execute("INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)", (user_id, new_slot, item_id, target, stars))
         await bot.db.commit()
 
-        # 4. Обновляем квесты и сортируем
         await update_quest_progress(user_id, "move_2")
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
 
-        # 5. Показываем результат в эфемерном окне
         target_name = "Хранилище" if target == "storage" else "Замок"
         embed = discord.Embed(
             title="✅ Перемещено",
@@ -7919,7 +7912,6 @@ class MoveView(discord.ui.View):
         )
         await interaction.edit_original_response(embed=embed, view=None)
 
-        # 6. Обновляем ОСНОВНОЕ сообщение (которое было "заморожено")
         if self.source == "profile":
             main_embed = await build_profile_embed(interaction)
             main_view = ProfileView(self.author_id)
@@ -7930,11 +7922,10 @@ class MoveView(discord.ui.View):
         try:
             await interaction.message.edit(embed=main_embed, view=main_view)
         except discord.HTTPException:
-            pass # Если не удалось обновить (например, вебхук истек), ничего страшного
+            pass
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        # Пересоздаем меню на новой странице
         async with bot.db.execute("""
             SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
             FROM inventory inv JOIN items i ON inv.item_id = i.id
@@ -7948,7 +7939,7 @@ class MoveView(discord.ui.View):
         
         options = []
         for slot, item_id, name, default_emoji, stars in chunk:
-            emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
+            emoji_obj = parse_emoji_safe(await get_settings(interaction.guild_id).custom_emojis.get(item_id, default_emoji))
             stars_str = f" {stars}★" if stars > 0 else ""
             short_name = name[:45] + "..." if len(name) > 45 else name
             options.append(discord.SelectOption(label=f"{short_name}{stars_str}", value=f"{slot}:{item_id}:{stars}", emoji=emoji_obj))
@@ -7956,132 +7947,30 @@ class MoveView(discord.ui.View):
         await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages))
 
     async def next_page(self, interaction: discord.Interaction):
-        # Аналогично prev_page, но page + 1
-        pass 
+        await interaction.response.defer()
+        async with bot.db.execute("""
+            SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
+            FROM inventory inv JOIN items i ON inv.item_id = i.id
+            WHERE inv.user_id = ? AND inv.location = ? ORDER BY inv.slot ASC
+        """, (self.author_id, self.source)) as c:
+            rows = await c.fetchall()
+        
+        total_pages = max(1, (len(rows) + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+        page = max(0, min(self.page + 1, total_pages - 1))
+        chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
+        
+        options = []
+        for slot, item_id, name, default_emoji, stars in chunk:
+            emoji_obj = parse_emoji_safe(await get_settings(interaction.guild_id).custom_emojis.get(item_id, default_emoji))
+            stars_str = f" {stars}★" if stars > 0 else ""
+            short_name = name[:45] + "..." if len(name) > 45 else name
+            options.append(discord.SelectOption(label=f"{short_name}{stars_str}", value=f"{slot}:{item_id}:{stars}", emoji=emoji_obj))
+            
+        await interaction.edit_original_response(view=MoveView(self.author_id, self.source, options, page, total_pages))
 
     async def close_window(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await interaction.delete_original_response()
-
-
-async def show_move_confirm(interaction: discord.Interaction, source: str, item_id: str, slot: int, stars: int, author_id: int):
-    guild_id = interaction.guild_id
-    custom = (await get_settings(guild_id))["custom_emojis"]
-    async with bot.db.execute("SELECT name, emoji FROM items WHERE id = ?", (item_id,)) as c:
-        row = await c.fetchone()
-    name, default_emoji = row if row else ("предмет", "📦")
-    emoji = custom.get(item_id, default_emoji)
-    stars_str = f"({stars}⭐)" if stars > 0 else ""
-    target = "storage" if source == "profile" else "profile"
-    target_name = "Хранилище" if target == "storage" else "Замок"
-    embed = discord.Embed(
-        title="🔀 Перемещение",
-        description=f"Переместить {emoji} **{name}** {stars_str} (слот {slot}) в **{target_name}**?",
-        color=0x3498db
-    )
-    await interaction.edit_original_response(
-        embed=embed,
-        view=MoveConfirmView(author_id, source, item_id, slot, stars)
-    )
-
-
-class MoveConfirmView(discord.ui.View):
-    def __init__(self, author_id: int, source: str, item_id: str, slot: int, stars: int):
-        super().__init__(timeout=120)
-        self.author_id = author_id
-        self.source = source
-        self.item_id = item_id
-        self.slot = slot
-        self.stars = stars
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Переместить", emoji="✅", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        user_id = interaction.user.id
-        target = "storage" if self.source == "profile" else "profile"
-
-        # Проверяем, что предмет ещё в исходной локации
-        async with bot.db.execute(
-            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.source, self.slot)
-        ) as c:
-            row = await c.fetchone()
-
-        if not row:
-            await self.fail(interaction, "❌ Предмета нет в этом слоте.")
-            return
-
-        item_id, stars = row
-
-        # Ищем свободный слот в целевой локации
-        if target == "storage":
-            target_size = await get_storage_size(user_id)
-        else:
-            target_size = await get_grid_size(user_id)
-
-        async with bot.db.execute(
-            "SELECT slot FROM inventory WHERE user_id = ? AND location = ?",
-            (user_id, target)
-        ) as c:
-            used = {r[0] for r in await c.fetchall()}
-
-        free = [s for s in range(target_size) if s not in used]
-
-        if not free:
-            await self.fail(interaction, f"❌ В целевой локации нет свободных слотов (макс. {target_size}).")
-            return
-
-        new_slot = free[0]
-
-        # Удаляем из исходной локации
-        await bot.db.execute(
-            "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.source, self.slot)
-        )
-
-        # Вставляем в свободный слот
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (user_id, new_slot, item_id, target, stars)
-        )
-        await bot.db.commit()
-
-        await update_quest_progress(user_id, "move_2")
-        await sort_inventory(user_id, "profile")
-        await sort_inventory(user_id, "storage")
-
-        if self.source == "profile":
-            embed = await build_profile_embed(interaction)
-            view = ProfileView(self.author_id)
-        else:
-            embed = await build_storage_embed(interaction)
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
-
-    @discord.ui.button(label="Отмена", emoji="❌", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        if self.source == "profile":
-            embed = await build_profile_embed(interaction)
-            view = ProfileView(self.author_id)
-        else:
-            embed = await build_storage_embed(interaction)
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
-
-    async def fail(self, interaction: discord.Interaction, msg: str):
-        embed = discord.Embed(title="❌ Ошибка", description=msg, color=0xe74c3c)
-        if self.source == "profile":
-            view = ProfileView(self.author_id)
-        else:
-            view = StorageView(self.author_id)
-        await interaction.edit_original_response(embed=embed, view=view)
 
 
 # ============================================================
