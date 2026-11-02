@@ -329,9 +329,9 @@ BOT_BTN_EMOJIS = {
     "_ach_unlucky":  discord.PartialEmoji(name="unlucky", id=1566521432119189525),
     "_ach_starcol":  discord.PartialEmoji(name="starcollector", id=1566521430806495352),
     "_ach_gem":      discord.PartialEmoji(name="gemtycoon", id=1566521421029449738),
-    "_welcome":      discord.PartialEmoji(name="welcome", id=000000000000000000), 
-    "_continue":     discord.PartialEmoji(name="continue", id=000000000000000000), 
-    "_info":         discord.PartialEmoji(name="info", id=000000000000000000),
+    "_welcome":      discord.PartialEmoji(name="welcome", id=1566836102579626134), 
+    "_continue":     discord.PartialEmoji(name="continue", id=1566836096707330068), 
+    "_info":         discord.PartialEmoji(name="info", id=1566836100691923014),
 }
 
 EMOJI_KEYS = {
