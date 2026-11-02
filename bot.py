@@ -85,6 +85,17 @@ CRAFT_CHAIN = {
 
 CRAFT_COST = 5
 
+# --- ПРЕСТИЖ ---
+PRESTIGE_COIN_REQUIREMENT = 100_000   # сколько всего монет нужно на 1 очко
+PRESTIGE_BONUS_PER_POINT = 0.05       # +5% к доходу за очко
+CLAN_MAX_LEVEL = 21                   # максимум уровня клана
+CLAN_XP_PER_LEVEL = 100               # XP для следующего уровня (база)
+
+# --- ДУЭЛИ ---
+DUEL_CHALLENGE_TIMEOUT = 120          # сколько ждём согласия
+DUEL_CHALLENGE_DELETE_SECONDS = 30    # автоудаление после результата
+DUEL_CHALLENGE_DECLINE_SECONDS = 15   # автоудаление после отказа/таймаута
+
 CRAFT_SETTINGS = {
     "basic_gen":      {"chance": 1.00, "gems": 0},
     "copper_gen":     {"chance": 1.00, "gems": 0},
@@ -471,6 +482,7 @@ TITLES = {
     "quest_hero": ("Герой сюжета", "Выполни 5 сюжетных квестов"),
     "ach_hunter": ("Охотник за достижениями", "Открой 10 достижений"),
     "grid_master":("Мастер сетки", "Расширь замок до 100 слотов"),
+    "ascended":   ("Перерождённый", "Соверши перерождение"),
 }
 
 # Бонусы титулов: id -> (тип эффекта, значение)
@@ -497,6 +509,7 @@ TITLE_BONUSES = {
     "quest_hero":  ("craft_chance", 0.02),            # +2% шанс синтеза
     "ach_hunter":  ("combat_power", 0.01),            # +1% мощь
     "grid_master": ("income_coins", 0.02),            # +2% доход монет
+    "ascended":    ("income_coins", 0.03),            # +3% доход монет
 }
 
 BTYPE_NAMES = {
@@ -777,6 +790,7 @@ class CastleBot(commands.Bot):
                     if winner:
                         await log_clan(winner, "war_win", f"Победа над кланом {c2 if winner == c1 else c1}")
                         await update_clan_quest(winner, "war", 1)
+                        await add_clan_xp(winner, 200)
 
                 await self.db.commit()
             except Exception as e:
@@ -834,6 +848,7 @@ class CastleBot(commands.Bot):
             ("storage_size", "INTEGER DEFAULT 36"),
             ("income_bonus", "REAL DEFAULT 0.0"),
             ("raid_wins", "INTEGER DEFAULT 0"),
+            ("prestige_points", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await self.db.execute(f"ALTER TABLE players ADD COLUMN {column} {definition}")
@@ -1490,6 +1505,14 @@ class CastleBot(commands.Bot):
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        for column, definition in [
+            ("level", "INTEGER DEFAULT 1"),
+            ("xp", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await self.db.execute(f"ALTER TABLE clans ADD COLUMN {column} {definition}")
+            except Exception:
+                pass
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS clan_inventory (
                 clan_id INTEGER,
@@ -2477,10 +2500,60 @@ async def log_clan(clan_id: int, action: str, details: str = ""):
     )
     await bot.db.commit()
 
+
+async def get_clan_level_info(clan_id: int) -> tuple[int, int, float]:
+    async with bot.db.execute(
+        "SELECT level, xp, bonus FROM clans WHERE id = ?", (clan_id,)
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return 1, 0, 0.0
+    level, xp, bonus = row
+    return (level or 1), (xp or 0), (bonus or 0.0)
+
+
+async def add_clan_xp(clan_id: int, amount: int) -> tuple[int, int, float]:
+    """Добавляет XP клану, повышает уровень и пересчитывает бонус к доходу."""
+    if amount <= 0:
+        return await get_clan_level_info(clan_id)
+
+    old_level = 1
+    new_level = 1
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT level, xp FROM clans WHERE id = ?", (clan_id,)
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            raise ValueError("Клан не найден.")
+
+        old_level = row[0] or 1
+        level = old_level
+        xp = (row[1] or 0) + amount
+
+        while level < CLAN_MAX_LEVEL and xp >= CLAN_XP_PER_LEVEL * level:
+            xp -= CLAN_XP_PER_LEVEL * level
+            level += 1
+
+        if level >= CLAN_MAX_LEVEL:
+            xp = min(xp, CLAN_XP_PER_LEVEL * level)
+
+        bonus = min(0.20, (level - 1) * 0.01)
+        new_level = level
+        await bot.db.execute(
+            "UPDATE clans SET level = ?, xp = ?, bonus = ? WHERE id = ?",
+            (level, xp, bonus, clan_id),
+        )
+
+    if new_level > old_level:
+        await log_clan(clan_id, "level_up", f"{old_level} → {new_level}")
+    return await get_clan_level_info(clan_id)
+
+
 def has_clan_permission(role: str, action: str) -> bool:
     perms = {
         "leader": ["invite", "kick", "promote", "buy", "war", "treasury", "disband"],
-        "deputy": ["invite", "kick", "promote", "buy", "war", "treasury", "disband"],
+        "deputy": ["invite", "kick", "promote", "buy", "war", "treasury"],
         "officer": ["invite", "buy", "treasury"],
         "veteran": ["buy"],
         "member": [],
@@ -2524,8 +2597,11 @@ async def get_per_second_income(user_id: int) -> tuple[float, float]:
     title_coins = await get_title_bonus(user_id, "income_coins")
     title_gems = await get_title_bonus(user_id, "income_gems")
 
-    multiplier_coins = multiplier * (1 + pet_coins + title_coins)
-    multiplier_gems = multiplier * (1 + pet_gems + title_gems)
+    # бонус престижа
+    prestige_bonus = await get_prestige_bonus(user_id)
+
+    multiplier_coins = multiplier * (1 + pet_coins + title_coins + prestige_bonus)
+    multiplier_gems = multiplier * (1 + pet_gems + title_gems + prestige_bonus)
 
     async with bot.db.execute("""
         SELECT inv.stars, i.income_per_hour, i.income_gems_per_hour
@@ -3028,6 +3104,8 @@ async def get_unlocked_titles(user_id: int) -> set:
     ) as c:
         ach_count = (await c.fetchone())[0] or 0
 
+    prestige_points = await get_prestige_points(user_id)
+
     # --- Формируем set ---
     unlocked = {"novice"}
     if gens >= 10: unlocked.add("builder")
@@ -3050,6 +3128,7 @@ async def get_unlocked_titles(user_id: int) -> set:
     if story_done >= 5: unlocked.add("quest_hero")
     if ach_count >= 10: unlocked.add("ach_hunter")
     if grid_size >= 100: unlocked.add("grid_master")
+    if prestige_points >= 1: unlocked.add("ascended")
 
     return unlocked
 
@@ -3142,11 +3221,24 @@ async def get_top_players(top_type: str, limit: int = 10) -> list:
 
     elif top_type == "clans":
         async with bot.db.execute("""
-            SELECT c.id, c.name, COALESCE(SUM(i.price * (1 + ci.stars * 0.5)), 0) AS power
+            SELECT c.id, c.name,
+                COALESCE((
+                    SELECT SUM(i.price * (1 + ci.stars * 0.5))
+                    FROM clan_inventory ci
+                    JOIN items i ON ci.item_id = i.id
+                    WHERE ci.clan_id = c.id
+                ), 0)
+                + COALESCE((
+                    SELECT SUM(mp.power) FROM (
+                        SELECT SUM(i2.price * (1 + inv.stars * 0.5)) AS power
+                        FROM inventory inv
+                        JOIN items i2 ON inv.item_id = i2.id
+                        JOIN clan_members cm ON cm.user_id = inv.user_id
+                        WHERE cm.clan_id = c.id AND inv.location = 'profile'
+                        GROUP BY inv.user_id
+                    ) mp
+                ), 0) AS power
             FROM clans c
-            LEFT JOIN clan_inventory ci ON ci.clan_id = c.id
-            LEFT JOIN items i ON ci.item_id = i.id
-            GROUP BY c.id
             ORDER BY power DESC
             LIMIT ?
         """, (limit,)) as c:
@@ -3502,6 +3594,8 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
     ) as c:
         ach_count = (await c.fetchone())[0] or 0
 
+    prestige_points = await get_prestige_points(user_id)
+
     # --- Строим embed ---
     embed = discord.Embed(
         title=f"📈 Аналитика — {interaction.user.name}",
@@ -3600,6 +3694,7 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         name="🏆 Прогресс",
         value=(
             f"Достижений: **{ach_count}**\n"
+            f"Престиж: **{prestige_points}** очк.\n"
             f"Гемов: **{gems}**\n"
             f"Монет: **{coins}**"
         ),
@@ -3800,9 +3895,14 @@ async def get_total_bonus_line(user_id: int) -> str:
     pet_gems = await get_pet_bonus(user_id, "income_gems")
     title_coins = await get_title_bonus(user_id, "income_coins")
     title_gems = await get_title_bonus(user_id, "income_gems")
+    prestige_bonus = await get_prestige_bonus(user_id)
 
-    mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (1 + pet_coins + title_coins)
-    mult_gems = (1 + status_bonus) * (1 + clan_bonus) * (1 + pet_gems + title_gems)
+    mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (
+        1 + pet_coins + title_coins + prestige_bonus
+    )
+    mult_gems = (1 + status_bonus) * (1 + clan_bonus) * (
+        1 + pet_gems + title_gems + prestige_bonus
+    )
     coin_pct = int((mult_coins - 1) * 100)
     gem_pct = int((mult_gems - 1) * 100)
 
@@ -3815,6 +3915,8 @@ async def get_total_bonus_line(user_id: int) -> str:
         parts.append(f"питомец +{int(pet_coins*100)}%/+{int(pet_gems*100)}%")
     if title_coins or title_gems:
         parts.append(f"титул +{int(title_coins*100)}%/+{int(title_gems*100)}%")
+    if prestige_bonus > 0:
+        parts.append(f"престиж +{int(prestige_bonus*100)}%")
 
     suffix = f" ({', '.join(parts)})" if parts else " (нет бонусов)"
     return f"**Монеты: +{coin_pct}%** | **Гемы: +{gem_pct}%**{suffix}"
@@ -3834,12 +3936,132 @@ async def get_total_bonus_percent(user_id: int) -> int:
     if clan:
         clan_bonus = clan[4] or 0.0
 
-    # питомец и титул для монет
+    # питомец, титул и престиж для монет
     pet_coins = await get_pet_bonus(user_id, "income_coins")
     title_coins = await get_title_bonus(user_id, "income_coins")
+    prestige_bonus = await get_prestige_bonus(user_id)
 
-    mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (1 + pet_coins + title_coins)
+    mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (
+        1 + pet_coins + title_coins + prestige_bonus
+    )
     return int((mult_coins - 1) * 100)
+
+
+# ============================================================
+#  🔁 ПРЕСТИЖ
+# ============================================================
+
+async def get_prestige_points(user_id: int) -> int:
+    async with bot.db.execute(
+        "SELECT prestige_points FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    return (row[0] if row else 0) or 0
+
+
+async def get_prestige_bonus(user_id: int) -> float:
+    points = await get_prestige_points(user_id)
+    return points * PRESTIGE_BONUS_PER_POINT
+
+
+async def calculate_prestige_gain(user_id: int) -> int:
+    async with bot.db.execute(
+        "SELECT total_coins_earned, prestige_points FROM players WHERE user_id = ?",
+        (user_id,),
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return 0
+    total, points = row
+    earned_points = int((total or 0) // PRESTIGE_COIN_REQUIREMENT)
+    return max(0, earned_points - (points or 0))
+
+
+async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, str, int, int]:
+    settings = await get_settings(guild_id) if guild_id else {
+        "start_coins": DEFAULT_START_COINS,
+    }
+    start_coins = settings["start_coins"]
+    points = await get_prestige_points(user_id)
+
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT total_coins_earned, prestige_points FROM players WHERE user_id = ?",
+                (user_id,),
+            ) as c:
+                row = await c.fetchone()
+            if not row:
+                raise ValueError("Профиль не найден.")
+
+            total, points = row
+            points = points or 0
+            gain = int((total or 0) // PRESTIGE_COIN_REQUIREMENT) - points
+            if gain <= 0:
+                need = (points + 1) * PRESTIGE_COIN_REQUIREMENT - (total or 0)
+                raise ValueError(
+                    f"Нужно ещё 🪙 {max(0, need)} всего заработанных монет."
+                )
+
+            # Закрываем активные лоты игрока и возвращаем ставки.
+            async with bot.db.execute(
+                "SELECT id, current_bidder, current_bid FROM auctions "
+                "WHERE seller_id = ? AND status = 'active'",
+                (user_id,),
+            ) as c:
+                lots = await c.fetchall()
+            for aid, bidder, bid in lots:
+                if bidder and bid:
+                    await bot.db.execute(
+                        "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                        (bid, bidder),
+                    )
+                await bot.db.execute(
+                    "DELETE FROM auction_bids WHERE auction_id = ?", (aid,)
+                )
+                await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
+
+            await bot.db.execute("""
+                UPDATE players SET
+                    coins = ?,
+                    grid_size = 9,
+                    storage_size = 36,
+                    income_bonus = 0.0,
+                    catalysts = 0,
+                    title = 'Новичок',
+                    prestige_points = prestige_points + ?,
+                    daily_quest_date = NULL,
+                    daily_quest_progress = '{}',
+                    daily_quest_claimed = '[]',
+                    last_collected = CURRENT_TIMESTAMP,
+                    last_gem_collected = CURRENT_TIMESTAMP,
+                    last_tax_time = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            """, (start_coins, gain, user_id))
+
+            await bot.db.execute("DELETE FROM inventory WHERE user_id = ?", (user_id,))
+            await bot.db.execute(
+                "DELETE FROM player_upgrades WHERE user_id = ?", (user_id,)
+            )
+            await bot.db.execute(
+                "DELETE FROM bank_deposits WHERE user_id = ?", (user_id,)
+            )
+            await bot.db.execute(
+                "DELETE FROM market_listings WHERE seller_id = ?", (user_id,)
+            )
+    except ValueError as e:
+        return False, f"❌ {e}", 0, points
+
+    new_points = points + gain
+    return (
+        True,
+        f"🔁 Перерождение завершено! Получено **{gain}** очков престижа.\n"
+        f"Всего очков: **{new_points}** (+{int(new_points * PRESTIGE_BONUS_PER_POINT * 100)}% к доходу).",
+        gain,
+        new_points,
+    )
+
+
 # ============================================================
 #  🏆 ДОСТИЖЕНИЯ
 # ============================================================
@@ -4090,6 +4312,15 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Налоги:** 2% в сутки от баланса монет.\n\n"
             "**Где смотреть:** «Мой профиль» → «Обмен», «Социум» → «Банк» / «Налоги»."
         ),
+        "prestige": (
+            "🔁 Перерождение",
+            "**Что это:** сброс замка ради постоянного бонуса к доходу.\n\n"
+            "**Очки:** 1 очко за каждые 100 000 всего заработанных монет.\n\n"
+            "**Бонус:** +5% к доходу за каждое очко. Очки сохраняются навсегда.\n\n"
+            "**Сбрасывается:** монеты, инвентарь, сетка, катализаторы, улучшения, вклад, ежедневные квесты.\n\n"
+            "**Остаётся:** гемы, питомцы, титулы, достижения, клан, косметика, сюжетные квесты, статистика.\n\n"
+            "**Где:** главное меню → «Перерождение»."
+        ),
         "generators": (
             "🏗️ Генераторы",
             "**Покупка:** «Магазин» → «Генераторы».\n\n"
@@ -4112,7 +4343,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
         ),
         "titles": (
             "🏅 Титулы",
-            "**20 титулов**, каждый даёт **+1–2%** к доходу/синтезу/мощи/рейдам.\n\n"
+            "**21 титул**, каждый даёт **+1–3%** к доходу/синтезу/мощи/рейдам.\n\n"
             "**Примеры:**\n"
             "«Новичок» — всем.\n"
             "«Богач» — 10 000 монет → +2% доход.\n"
@@ -4469,14 +4700,49 @@ async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Em
 
     members = await get_clan_members(c_id)
     power = await get_clan_power(c_id)
+    level, xp, bonus = await get_clan_level_info(c_id)
+    xp_need = CLAN_XP_PER_LEVEL * level
 
     embed = discord.Embed(title=f"🏰 Клан «{name}»", color=0x9b59b6)
     embed.add_field(name="Лидер", value=f"<@{leader_id}>", inline=True)
     embed.add_field(name="Участников", value=str(len(members)), inline=True)
     embed.add_field(name="Мощь клана", value=str(power), inline=True)
     embed.add_field(name="Сундук", value=f"{COIN} {treasury}", inline=True)
+    embed.add_field(
+        name="Уровень",
+        value=f"**{level}/{CLAN_MAX_LEVEL}** (XP {xp}/{xp_need})",
+        inline=True,
+    )
     embed.add_field(name="Бонус к доходу", value=f"+{int(bonus*100)}%", inline=True)
 
+    embed = await fix_embed_emojis(embed)
+    return embed
+
+
+async def build_clan_inventory_embed(clan) -> discord.Embed:
+    clan_id = clan[0]
+    clan_name = clan[1]
+    async with bot.db.execute("""
+        SELECT ci.slot, ci.item_id, ci.stars, i.emoji
+        FROM clan_inventory ci
+        JOIN items i ON ci.item_id = i.id
+        WHERE ci.clan_id = ?
+    """, (clan_id,)) as c:
+        rows = await c.fetchall()
+
+    items = {}
+    for slot, item_id, stars, default_emoji in rows:
+        items[slot] = await get_star_emoji(item_id, stars, default_emoji)
+
+    width = 6
+    embed = discord.Embed(
+        title=f"📦 Сетка клана «{clan_name}»",
+        description=f"Слотов: **36** | Занято: **{len(rows)}**",
+        color=0x9b59b6,
+    )
+    for start in range(0, 36, width):
+        row_items = [items.get(slot, "⬛") for slot in range(start, start + width)]
+        embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
     embed = await fix_embed_emojis(embed)
     return embed
 
@@ -5141,12 +5407,116 @@ class MainMenuView(BaseView):
         embed = discord.Embed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id))
 
+    @discord.ui.button(label="Перерождение", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=3)
+    async def tab_prestige(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_prestige_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=PrestigeView(self.author_id))
+
+
+async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embed:
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT total_coins_earned, prestige_points FROM players WHERE user_id = ?",
+        (user_id,),
+    ) as c:
+        row = await c.fetchone()
+
+    total, points = row if row else (0, 0)
+    total = total or 0
+    points = points or 0
+    gain = max(0, int(total // PRESTIGE_COIN_REQUIREMENT) - points)
+    next_need = 0 if gain > 0 else max(
+        0, (points + 1) * PRESTIGE_COIN_REQUIREMENT - total
+    )
+    bonus_pct = int(points * PRESTIGE_BONUS_PER_POINT * 100)
+
+    embed = discord.Embed(
+        title="🔁 Перерождение",
+        description=(
+            "Сбрось текущий замок и начни заново — но уже с постоянным бонусом к доходу.\n"
+            "Это основной долгосрочный цикл игры."
+        ),
+        color=0x9b59b6,
+    )
+    embed.add_field(name="Очки престижа", value=f"**{points}**", inline=True)
+    embed.add_field(name="Бонус к доходу", value=f"**+{bonus_pct}%**", inline=True)
+    embed.add_field(name="Доступно сейчас", value=f"**+{gain}** очков", inline=True)
+    embed.add_field(
+        name="Всего заработано",
+        value=f"🪙 {format_price(total)}",
+        inline=True,
+    )
+    embed.add_field(
+        name="До следующего очка",
+        value=f"🪙 {format_price(next_need)}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Что сбросится",
+        value=(
+            "монеты, инвентарь, сетка, катализаторы, улучшения, вклад, "
+            "ежедневные квесты"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Что останется",
+        value=(
+            "гемы, питомцы, титулы, достижения, клан, косметика, "
+            "сюжетные квесты, статистика"
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text=f"1 очко = {format_price(PRESTIGE_COIN_REQUIREMENT)} всего заработанных монет"
+    )
+    embed = await fix_embed_emojis(embed)
+    return embed
+
+
+class PrestigeView(BaseView):
+    @discord.ui.button(label="Переродиться", emoji="🔁", style=discord.ButtonStyle.danger, row=0)
+    async def btn_prestige(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PrestigeConfirmModal(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.back_to_main(interaction)
+
+
+class PrestigeConfirmModal(discord.ui.Modal, title="Подтверждение перерождения"):
+    confirm = discord.ui.TextInput(label="Введите ПЕРЕРОДИТЬСЯ", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if self.confirm.value.strip().upper() != "ПЕРЕРОДИТЬСЯ":
+            return await interaction.followup.send("❌ Отменено.", ephemeral=True)
+
+        ok, msg, gain, points = await do_prestige(self.author_id, interaction.guild_id)
+        if not ok:
+            return await interaction.followup.send(msg, ephemeral=True)
+
+        try:
+            embed = await build_main_embed(interaction)
+            await interaction.edit_original_response(
+                embed=embed, view=MainMenuView(self.author_id)
+            )
+        except discord.HTTPException:
+            pass
+        await interaction.followup.send(msg, ephemeral=True)
+
 
 GUIDE_SECTIONS = {
     "economy": ("💰 Экономика", "Монеты, гемы, доход, обмен, банк, налоги"),
+    "prestige": ("🔁 Перерождение", "Сброс замка, очки престижа, постоянный бонус"),
     "generators": ("🏗️ Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
     "pets": ("🐾 Питомцы", "5 видов, кормление, уровни, бонусы"),
-    "titles": ("🏅 Титулы", "20 штук, условия, бонусы"),
+    "titles": ("🏅 Титулы", "21 титул, условия, бонусы"),
     "clans": ("🏰 Кланы", "Создание, роли, войны, сундук, квесты"),
     "pvp": ("⚔️ PvP", "Рейды, дуэли, мощь, лимиты"),
     "auction": ("🏛️ Аукцион и биржа", "Лоты, ставки, комиссия, цены"),
@@ -5589,14 +5959,16 @@ class SocialView(BaseView):
     async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         async with bot.db.execute(
-            "SELECT id, item_id, stars, current_bid, end_time FROM auctions WHERE status = 'active' ORDER BY end_time ASC LIMIT 10"
+            "SELECT a.id, a.item_id, a.stars, a.current_bid, a.end_time, i.name, i.emoji "
+            "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+            "WHERE a.status = 'active' ORDER BY a.end_time ASC LIMIT 10"
         ) as c:
             lots = await c.fetchall()
         embed = discord.Embed(title="🏛️ Аукцион", color=0xf1c40f)
         if lots:
-            for aid, item_id, stars, bid, end in lots:
+            for aid, item_id, stars, bid, end, item_name, item_emoji in lots:
                 embed.add_field(
-                    name=f"Лот #{aid}: {item_id} ({stars}★)",
+                    name=f"Лот #{aid}: {item_emoji or '📦'} {item_name or item_id} ({stars}★)",
                     value=f"Текущая ставка: 🪙 {bid}\nДо: {datetime.datetime.fromisoformat(end).strftime('%d.%m %H:%M')}",
                     inline=False
                 )
@@ -5604,11 +5976,14 @@ class SocialView(BaseView):
             embed.description = "Активных лотов нет."
         view = discord.ui.View()
         s = discord.ui.Button(label="Выставить лот", emoji="📤", style=discord.ButtonStyle.success)
-        s.callback = lambda i: i.response.send_modal(AuctionSellModal(self.author_id))
+        s.callback = lambda i: open_auction_sell_from_button(i, self.author_id)
         view.add_item(s)
         b = discord.ui.Button(label="Ставка", emoji="💸", style=discord.ButtonStyle.primary)
         b.callback = lambda i: i.response.send_modal(AuctionBidModal(self.author_id))
         view.add_item(b)
+        c = discord.ui.Button(label="Мои лоты", emoji="📦", style=discord.ButtonStyle.secondary)
+        c.callback = lambda i: open_auction_cancel_from_button(i, self.author_id)
+        view.add_item(c)
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         back.callback = lambda i: self._back_to_social(i)
         view.add_item(back)
@@ -5914,11 +6289,42 @@ class ClanMenuView(BaseView):
         embed = discord.Embed(title="⚙️ Управление кланом", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ClanManageView(self.author_id, self.clan_id))
 
+    @discord.ui.button(label="Сетка", emoji="📦", style=discord.ButtonStyle.secondary, row=4)
+    async def btn_inventory(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            return await interaction.followup.send("❌ Ты не в клане.", ephemeral=True)
+        embed = await build_clan_inventory_embed(clan)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClanInventoryView(self.author_id, self.clan_id),
+        )
+
     @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = discord.Embed(title="⚔️ Социум", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+class ClanInventoryView(BaseView):
+    def __init__(self, author_id: int, clan_id: int):
+        super().__init__(author_id)
+        self.clan_id = clan_id
+
+    @discord.ui.button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            return await interaction.followup.send("❌ Ты не в клане.", ephemeral=True)
+        embed = await build_clan_embed(interaction, clan)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClanMenuView(self.author_id, self.clan_id),
+        )
+
 
 class ClanManageView(BaseView):
     def __init__(self, author_id: int, clan_id: int):
@@ -6176,6 +6582,7 @@ class ClanBuySelectView(discord.ui.View):
             return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
         await log_clan(self.clan_id, "buy", f"{name} за {price} из сундука")
+        await add_clan_xp(self.clan_id, max(1, price // 100))
         await interaction.followup.send(
             f"✅ Куплено **{name}** для клана за 🪙 {price} из сундука.",
             ephemeral=True,
@@ -6247,6 +6654,7 @@ async def update_clan_quest(clan_id: int, quest_type: str, amount: int = 1):
     if completed:
         await bot.db.execute("UPDATE clans SET treasury = treasury + ? WHERE id = ?", (reward, clan_id))
         await log_clan(clan_id, "quest_complete", f"Тип: {quest_type}, +{reward} в сундук")
+        await add_clan_xp(clan_id, 50)
     await bot.db.commit()
 
 class CreateClanModal(discord.ui.Modal, title="Создание клана"):
@@ -6346,6 +6754,7 @@ class DepositClanModal(discord.ui.Modal, title="Пополнить сундук 
             return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
         await update_quest_progress(self.author_id, "donate_clan")
+        await add_clan_xp(clan[0], max(1, amt // 100))
         await interaction.followup.send(f"✅ В сундук клана внесено 🪙 {amt}.", ephemeral=True)
 
 async def open_raid_targets(interaction: discord.Interaction, author_id: int, group_size: int):
@@ -6576,26 +6985,29 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
         )
 
         sent = False
+
+        # Сначала пробуем ЛС: это приватнее и не засоряет канал.
         try:
-            if interaction.channel:
+            user = bot.get_user(target) or await bot.fetch_user(target)
+            view.message = await user.send(embed=embed, view=view)
+            sent = True
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            sent = False
+
+        # Если ЛС закрыты — публикуем в канал.
+        if not sent and interaction.channel:
+            try:
                 view.message = await interaction.channel.send(
                     content=f"<@{target}>", embed=embed, view=view
                 )
                 sent = True
-        except discord.HTTPException:
-            sent = False
-
-        if not sent:
-            try:
-                user = await bot.fetch_user(target)
-                view.message = await user.send(embed=embed, view=view)
-                sent = True
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            except discord.HTTPException:
                 sent = False
 
         if not sent:
             return await interaction.followup.send(
-                "❌ Не удалось отправить вызов. Открой ЛС или попробуй в канале.",
+                "❌ Не удалось отправить вызов: у противника закрыты ЛС, "
+                "а канал недоступен.",
                 ephemeral=True,
             )
 
@@ -6606,13 +7018,28 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
 
 class DuelChallengeView(discord.ui.View):
     def __init__(self, challenger_id: int, opponent_id: int, bet: int, mode: str):
-        super().__init__(timeout=120)
+        super().__init__(timeout=DUEL_CHALLENGE_TIMEOUT)
         self.challenger_id = challenger_id
         self.opponent_id = opponent_id
         self.bet = bet
         self.mode = mode
         self.resolved = False
         self.message = None
+        self._delete_task = None
+
+    def _schedule_delete(self, delay: int):
+        if not self.message:
+            return
+        if self._delete_task and not self._delete_task.done():
+            return
+        self._delete_task = asyncio.create_task(self._delete_later(delay))
+
+    async def _delete_later(self, delay: int):
+        await asyncio.sleep(delay)
+        try:
+            await self.message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.opponent_id:
@@ -6641,6 +7068,7 @@ class DuelChallengeView(discord.ui.View):
             await interaction.message.edit(embed=embed, view=None)
         except discord.HTTPException:
             pass
+        self._schedule_delete(DUEL_CHALLENGE_DELETE_SECONDS)
 
     @discord.ui.button(label="Отклонить", emoji="❌", style=discord.ButtonStyle.secondary)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6657,6 +7085,7 @@ class DuelChallengeView(discord.ui.View):
             await interaction.message.edit(embed=embed, view=None)
         except discord.HTTPException:
             pass
+        self._schedule_delete(DUEL_CHALLENGE_DECLINE_SECONDS)
 
     async def on_timeout(self):
         if self.resolved:
@@ -6670,6 +7099,7 @@ class DuelChallengeView(discord.ui.View):
                     color=0x808080,
                 )
                 await self.message.edit(embed=embed, view=None)
+                self._schedule_delete(DUEL_CHALLENGE_DECLINE_SECONDS)
             except discord.HTTPException:
                 pass
 
@@ -6790,14 +7220,16 @@ class EconomyView(BaseView):
     async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         async with bot.db.execute(
-            "SELECT id, item_id, stars, current_bid, end_time FROM auctions WHERE status = 'active' ORDER BY end_time ASC LIMIT 10"
+            "SELECT a.id, a.item_id, a.stars, a.current_bid, a.end_time, i.name, i.emoji "
+            "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+            "WHERE a.status = 'active' ORDER BY a.end_time ASC LIMIT 10"
         ) as c:
             lots = await c.fetchall()
         embed = discord.Embed(title="🏛️ Аукцион", color=0xf1c40f)
         if lots:
-            for aid, item_id, stars, bid, end in lots:
+            for aid, item_id, stars, bid, end, item_name, item_emoji in lots:
                 embed.add_field(
-                    name=f"Лот #{aid}: {item_id} ({stars}★)",
+                    name=f"Лот #{aid}: {item_emoji or '📦'} {item_name or item_id} ({stars}★)",
                     value=f"Текущая ставка: 🪙 {bid}\nДо: {datetime.datetime.fromisoformat(end).strftime('%d.%m %H:%M')}",
                     inline=False
                 )
@@ -6805,11 +7237,14 @@ class EconomyView(BaseView):
             embed.description = "Активных лотов нет."
         view = discord.ui.View()
         s = discord.ui.Button(label="Выставить лот", emoji="📤", style=discord.ButtonStyle.success)
-        s.callback = lambda i: i.response.send_modal(AuctionSellModal(self.author_id))
+        s.callback = lambda i: open_auction_sell_from_button(i, self.author_id)
         view.add_item(s)
         b = discord.ui.Button(label="Ставка", emoji="💸", style=discord.ButtonStyle.primary)
         b.callback = lambda i: i.response.send_modal(AuctionBidModal(self.author_id))
         view.add_item(b)
+        c = discord.ui.Button(label="Мои лоты", emoji="📦", style=discord.ButtonStyle.secondary)
+        c.callback = lambda i: open_auction_cancel_from_button(i, self.author_id)
+        view.add_item(c)
         back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary)
         back.callback = lambda i: self._back(i)
         view.add_item(back)
@@ -9089,6 +9524,260 @@ class AuctionSellModal(discord.ui.Modal, title="Выставить на аукц
             ephemeral=True
         )
 
+async def open_auction_sell_select(
+    interaction: discord.Interaction,
+    author_id: int,
+    page: int = 0,
+):
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, inv.stars, i.name, i.emoji
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = 'profile'
+        ORDER BY inv.slot ASC
+    """, (author_id,)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return await interaction.followup.send(
+            "❌ В замке нет предметов для аукциона.", ephemeral=True
+        )
+
+    page_size = 10
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+
+    options = []
+    for slot, item_id, stars, name, default_emoji in chunk:
+        options.append(discord.SelectOption(
+            label=f"Слот {slot}: {name} ({stars}★)"[:100],
+            value=f"{slot}:{item_id}:{stars}",
+            emoji=parse_emoji_safe(default_emoji),
+        ))
+
+    embed = discord.Embed(
+        title="🏛️ Выставить лот",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из замка.",
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=AuctionSellSelectView(author_id, options, page, total_pages),
+    )
+
+
+async def open_auction_sell_from_button(interaction: discord.Interaction, author_id: int):
+    await interaction.response.defer()
+    await open_auction_sell_select(interaction, author_id)
+
+
+class AuctionSellSelectView(discord.ui.View):
+    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self.add_item(make_select("Выбери предмет", options, self.select, row=0))
+
+        if total_pages > 1:
+            prev = discord.ui.Button(label="◀️ Стр.", style=discord.ButtonStyle.secondary, row=1)
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(label="Стр. ▶️", style=discord.ButtonStyle.secondary, row=1)
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    async def select(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        slot_str, item_id, stars_str = value.split(":", 2)
+        await interaction.response.send_modal(
+            AuctionSellDetailsModal(
+                self.author_id, int(slot_str), item_id, int(stars_str)
+            )
+        )
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_auction_sell_select(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_auction_sell_select(interaction, self.author_id, self.page + 1)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на аукцион"):
+    start_price = discord.ui.TextInput(label="Стартовая цена", required=True)
+    hours = discord.ui.TextInput(label="Длительность (часов)", default="24", required=True)
+
+    def __init__(self, author_id: int, slot: int, item_id: str, stars: int):
+        super().__init__()
+        self.author_id = author_id
+        self.slot = slot
+        self.item_id = item_id
+        self.stars = stars
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            start = int(self.start_price.value)
+            hours = int(self.hours.value)
+            if start <= 0 or hours < 1 or hours > 72:
+                raise ValueError
+        except ValueError:
+            return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
+
+        end = datetime.datetime.now() + datetime.timedelta(hours=hours)
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT slot FROM inventory "
+                    "WHERE user_id = ? AND location = 'profile' AND slot = ? "
+                    "AND item_id = ? AND stars = ?",
+                    (self.author_id, self.slot, self.item_id, self.stars),
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("Предмет уже продан или перемещён.")
+
+                cur = await bot.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = 'profile' AND slot = ? "
+                    "AND item_id = ? AND stars = ?",
+                    (self.author_id, self.slot, self.item_id, self.stars),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Предмет уже продан или перемещён.")
+
+                await bot.db.execute(
+                    "INSERT INTO auctions "
+                    "(seller_id, item_id, stars, start_price, current_bid, end_time) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (self.author_id, self.item_id, self.stars, start, start, end.isoformat()),
+                )
+        except ValueError as e:
+            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+
+        await update_quest_progress(self.author_id, "sell_auction")
+        await interaction.followup.send(
+            f"✅ Лот выставлен: **{self.item_id}** ({self.stars}★), "
+            f"стартовая цена 🪙 {start}, до {end.strftime('%H:%M %d.%m')}.",
+            ephemeral=True,
+        )
+
+
+async def open_auction_cancel_select(interaction: discord.Interaction, author_id: int):
+    async with bot.db.execute("""
+        SELECT a.id, a.item_id, a.stars, i.name
+        FROM auctions a
+        LEFT JOIN items i ON i.id = a.item_id
+        WHERE a.seller_id = ? AND a.status = 'active'
+        ORDER BY a.end_time ASC
+        LIMIT 25
+    """, (author_id,)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return await interaction.followup.send(
+            "❌ У тебя нет активных лотов.", ephemeral=True
+        )
+
+    options = [
+        discord.SelectOption(
+            label=f"Лот #{aid}: {name or item_id} ({stars}★)"[:100],
+            value=str(aid),
+        )
+        for aid, item_id, stars, name in rows
+    ]
+    embed = discord.Embed(
+        title="📦 Мои лоты",
+        description="Выбери лот, чтобы отменить его и вернуть предмет.",
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=AuctionCancelSelectView(author_id, options),
+    )
+
+
+async def open_auction_cancel_from_button(interaction: discord.Interaction, author_id: int):
+    await interaction.response.defer()
+    await open_auction_cancel_select(interaction, author_id)
+
+
+class AuctionCancelSelectView(discord.ui.View):
+    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.add_item(make_select("Выбери лот", options, self.select, row=0))
+        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.author_id
+
+    async def select(self, interaction: discord.Interaction):
+        aid = int(interaction.data["values"][0])
+        await interaction.response.defer()
+
+        item_id = stars = None
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT seller_id, item_id, stars, current_bidder, current_bid "
+                    "FROM auctions WHERE id = ? AND status = 'active'",
+                    (aid,),
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("Лот уже закрыт.")
+                seller_id, item_id, stars, bidder, bid = row
+                if seller_id != self.author_id:
+                    raise ValueError("Это не твой лот.")
+
+                if bidder and bid:
+                    await bot.db.execute(
+                        "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                        (bid, bidder),
+                    )
+                await bot.db.execute(
+                    "DELETE FROM auction_bids WHERE auction_id = ?", (aid,)
+                )
+                await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
+        except ValueError as e:
+            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+
+        msg, compensation = await grant_item_or_compensation(
+            self.author_id, item_id, 1, stars or 0
+        )
+        if compensation:
+            await interaction.followup.send(
+                f"✅ Лот #{aid} отменён. {msg}", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"✅ Лот #{aid} отменён, предмет возвращён в замок.", ephemeral=True
+            )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
 class AuctionBidModal(discord.ui.Modal, title="Сделать ставку"):
     auction_id = discord.ui.TextInput(label="ID лота", required=True)
     amount = discord.ui.TextInput(label="Ставка (монеты)", required=True)
@@ -9156,6 +9845,18 @@ class AuctionBidModal(discord.ui.Modal, title="Сделать ставку"):
                     "UPDATE auctions SET current_bid = ?, current_bidder = ? WHERE id = ?",
                     (amt, self.author_id, aid),
                 )
+
+                # Anti-snipe: ставка в последние 2 минуты продлевает лот.
+                end_dt = datetime.datetime.fromisoformat(end_time)
+                if (end_dt - datetime.datetime.now()).total_seconds() < 120:
+                    new_end = (
+                        datetime.datetime.now() + datetime.timedelta(minutes=2)
+                    ).isoformat()
+                    await bot.db.execute(
+                        "UPDATE auctions SET end_time = ? WHERE id = ?",
+                        (new_end, aid),
+                    )
+
                 await bot.db.execute(
                     "INSERT INTO auction_bids (auction_id, bidder_id, amount) VALUES (?, ?, ?)",
                     (aid, self.author_id, amt),
@@ -9164,6 +9865,16 @@ class AuctionBidModal(discord.ui.Modal, title="Сделать ставку"):
             return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
         await update_quest_progress(self.author_id, "bid_auction")
+
+        if current_bidder and current_bidder != self.author_id:
+            prev_user = bot.get_user(current_bidder)
+            if prev_user:
+                try:
+                    await prev_user.send(
+                        f"🏛️ Твою ставку на лоте #{aid} перебили: 🪙 {amt}."
+                    )
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    pass
 
         await interaction.followup.send(f"✅ Ставка 🪙 {amt} принята. Ты лидер лота!", ephemeral=True)
         
@@ -11852,7 +12563,7 @@ class AdminEditModal(discord.ui.Modal, title="Изменить поле проф
             await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
             return
         field = self.field.value.strip()
-        if field not in ("coins", "gems", "catalysts", "grid_size", "storage_size", "income_bonus"):
+        if field not in ("coins", "gems", "catalysts", "grid_size", "storage_size", "income_bonus", "prestige_points"):
             await interaction.followup.send("❌ Неверное поле.", ephemeral=True)
             return
         try:
@@ -11929,7 +12640,8 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                     title = 'Новичок',
                     active_pet = NULL,
                     last_tax_time = CURRENT_TIMESTAMP,
-                    raid_wins = 0
+                    raid_wins = 0,
+                    prestige_points = 0
                 WHERE user_id = ?
             """, (DEFAULT_START_COINS, uid))
 
