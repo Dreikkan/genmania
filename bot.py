@@ -4322,7 +4322,11 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
     gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
     shop_emoji = str(BOT_BTN_EMOJIS.get("_shop", "🛒"))
 
-    async with bot.db.execute("SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour FROM items WHERE buyable = 1 ORDER BY price ASC") as c:
+    # ВАЖНО: убираем фильтр buyable = 1, чтобы показать ВСЕ генераторы
+    async with bot.db.execute(
+        "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour, buyable "
+        "FROM items WHERE id LIKE '%_gen' OR id LIKE 'daily_%' ORDER BY price ASC"
+    ) as c:
         rows = await c.fetchall()
 
     total = len(rows)
@@ -4331,18 +4335,16 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
     chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
 
     embed = discord.Embed(title=f"{shop_emoji} Магазин", description=f"Страница {page + 1}/{total_pages}", color=0xf1c40f)
-    for item_id, name, price, income_coins, default_emoji, rarity, income_gems in chunk:
+    
+    for item_id, name, price, income_coins, default_emoji, rarity, income_gems, buyable in chunk:
         emoji = custom.get(item_id, default_emoji)
         inc = []
         if income_coins > 0: inc.append(f"{coin} {income_coins * 3600:.2f}/час")
         if income_gems > 0: inc.append(f"{gem} {income_gems * 3600:.4f}/час")
         inc_str = " ".join(inc) if inc else "без дохода"
         
-        # --- НОВАЯ ПРОВЕРКА ЦЕНЫ ---
-        async with bot.db.execute("SELECT buyable FROM items WHERE id = ?", (item_id,)) as c:
-            is_buyable = (await c.fetchone())[0]
-            
-        if is_buyable:
+        # --- ЛОГИКА ЦЕНЫ ---
+        if buyable:
             price_str = f"Цена: {coin} {format_price(price)}"
         else:
             price_str = "Цена: `Только синтез`"
@@ -4352,6 +4354,7 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
             value=f"{price_str} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
             inline=False
         )
+        
     return await fix_embed_emojis(embed), total_pages
 
 
@@ -4398,18 +4401,31 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
     coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
     up_emoji = str(BOT_BTN_EMOJIS.get("_upgrades", "💎"))
+    user_id = interaction.user.id
 
+    # Получаем текущий размер сетки игрока
+    async with bot.db.execute("SELECT grid_size FROM players WHERE user_id = ?", (user_id,)) as c:
+        row = await c.fetchone()
+        current_grid_size = (row[0] if row else START_GRID) or START_GRID
+
+    # Получаем все улучшения
     async with bot.db.execute("""
-        SELECT id, name, description, price_coins as price, emoji, 'coins' as currency FROM grid_shop
+        SELECT id, name, description, price_coins as price, emoji, 'coins' as currency, size FROM grid_shop
         UNION ALL
-        SELECT id, name, description, price_gems as price, emoji, 'gems' as currency FROM gem_shop
+        SELECT id, name, description, price_gems as price, emoji, 'gems' as currency, 0 as size FROM gem_shop
     """) as c:
         rows = await c.fetchall()
 
-    order = {"grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3, "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7, "vip": 10, "gold": 11, "platinum": 12, "diamond": 13}
+    # Сортируем: сначала сетки по возрастанию, потом статусы
+    order = {
+        "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
+        "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
+        "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
+    }
     rows = sorted(rows, key=lambda r: order.get(r[0], 99))
 
-    async with bot.db.execute("SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)) as c:
+    # Получаем купленные улучшения
+    async with bot.db.execute("SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (user_id,)) as c:
         owned = {r[0] for r in await c.fetchall()}
 
     total = len(rows)
@@ -4418,19 +4434,32 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
 
     embed = discord.Embed(title=f"{up_emoji} Магазин улучшений", description=f"Страница {page + 1}/{total_pages}", color=0x9b59b6)
-    for gid, name, desc, price, emoji, currency in chunk:
-        status = "✅ Куплено" if gid in owned else "🔒 Не куплено"
+    
+    for gid, name, desc, price, emoji, currency, size in chunk:
         price_str = f"{coin} {format_price(price)}" if currency == "coins" else f"{gem} {format_price(price)}"
         
-        # Заменяем стандартные эмодзи статусов на кастомные из базы
-        if gid == "vip": emoji = str(BOT_BTN_EMOJIS.get("_vip", "⭐"))
-        elif gid == "gold": emoji = str(BOT_BTN_EMOJIS.get("_gold", "🥇"))
-        elif gid == "platinum": emoji = str(BOT_BTN_EMOJIS.get("_platinum", "💠"))
-        elif gid == "diamond": emoji = str(BOT_BTN_EMOJIS.get("_diamond", "💎"))
+        # Кастомные эмодзи для статусов
+        if gid == "vip": emoji = get_emoji("_vip")
+        elif gid == "gold": emoji = get_emoji("_gold")
+        elif gid == "platinum": emoji = get_emoji("_platinum")
+        elif gid == "diamond": emoji = get_emoji("_diamond")
         
-        embed.add_field(name=f"{emoji} {name} (`{gid}`)", value=f"{desc}\nЦена: {price_str}\n{status}", inline=False)
+        # --- ЛОГИКА СТАТУСОВ ---
+        if gid in owned:
+            status = "✅ Куплено"
+        elif size > 0 and size <= current_grid_size:
+            # Если это сетка, и она меньше или равна текущей
+            status = f"🚫 Недоступно (у вас сетка {current_grid_size})"
+        else:
+            status = "🛒 Доступно для покупки"
+            
+        embed.add_field(
+            name=f"{emoji} {name} (`{gid}`)", 
+            value=f"{desc}\nЦена: {price_str}\n{status}", 
+            inline=False
+        )
+        
     return await fix_embed_emojis(embed), total_pages
-
 
 async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
@@ -9012,13 +9041,32 @@ async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: 
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
 
+    # Получаем текущий размер сетки для проверки
+    async with bot.db.execute("SELECT grid_size FROM players WHERE user_id = ?", (author_id,)) as c:
+        row = await c.fetchone()
+        current_grid_size = (row[0] if row else START_GRID) or START_GRID
+
     options = []
-    for gid, name, price, emoji, currency in chunk:
+    for gid, name, price, emoji, currency, size in chunk:
         cur = "🪙" if currency == "coins" else "💎"
+        
+        # Если это сетка, и она уже меньше или равна текущей — блокируем
+        disabled = False
+        label_suffix = ""
+        if size > 0 and size <= current_grid_size:
+            disabled = True
+            label_suffix = f" (у вас {current_grid_size})"
+        elif gid in owned:
+            disabled = True
+            label_suffix = " ✅"
+            
         options.append(discord.SelectOption(
-            label=f"{name} — {cur} {price}" + (" ✅" if gid in owned else ""),
-            value=gid, emoji=emoji
+            label=f"{name} — {cur} {price}{label_suffix}",
+            value=gid,
+            emoji=emoji,
+            default=False
         ))
+
     embed = discord.Embed(
         title="💎 Выбери улучшение",
         description=f"Страница {page + 1}/{total_pages}\nВыбери улучшение:",
