@@ -147,13 +147,53 @@ GEM_EXCHANGE_MIN = 1
 COIN_EXCHANGE_MIN = 12
 
 QUEST_POOL = {
-    "craft_3":        ("Сделай 3 синтеза", 3, 5),
-    "craft_5":        ("Сделай 5 синтезов", 5, 10),
-    "success_2":      ("Успешно синтезируй 2 раза", 2, 8),
-    "buy_3":          ("Купи 3 предмета в магазине", 3, 5),
-    "move_2":         ("Перемести 2 предмета между замком и хранилищем", 2, 5),
-    "collect_income": ("Собери пассивный доход 1 раз", 1, 3),
-    "use_catalyst":   ("Используй 1 катализатор", 1, 10),
+    # --- СИНТЕЗ (Награда = стоимость сгоревших предметов + 15%) ---
+    "craft_1":        ("Сделай 1 синтез", 1, 2, 100),
+    "craft_3":        ("Сделай 3 синтеза", 3, 4, 260),
+    "craft_5":        ("Сделай 5 синтезов", 5, 6, 430),
+    "success_2":      ("Успешно синтезируй 2 раза", 2, 5, 300),
+    "use_catalyst":   ("Используй 1 катализатор", 1, 5, 150),
+
+    # --- ПОКУПКИ (Награда = стоимость покупок + 15%) ---
+    "buy_3":          ("Купи 3 предмета в магазине", 3, 2, 50),
+    "buy_10":         ("Купи 10 предметов в магазине", 10, 5, 170),
+    "buy_25":         ("Купи 25 предметов в магазине", 25, 10, 430),
+
+    # --- ЗАМОК И ХРАНИЛИЩЕ (Действия, доступные всегда) ---
+    "move_2":         ("Перемести 2 предмета между замком и хранилищем", 2, 2, 30),
+    "move_5":         ("Перемести 5 предметов между замком и хранилищем", 5, 3, 80),
+    "sort_1":         ("Отсортируй генераторы в замке 1 раз", 1, 2, 50),
+    "swap_1":         ("Поменяй местами 1 предмет", 1, 2, 50),
+    "sell_3":         ("Продай 3 предмета в хранилище", 3, 3, 100),
+
+    # --- ЗВЕЗДЫ (Улучшение доступно, пока есть копии) ---
+    "star_up_1":      ("Улучши любой генератор до 1★", 1, 10, 500),
+    "star_fail_1":    ("Провали улучшение звезды 1 раз", 1, 3, 100),
+
+    # --- ПАССИВНЫЙ ДОХОД ---
+    "collect_income": ("Собери пассивный доход 1 раз", 1, 2, 100),
+    "collect_income_3":("Собери пассивный доход 3 раза", 3, 5, 300),
+
+    # --- ЕЖЕДНЕВНЫЕ НАГРАДЫ (Всегда доступны) ---
+    "claim_daily":    ("Забери ежедневную награду", 1, 5, 200),
+
+    # --- АУКЦИОН (Ставку можно сделать всегда, если есть лоты) ---
+    "bid_auction":    ("Сделай ставку на аукционе", 1, 5, 200),
+    "sell_auction":   ("Выстави предмет на аукцион", 1, 10, 300),
+
+    # --- БАНК (Открыть и закрыть вклад можно в любой момент) ---
+    "open_deposit":   ("Открой вклад в банке", 1, 10, 300),
+    "close_deposit":  ("Забери вклад из банка", 1, 10, 300),
+
+    # --- КЛАНЫ (Доступно, если ты в клане) ---
+    "donate_clan":    ("Внеси монеты в сундук клана", 1, 10, 500),
+
+    # --- ПИТОМЦЫ (Кормление доступно раз в 6 часов) ---
+    "feed_pet":       ("Покорми питомца", 1, 5, 200),
+
+    # --- РЕЙДЫ И ДУЭЛИ (Кулдаун 1 час, можно выполнить) ---
+    "raid_1":         ("Соверши 1 рейд", 1, 8, 300),
+    "duel_1":         ("Сыграй 1 дуэль", 1, 8, 300),
 }
 
 TOGGLEABLE_COMMANDS = {
@@ -451,36 +491,36 @@ BTYPE_NAMES = {
 TITLES_PER_PAGE = 25
 
 DAILY_REWARDS = {
-    1:  (10,   1,  None),
-    2:  (20,   1,  None),
-    3:  (30,   2,  None),
-    4:  (50,   2,  None),
-    5:  (80,   3,  "daily_common"),
-    6:  (120,  3,  None),
-    7:  (200,  5,  "daily_uncommon"),
-    8:  (250,  4,  None),
-    9:  (300,  5,  None),
-    10: (400,  6,  "daily_rare"),
-    11: (450,  6,  None),
-    12: (500,  7,  None),
-    13: (600,  7,  None),
-    14: (700,  8,  "daily_epic"),
-    15: (800,  8,  None),
-    16: (900,  9,  None),
-    17: (1000, 9,  None),
-    18: (1100, 10, None),
-    19: (1200, 10, None),
-    20: (1500, 12, "daily_legendary"),
-    21: (1600, 12, None),
-    22: (1800, 13, None),
-    23: (2000, 14, None),
-    24: (2200, 15, None),
-    25: (2500, 16, "daily_mythic"),
-    26: (2700, 17, None),
-    27: (3000, 18, None),
-    28: (3300, 19, None),
-    29: (3700, 20, None),
-    30: (5000, 30, "daily_mythic"),
+    1:  (50,    1,  None),
+    2:  (100,   1,  None),
+    3:  (150,   2,  None),
+    4:  (200,   2,  None),
+    5:  (300,   2,  "daily_common"),
+    6:  (400,   2,  None),
+    7:  (600,   3,  "daily_uncommon"),
+    8:  (700,   3,  None),
+    9:  (800,   3,  None),
+    10: (1000,  4,  "daily_rare"),
+    11: (1100,  4,  None),
+    12: (1200,  4,  None),
+    13: (1300,  4,  None),
+    14: (1500,  5,  "daily_epic"),
+    15: (1600,  5,  None),
+    16: (1700,  5,  None),
+    17: (1800,  5,  None),
+    18: (1900,  5,  None),
+    19: (2000,  6,  None),
+    20: (3000,  8,  "daily_legendary"),
+    21: (3200,  8,  None),
+    22: (3400,  8,  None),
+    23: (3600,  8,  None),
+    24: (3800,  8,  None),
+    25: (5000,  10, "daily_mythic"),
+    26: (5200,  10, None),
+    27: (5400,  10, None),
+    28: (5600,  10, None),
+    29: (5800,  10, None),
+    30: (10000, 15, "daily_mythic"),   # Было 30 гемов, стало 15
 }
 
 # ============================================================
@@ -1212,8 +1252,11 @@ class CastleBot(commands.Bot):
         # Старые БД: принудительно делаем 28, 29, 30 и legendary недоступными для покупки
         await self.db.execute(
             "UPDATE items SET buyable = 0 WHERE id IN (?, ?, ?, ?)",
-            ("time_gen", "space_gen", "divine_gen", "legendary_gen"),
+            ("space_gen", "divine_gen", "legendary_gen"),
         )
+                # Временная миграция: возвращаем time_gen в магазин
+        await self.db.execute("UPDATE items SET buyable = 1 WHERE id = 'time_gen'")
+        await self.db.commit()
 
         # Не перезаписываем звёздные эмодзи, если админ уже настроил их.
         for item_id, emoji_map in star_emojis.items():
@@ -1225,20 +1268,20 @@ class CastleBot(commands.Bot):
         await self.db.commit()
 
         achievements_data = [
-            ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  str(BOT_BTN_EMOJIS.get("_ach_first", "⚗️"))),
-            ("star_1",        "Первая звезда",   "Улучши любой генератор до 1★",       10,  str(BOT_BTN_EMOJIS.get("_ach_star1", "⭐"))),
-            ("craft_10",      "Алхимик",         "Сделай 10 синтезов",                  15,  str(BOT_BTN_EMOJIS.get("_ach_chemist", "🧪"))),
-            ("star_3",        "Звёздный магнат", "Имей генератор с 3★",                 25,  str(BOT_BTN_EMOJIS.get("_ach_starcol", "🌟"))),
-            ("craft_50",      "Мастер-алхимик",  "Сделай 50 синтезов",                  50,  str(BOT_BTN_EMOJIS.get("_ach_master", "🔮"))),
-            ("star_3x3",      "Звёздный коллекционер", "Имей 3 генератора с 3★",       50,  str(BOT_BTN_EMOJIS.get("_ach_starcol", "💫"))),
-            ("success_10",    "Удачливый",       "Успешно синтезируй 10 раз",           20,  str(BOT_BTN_EMOJIS.get("_ach_lucky", "🍀"))),
-            ("success_50",    "Любимец фортуны", "Успешно синтезируй 50 раз",           75,  str(BOT_BTN_EMOJIS.get("_ach_fortune", "🎰"))),
-            ("star_5",        "Легенда",         "Имей генератор с 5★",                100,  str(BOT_BTN_EMOJIS.get("_ach_legend", "🌠"))),
-            ("fail_5",        "Не везёт",        "Провали 5 синтезов",                  10,  str(BOT_BTN_EMOJIS.get("_ach_unlucky", "💥"))),
-            ("first_gem_gen", "Гемовый магнат",  "Получи свой первый гемовый генератор",30,  str(BOT_BTN_EMOJIS.get("_ach_gem", "💎"))),
-            ("rich_1000",     "Богач",           "Накопи 1000 монет",                   10,  str(BOT_BTN_EMOJIS.get("_ach_rich", "🪙"))),
-            ("rich_10000",    "Миллионер",       "Накопи 10000 монет",                  50,  str(BOT_BTN_EMOJIS.get("_ach_million", "💰"))),
-            ("catalyst_10",   "Химик",           "Используй 10 катализаторов",          25,  str(BOT_BTN_EMOJIS.get("_ach_chemist", "🧫"))),
+            ("first_craft",   "Первый синтез",   "Сделай свой первый синтез",           5,  get_emoji("_ach_first")),
+            ("star_1",        "Первая звезда",   "Улучши любой генератор до 1★",       10,  get_emoji("_ach_star1")),
+            ("craft_10",      "Алхимик",         "Сделай 10 синтезов",                  15,  get_emoji("_ach_chemist")),
+            ("star_3",        "Звёздный магнат", "Имей генератор с 3★",                 25,  get_emoji("_ach_starcol")),
+            ("craft_50",      "Мастер-алхимик",  "Сделай 50 синтезов",                  50,  get_emoji("_ach_master")),
+            ("star_3x3",      "Звёздный коллекционер", "Имей 3 генератора с 3★",       50,  get_emoji("_ach_starcol")),
+            ("success_10",    "Удачливый",       "Успешно синтезируй 10 раз",           20,  get_emoji("_ach_lucky")),
+            ("success_50",    "Любимец фортуны", "Успешно синтезируй 50 раз",           75,  get_emoji("_ach_fortune")),
+            ("star_5",        "Легенда",         "Имей генератор с 5★",                80,  get_emoji("_ach_legend")),  
+            ("fail_5",        "Не везёт",        "Провали 5 синтезов",                  10,  get_emoji("_ach_unlucky")),
+            ("first_gem_gen", "Гемовый магнат",  "Получи свой первый гемовый генератор",20,  get_emoji("_ach_gem")),  
+            ("rich_1000",     "Богач",           "Накопи 1000 монет",                   10,  get_emoji("_ach_rich")),
+            ("rich_10000",    "Миллионер",       "Накопи 10000 монет",                  50,  get_emoji("_ach_million")),
+            ("catalyst_10",   "Химик",           "Используй 10 катализаторов",          25,  get_emoji("_ach_chemist")),
         ]
         for a in achievements_data:
             await self.db.execute("INSERT OR IGNORE INTO achievements VALUES (?, ?, ?, ?, ?)", a)
@@ -4333,10 +4376,9 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
     gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
     shop_emoji = str(BOT_BTN_EMOJIS.get("_shop", "🛒"))
 
-    # ВАЖНО: убираем фильтр buyable = 1, чтобы показать ВСЕ генераторы
     async with bot.db.execute(
         "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour, buyable "
-        "FROM items WHERE id LIKE '%_gen' OR id LIKE 'daily_%' ORDER BY price ASC"
+        "FROM items WHERE id LIKE '%_gen' ORDER BY price ASC"
     ) as c:
         rows = await c.fetchall()
 
@@ -4478,17 +4520,25 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     custom = (await get_settings(guild_id))["custom_emojis"]
     quest_emoji = custom.get("_quests", "📅")
     gem = custom.get("_gem", "💎")
+    coin = custom.get("_coin", "🪙")
 
     quests, progress, claimed = await get_or_create_daily_quests(user_id)
 
     embed = discord.Embed(title=f"{quest_emoji} Ежедневные задания", color=0x3498db)
     for qid in quests:
-        desc, target, reward = QUEST_POOL[qid]
+        # Распаковываем 4 значения: описание, цель, гемы, монеты
+        desc, target, reward_gems, reward_coins = QUEST_POOL[qid]
+        
         done = progress[qid] >= target
         status = "✅ Получено" if qid in claimed else ("🎁 Готово" if done else "⏳ В процессе")
+        
         embed.add_field(
             name=desc,
-            value=f"Прогресс: {progress[qid]}/{target}\nНаграда: {gem} {reward}\n{status}",
+            value=(
+                f"Прогресс: {progress[qid]}/{target}\n"
+                f"Награда: {gem} {reward_gems} | {coin} {reward_coins}\n"
+                f"{status}"
+            ),
             inline=False
         )
     embed = await fix_embed_emojis(embed)
@@ -8666,9 +8716,11 @@ class ClaimQuestSelectView(discord.ui.View):
             await self.fail(interaction, f"❌ Не выполнено: {progress[qid]}/{target}.")
             return
         claimed.append(qid)
+        # reward_gems, reward_coins — новые переменные из QUEST_POOL
+        desc, target, reward_gems, reward_coins = QUEST_POOL[qid]
         await bot.db.execute(
-            "UPDATE players SET daily_quest_claimed = ?, gems = gems + ? WHERE user_id = ?",
-            (json.dumps(claimed), reward, user_id)
+            "UPDATE players SET daily_quest_claimed = ?, gems = gems + ?, coins = coins + ? WHERE user_id = ?",
+            (json.dumps(claimed), reward_gems, reward_coins, user_id)
         )
         await bot.db.commit()
         embed = discord.Embed(title="🎁 Награда получена", description=f"💎 **{reward}** гемов за «{desc}»!", color=0x2ecc71)
