@@ -8971,7 +8971,7 @@ class UpgradesView(BaseView):
     def add_buttons(self):
         back = discord.ui.Button(
             label="Назад", 
-            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            emoji=get_emoji("_back"), 
             style=discord.ButtonStyle.secondary, 
             row=0
         )
@@ -8980,7 +8980,7 @@ class UpgradesView(BaseView):
         
         buy = discord.ui.Button(
             label="Купить", 
-            emoji=BOT_BTN_EMOJIS.get("_buy", "💳"), 
+            emoji=get_emoji("_buy"), 
             style=discord.ButtonStyle.success, 
             row=0
         )
@@ -9003,9 +9003,15 @@ class UpgradesView(BaseView):
         nxt.callback = self.next_page
         self.add_item(nxt)
 
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
+        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
+
     async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        # ВАЖНО: добавляем size в запрос
+        
+        # Запрос должен возвращать 6 колонок: id, name, price, emoji, currency, size
         async with bot.db.execute("""
             SELECT id, name, price_coins as price, emoji, 'coins' as currency, size FROM grid_shop
             UNION ALL
@@ -9024,11 +9030,24 @@ class UpgradesView(BaseView):
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
             owned = {r[0] for r in await c.fetchall()}
+            
         if not rows:
             await interaction.followup.send("❌ Улучшений нет.", ephemeral=True)
             return
+            
         await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0)
 
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        self.page = max(0, self.page - 1)
+        embed, _ = await build_upgrades_page(interaction, self.page)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed, total = await build_upgrades_page(interaction, self.page + 1)
+        self.page = min(total - 1, self.page + 1)
+        await interaction.edit_original_response(embed=embed, view=self)
 
 async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: int, rows: list, owned: set, page: int):
     total = len(rows)
