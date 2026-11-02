@@ -7468,8 +7468,11 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
     if len(rows) < 2:
         return await interaction.followup.send("❌ Нужно минимум 2 предмета для обмена.", ephemeral=True)
 
+    # Ограничиваем список 25 элементами (максимум для Discord Select)
+    chunk = rows[:25]
+
     options = []
-    for slot, item_id, name, default_emoji, stars in rows:
+    for slot, item_id, name, default_emoji, stars in chunk:
         emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
         stars_str = f" {stars}★" if stars > 0 else ""
         short_name = name[:40] + "..." if len(name) > 40 else name
