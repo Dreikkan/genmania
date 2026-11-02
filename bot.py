@@ -9003,7 +9003,7 @@ class UpgradesView(BaseView):
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-        async def buy(self, interaction: discord.Interaction):
+    async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
         # ВАЖНО: добавляем size в запрос
         async with bot.db.execute("""
