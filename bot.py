@@ -9003,17 +9003,13 @@ class UpgradesView(BaseView):
         nxt.callback = self.next_page
         self.add_item(nxt)
 
-    async def back(self, interaction: discord.Interaction):
+        async def buy(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = discord.Embed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
-        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
-
-    async def buy(self, interaction: discord.Interaction):
-        await interaction.response.defer()
+        # ВАЖНО: добавляем size в запрос
         async with bot.db.execute("""
-            SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
+            SELECT id, name, price_coins as price, emoji, 'coins' as currency, size FROM grid_shop
             UNION ALL
-            SELECT id, name, price_gems as price, emoji, 'gems' as currency FROM gem_shop
+            SELECT id, name, price_gems as price, emoji, 'gems' as currency, 0 as size FROM gem_shop
         """) as c:
             rows = await c.fetchall()
 
@@ -9032,18 +9028,6 @@ class UpgradesView(BaseView):
             await interaction.followup.send("❌ Улучшений нет.", ephemeral=True)
             return
         await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0)
-
-    async def prev_page(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        self.page = max(0, self.page - 1)
-        embed, _ = await build_upgrades_page(interaction, self.page)
-        await interaction.edit_original_response(embed=embed, view=self)
-
-    async def next_page(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        embed, total = await build_upgrades_page(interaction, self.page + 1)
-        self.page = min(total - 1, self.page + 1)
-        await interaction.edit_original_response(embed=embed, view=self)
 
 
 async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: int, rows: list, owned: set, page: int):
@@ -12125,16 +12109,17 @@ async def main_menu(interaction: discord.Interaction):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
     
+    # Проверяем игрока
     async with bot.db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,)) as c:
         player_exists = await c.fetchone()
         
     if not player_exists:
-        welcome_emoji = get_emoji("_welcome") # <--- Наш новый эмодзи
+        # Приветствие (без повторного response)
         embed = discord.Embed(
-            title=f"{welcome_emoji} Добро пожаловать в Gen Mania!",
+            title="🏰 Добро пожаловать в Gen Mania!",
             description=(
-                "Приветствую тебя, искатель приключений! 👑\n\n"
-                "Этот бот — игра в жанре **инкрементального кликера**. Твоя цель — покупать генераторы,"
+                "Приветствую тебя, будущий повелитель замка! 👑\n\n"
+                "Этот бот — игра в жанре **инкрементального кликера**. Твоя цель — строить генераторы, "
                 "синтезировать их в более мощные, собирать пассивный доход и сражаться с другими игроками.\n\n"
                 "**С чего начать:**\n"
                 "🛒 **Магазин** — купи свой первый генератор.\n"
@@ -12142,37 +12127,23 @@ async def main_menu(interaction: discord.Interaction):
                 "⭐ **Звёзды** — улучшай генераторы, чтобы они приносили больше дохода.\n"
                 "⚔️ **Социум** — вступай в клан, сражайся в рейдах и дуэлях.\n"
                 "💰 **Экономика** — копи монеты и гемы, вкладывай в банк.\n\n"
-                f"Жми **«{get_emoji('_continue')} Продолжить»**, чтобы войти в игру и начать свой путь!"
+                "Жми **«Продолжить»**, чтобы войти в игру и начать свой путь!"
             ),
             color=0x9b59b6
         )
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed = await fix_embed_emojis(embed)
         
-        await interaction.response.send_message(
-            embed=embed, 
-            view=WelcomeView(user_id), 
-            ephemeral=True
-        )
+        await interaction.response.send_message(embed=embed, view=WelcomeView(user_id), ephemeral=True)
         return
 
+    # Стандартная логика
     notification = await get_menu_welcome_notification(user_id, guild_id)
     await collect_income(user_id, guild_id)
     embed = await build_main_embed(interaction)
     view = MainMenuView(user_id)
     
-    if notification:
-        await interaction.response.send_message(notification, ephemeral=True)
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-    else:
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-    # Если игрок существует — стандартная логика
-    notification = await get_menu_welcome_notification(user_id, guild_id)
-    await collect_income(user_id, guild_id)
-    embed = await build_main_embed(interaction)
-    view = MainMenuView(user_id)
-    
+    # Используем только ОДИН метод ответа, в зависимости от ситуации
     if notification:
         await interaction.response.send_message(notification, ephemeral=True)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
