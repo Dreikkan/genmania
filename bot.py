@@ -3954,27 +3954,50 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     return embed
 
 async def build_guide_section_embed(key: str) -> discord.Embed:
+    coin = get_emoji("_coin")
+    gem = get_emoji("_gem")
+    castle = get_emoji("_castle")
+    storage = get_emoji("_storage")
+    shop = get_emoji("_shop")
+    quests = get_emoji("_quests")
+    ach = get_emoji("_achievements")
+    stats = get_emoji("_stats")
+    settings = get_emoji("_settings")
+    customization = get_emoji("_customization")
+    autocollector = get_emoji("_autocollector")
+    advent = get_emoji("_advent")
+    clan = get_emoji("_clan")
+    raid = get_emoji("_raid")
+    duel = get_emoji("_duel")
+    bank = get_emoji("_bank")
+    market = get_emoji("_market")
+    pets = get_emoji("_pets")
+    title = get_emoji("_title")
+    stars = get_emoji("_stars")
+    synthesis = get_emoji("_synthesis")
+    catalyst = get_emoji("_catalyst")
+
     sections = {
         "economy": (
-            "💰 Экономика",
-            "**Валюты:**\n"
-            "🪙 Монеты — пассивный доход, дейли, квесты, продажа.\n"
-            "💎 Гемы — дейли, квесты, достижения, аукцион.\n\n"
+            f"{coin} Экономика",
+            f"**Валюты:**\n"
+            f"{coin} Монеты — пассивный доход, дейли, квесты, продажа.\n"
+            f"{gem} Гемы — дейли, квесты, достижения, аукцион.\n\n"
             "**Обмен:** 12 монет = 1 гем, 1 гем = 9 монет.\n\n"
             "**Банк:** вклад до 50 000 монет, 2% в день, срок 1–30 дней.\n\n"
             "**Налоги:** 2% в сутки от баланса монет.\n\n"
             "**Где смотреть:** «Мой профиль» → «Обмен», «Социум» → «Банк» / «Налоги»."
         ),
         "generators": (
-            "🏗️ Генераторы",
-            "**Покупка:** «Магазин» → «Генераторы».\n\n"
-            "**Синтез:** 5 одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 8%). Стоимость в гемах растёт. Катализатор +15%.\n\n"
-            "**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +110%, 2★ +230%, 3★ +360%, 4★ +500%, 5★ +650%.\n\n"
+            f"{castle} Генераторы",
+            f"**Покупка:** «Магазин» → «Генераторы».\n\n"
+            f"**Синтез:** 5 одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 8%). Стоимость в гемах растёт. {catalyst} Катализатор +15%.\n\n"
+            f"**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +110%, 2★ +230%, 3★ +360%, 4★ +500%, 5★ +650%.\n\n"
             "**Продажа:** только `common`/`uncommon`/`rare`, 10% от цены. `epic`+ — только синтез или аукцион.\n\n"
-            "**Хранилище:** «Замок» → «Хранилище». Генераторы там не дают доход."
+            f"**Хранилище:** «Замок» → «{storage} Хранилище». Генераторы там не дают доход."
         ),
         "pets": (
-            "🐾 Питомцы",
+            f"{pets} Питомцы",
             "**5 видов:**\n"
             "🐱 Кот (50 💎) — +25% доход монет (10 ур.)\n"
             "🐶 Пёс (60 💎) — +30% шанс синтеза\n"
@@ -3986,7 +4009,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Магазин» → «Питомцы» или «Мой профиль» → «Питомцы»."
         ),
         "titles": (
-            "🏅 Титулы",
+            f"{title} Титулы",
             "**20 титулов**, каждый даёт **+1–2%** к доходу/синтезу/мощи/рейдам.\n\n"
             "**Примеры:**\n"
             "«Новичок» — всем.\n"
@@ -3997,7 +4020,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Мой профиль» → «Титулы»."
         ),
         "clans": (
-            "🏰 Кланы",
+            f"{clan} Кланы",
             "**Создание:** 500 🪙.\n\n"
             "**Роли:** лидер, заместитель, офицер, ветеран, участник.\n\n"
             "**Сундук:** общий банк клана.\n\n"
@@ -4007,20 +4030,20 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Социум» → «Клан»."
         ),
         "pvp": (
-            "⚔️ PvP",
+            f"{raid} PvP",
             "**Рейды:**\n"
             "• 1–3 чел, кулдаун 1 ч / 6 ч.\n"
             "• Кража 15% (+бонус волка).\n"
             "• Дневной лимит: 50% от своего баланса (мин. 1000).\n"
             "• Мощь = сумма (цена × (1 + звёзды × 0.5)).\n\n"
-            "**Дуэли:**\n"
+            f"**{duel} Дуэли:**\n"
             "• 1-на-1, ставка в монетах.\n"
             "• Режимы: `dice` (рандом) или `power` (мощь).\n"
             "• Победитель забирает банк.\n\n"
             "**Где:** «Социум» → «Рейд» / «Дуэль»."
         ),
         "auction": (
-            "🏛️ Аукцион и биржа",
+            f"{market} Аукцион и биржа",
             "**Аукцион:**\n"
             "• Выставить лот (любой генератор, 1–72 ч).\n"
             "• Ставка должна быть выше текущей.\n"
@@ -4033,7 +4056,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Социум» → «Аукцион» / «Биржа»."
         ),
         "quests": (
-            "📜 Квесты",
+            f"{quests} Квесты",
             "**Сюжетные (10 глав):**\n"
             "1. Первые шаги — купи генератор (10 💎)\n"
             "2. Алхимик — первый синтез (15 💎)\n"
@@ -4049,13 +4072,13 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Квесты» → «Сюжетные» / «Ежедневные»."
         ),
         "daily": (
-            "📅 Дейли и адвент",
+            f"{advent} Дейли и адвент",
             "**Дейли:**\n"
             "• 30-дневный стрик.\n"
             "• Награды растут: 10 🪙 + 1 💎 (день 1) → 5000 🪙 + 30 💎 + предмет (день 30).\n"
             "• Предметы: дни 5, 7, 10, 14, 20, 25, 30.\n"
             "• Сброс при пропуске дня.\n\n"
-            "**Адвент:**\n"
+            f"**{advent} Адвент:**\n"
             "• 30 окошек, по 5 на страницу.\n"
             "• Открывается 1 в день, только следующее.\n"
             "• Награды: монеты, гемы, предметы (5, 10, 15, 20, 25, 30).\n"
@@ -4063,7 +4086,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Ежедневная награда» в главном меню, «Мой профиль» → «Адвент»."
         ),
         "achievements": (
-            "🏆 Достижения",
+            f"{ach} Достижения",
             "**14 штук:** за синтезы, звёзды, гемы, монеты, катализаторы, рейды.\n\n"
             "**Награда:** гемы.\n\n"
             "**Примеры:**\n"
@@ -4074,7 +4097,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Мой профиль» → «Достижения»."
         ),
         "cosmetics": (
-            "🎨 Кастомизация",
+            f"{customization} Кастомизация",
             "**Цвет эмбеда:** HEX-код (например, `#FF0000`).\n\n"
             "**Фон:** URL картинки (отображается в профиле и замке).\n\n"
             "**Иконка замка:** эмодзи или кастомный `<:name:id>`.\n\n"
@@ -4082,7 +4105,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Мой профиль» → «Косметика» / «Титулы»."
         ),
         "autocollector": (
-            "🤖 Автосборщик",
+            f"{autocollector} Автосборщик",
             "**Покупка:** 500 💎.\n\n"
             "**Уровни:**\n"
             "1 ур. — раз в 4 ч (после покупки)\n"
@@ -4092,7 +4115,7 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Магазин» → «Автосборщик» или «Мой профиль» → «Автосборщик»."
         ),
         "notifications": (
-            "📬 Уведомления",
+            f"{settings} Уведомления",
             "**5 типов:**\n"
             "🐾 Питомец голоден\n"
             "📅 Дейли доступен\n"
@@ -4104,14 +4127,14 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Где:** «Мой профиль» → «Настройки» → «Уведомления»."
         ),
         "tops": (
-            "📊 Топы",
+            f"{stats} Топы",
             "**6 типов:** монеты, гемы, мощь, синтезы, питомцы, кланы.\n\n"
             "**Размер:** 10 / 20 / 30.\n\n"
             "**Кэш:** 5 минут (обновляется по кнопке «Обновить»).\n\n"
             "**Где:** «Социум» → «Топы»."
         ),
         "analytics": (
-            "📈 Аналитика",
+            f"{stats} Аналитика",
             "**Что внутри:**\n"
             "💰 Доход (монеты/час, гемы/час, полный бонус)\n"
             "🏰 Замок (генераторы, средний доход, сетка)\n"
@@ -4127,8 +4150,12 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
     }
 
     title, body = sections.get(key, ("📖 Путеводитель", "Раздел не найден."))
+    
+    # Заменяем стандартные смайлики в тексте на кастомные
+    title = replace_emojis_in_text(title)
+    body = replace_emojis_in_text(body)
+    
     embed = discord.Embed(title=title, description=body, color=0x3498db)
-    embed = await fix_embed_emojis(embed)
     return embed
 
 
@@ -4791,6 +4818,7 @@ async def build_cosmetics_embed(interaction: discord.Interaction) -> discord.Emb
     embed.add_field(name="Цвет эмбеда", value=f"`#{color:06X}`" if color else "по умолчанию", inline=True)
     embed.add_field(name="Фон (URL)", value=bg or "не задан", inline=True)
     embed.add_field(name="Иконка замка", value=icon or "не задана", inline=True)
+    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_pets_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -6563,7 +6591,7 @@ class PetSwitchView(discord.ui.View):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.add_item(make_select("Выбери питомца", options, self.select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
@@ -6649,7 +6677,7 @@ class PetsShopView(discord.ui.View):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.add_item(make_select("Выбери питомца", options, self.select, row=0))
-        back = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.secondary, row=1)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
@@ -6724,7 +6752,7 @@ class TitlesView(discord.ui.View):
             p.callback = self.prev; self.add_item(p)
             n = discord.ui.Button(label="▶️", style=discord.ButtonStyle.secondary, row=1)
             n.callback = self.next; self.add_item(n)
-        b = discord.ui.Button(label="Назад", emoji="◀️", style=discord.ButtonStyle.danger, row=2)
+        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
         b.callback = self.back; self.add_item(b)
 
     async def interaction_check(self, interaction):
@@ -8752,7 +8780,7 @@ class ShopView(BaseView):
     def add_buttons(self):
         back = discord.ui.Button(
             label="Назад", 
-            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), 
+            emoji=get_emoji("_back"), 
             style=discord.ButtonStyle.secondary, 
             row=0
         )
@@ -8761,7 +8789,7 @@ class ShopView(BaseView):
         
         buy = discord.ui.Button(
             label="Купить", 
-            emoji=BOT_BTN_EMOJIS.get("_buy", "🛍️"), 
+            emoji=get_emoji("_buy"), 
             style=discord.ButtonStyle.success, 
             row=0
         )
