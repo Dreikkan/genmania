@@ -11,15 +11,19 @@ import random
 import json
 import os
 import re
+import signal
 import copy
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import asyncio
+import contextvars
 from contextlib import asynccontextmanager
 
 
 log = logging.getLogger("gen_mania")
+_CURRENT_GUILD_ID = contextvars.ContextVar("current_guild_id", default=None)
+_CURRENT_ACTOR_ID = contextvars.ContextVar("current_actor_id", default=None)
 
 
 # ============================================================
@@ -30,8 +34,52 @@ DEFAULT_BOT_NAME = "Gen Mania"
 DEFAULT_CURRENCY_COINS = "монеты"
 DEFAULT_CURRENCY_GEMS = "гемы"
 DEFAULT_GEM_CAP = 6
-DEFAULT_START_COINS = 3
+DEFAULT_START_COINS = 20
 DEFAULT_PASSIVE_LIMIT = 100000
+DEFAULT_TAX_RATE = 0.02
+
+# Статусы — одна линейка: работает только лучший купленный.
+STATUS_ORDER = ("vip", "gold", "platinum", "diamond")
+STATUS_BONUSES = {
+    "vip": 0.15,
+    "gold": 0.25,
+    "platinum": 0.35,
+    "diamond": 0.45,
+}
+
+# Первые шаги: (заголовок, подсказка, монеты, гемы).
+ONBOARDING_STEPS = {
+    "buy_generator": (
+        "Купи первый генератор",
+        "Магазин → Генераторы",
+        50,
+        0,
+    ),
+    "claim_daily": (
+        "Забери ежедневную награду",
+        "Главное меню → Ежедневная награда",
+        50,
+        1,
+    ),
+    "open_quests": (
+        "Открой квесты",
+        "Главное меню → Квесты",
+        25,
+        0,
+    ),
+    "craft": (
+        "Сделай синтез",
+        "Замок → Синтез",
+        100,
+        1,
+    ),
+    "social": (
+        "Загляни в Социум",
+        "Главное меню → Социум",
+        50,
+        0,
+    ),
+}
 
 RARITY_COLORS = {
     "common":    0x808080,
@@ -83,11 +131,51 @@ CRAFT_CHAIN = {
     "divine_gen":     "legendary_gen",
 }
 
-CRAFT_COST = 5
+CRAFT_COST = 3
+
+# --- БАЛАНС ГЕНЕРАТОРОВ ---
+# Цена растёт быстрее дохода: высокие тиры хуже окупаются, но дают
+# больше дохода на слот. Синтез 2→1 компенсирует потерю слота.
+GENERATOR_BASE_PRICE = 15
+GENERATOR_BASE_INCOME_HOUR = 2.0
+GENERATOR_PRICE_MULT = 2.2
+GENERATOR_INCOME_MULT = 1.9
+GENERATOR_TIER_COUNT = 30
+
+
+def round_price(p: float) -> int:
+    if p < 100:
+        return int(p)
+    elif p < 1000:
+        return int(p / 10) * 10
+    elif p < 10000:
+        return int(p / 100) * 100
+    elif p < 100000:
+        return int(p / 1000) * 1000
+    else:
+        return int(p / 10000) * 10000
+
+
+def generator_price_income(index: int) -> tuple[float, float]:
+    """Цена и доход/час для генератора по номеру (1-based)."""
+    return (
+        GENERATOR_BASE_PRICE * (GENERATOR_PRICE_MULT ** (index - 1)),
+        GENERATOR_BASE_INCOME_HOUR * (GENERATOR_INCOME_MULT ** (index - 1)),
+    )
+
+
+def cap_passive_income(raw: float, seconds: float, limit: int) -> int:
+    """Оффлайн-потолок удалён: накопление не обрезается.
+
+    Параметры сохранены для совместимости тестов и старых вызовов.
+    """
+    return int(raw)
+
 
 # --- ПРЕСТИЖ ---
-PRESTIGE_COIN_REQUIREMENT = 100_000   # сколько всего монет нужно на 1 очко
+PRESTIGE_COIN_REQUIREMENT = 250_000   # сколько всего монет нужно на 1 очко
 PRESTIGE_BONUS_PER_POINT = 0.05       # +5% к доходу за очко
+PRESTIGE_BONUS_CAP = 5.0              # максимум +500%
 CLAN_MAX_LEVEL = 21                   # максимум уровня клана
 CLAN_XP_PER_LEVEL = 100               # XP для следующего уровня (база)
 
@@ -95,7 +183,7 @@ CLAN_XP_PER_LEVEL = 100               # XP для следующего уров�
 SEASON_LEVELS = 30
 SEASON_PREMIUM_COST_GEMS = 250
 SEASON_XP_BASE = 100                  # XP с 0 на 1 уровень
-SEASON_XP_STEP = 25                   # прибавка к следующему уровню
+SEASON_XP_STEP = 15                   # прибавка к следующему уровню
 SEASON_WEEKEND_XP_MULT = 1.5          # событие выходного дня
 SEASON_MONTH_NAMES = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -106,12 +194,93 @@ SEASON_MONTH_NAMES = (
 DUEL_CHALLENGE_TIMEOUT = 120          # сколько ждём согласия
 DUEL_CHALLENGE_DELETE_SECONDS = 30    # автоудаление после результата
 DUEL_CHALLENGE_DECLINE_SECONDS = 15   # автоудаление после отказа/таймаута
+DUEL_COOLDOWN_SECONDS = 300           # КД после завершённой дуэли
+DUEL_MAX_BET_PCT = 0.10               # максимум 10% баланса на ставку
+DUEL_POWER_VARIANCE = 0.15            # разброс мощности в режиме power
 
 # Публичные (не-ephemeral) сообщения бота
 PUBLIC_MESSAGE_DELETE_SECONDS = 30
 
+# Backups
+BACKUP_INTERVAL_HOURS = float(os.getenv("BACKUP_INTERVAL_HOURS", "6"))
+BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "10"))
+
+# Retention: (колонка времени, сколько дней хранить).
+RETENTION_LIMITS = {
+    "craft_log": ("timestamp", 30),
+    "tax_log": ("timestamp", 90),
+    "admin_log": ("timestamp", 180),
+    "bank_history": ("opened_at", 180),
+    "duel_history": ("timestamp", 90),
+    "raid_loot_log": ("timestamp", 90),
+}
+
+# Schema migrations: увеличивать при изменении структуры таблиц.
+SCHEMA_VERSION = 5
+
+# Content migrations: увеличивать при изменении items/achievements/shop.
+CONTENT_VERSION = 5
+
 # --- КОЛЛЕКЦИЯ ---
 COLLECTION_BONUS_PER_ITEM = 0.005     # +0.5% к доходу за каждый открытый генератор
+
+# --- СЕТЫ ГЕНЕРАТОРОВ ---
+SET_ADJACENCY_BONUS = 0.005           # +0.5% за пару соседних генераторов одного сета
+SET_ADJACENCY_MAX = 0.10
+SET_FLOOR_BONUS = 0.01                # +1% за полностью заполненный ряд одного сета
+SET_FLOOR_MAX = 0.10
+SET_TOTAL_MAX = 0.40                  # общий потолок синергии
+
+SET_DEFINITIONS = {
+    "metals": {
+        "name": "Металлы",
+        "emoji": "⚙️",
+        "items": (
+            "basic_gen", "copper_gen", "bronze_gen",
+            "iron_gen", "steel_gen", "silver_gen",
+        ),
+        "tiers": ((6, 0.06), (4, 0.03), (2, 0.01)),
+    },
+    "jewels": {
+        "name": "Драгоценности",
+        "emoji": "💎",
+        "items": (
+            "gold_gen", "platinum_gen", "emerald_gen",
+            "ruby_gen", "sapphire_gen", "diamond_gen",
+        ),
+        "tiers": ((6, 0.06), (4, 0.03), (2, 0.01)),
+    },
+    "legends": {
+        "name": "Легенды",
+        "emoji": "🌟",
+        "items": ("crystal_gen", "mithril_gen", "adamantite_gen", "obsidian_gen"),
+        "tiers": ((4, 0.06), (3, 0.03), (2, 0.015)),
+    },
+    "heavens": {
+        "name": "Небеса",
+        "emoji": "🌠",
+        "items": ("dragon_gen", "sky_gen", "star_gen"),
+        "tiers": ((3, 0.04), (2, 0.02)),
+    },
+    "cosmos": {
+        "name": "Космос",
+        "emoji": "🌌",
+        "items": ("cosmic_gen", "galaxy_gen", "nebula_gen", "quantum_gen", "plasma_gen"),
+        "tiers": ((5, 0.06), (3, 0.03), (2, 0.015)),
+    },
+    "elements": {
+        "name": "Стихии",
+        "emoji": "🔥",
+        "items": ("dark_gen", "light_gen", "time_gen", "space_gen", "divine_gen", "legendary_gen"),
+        "tiers": ((6, 0.06), (4, 0.03), (2, 0.01)),
+    },
+}
+
+ITEM_SET = {
+    item_id: set_id
+    for set_id, set_def in SET_DEFINITIONS.items()
+    for item_id in set_def["items"]
+}
 
 # --- КЛАНОВЫЕ ВОЙНЫ ---
 CLAN_WAR_REWARD = 1000                # монеты в сундук победителя
@@ -120,8 +289,17 @@ CLAN_WAR_DURATION_HOURS = 24          # длительность войны
 CLAN_WAR_DAMAGE_RATE = 0.15           # 15% мощи в урон
 CLAN_WAR_DECLARE_COST = 500           # стоимость объявления войны из сундука
 
+# --- АУКЦИОН ---
+AUCTION_PAGE_SIZE = 10
+AUCTION_FEE_RATE = 0.05               # 5% с продавца
+AUCTION_ANTI_SNIPE_SECONDS = 120      # ставка в последние 2 минуты продлевает лот
+
 # --- БИРЖА ---
 MARKET_SELL_RATE = 0.70               # продажа на бирже — 70% текущей цены
+MARKET_HISTORY_LIMIT = 20             # точек истории цен
+MARKET_ORDER_DURATION_HOURS = 72      # срок ордера
+MARKET_ORDER_PAGE_SIZE = 10
+MARKET_ORDER_RARITIES = {"common", "uncommon", "rare"}
 
 # --- ОТРЯДЫ РЕЙДОВ ---
 RAID_PARTY_MAX = 3                    # лидер + 2 участника
@@ -130,8 +308,10 @@ RAID_INVITE_TIMEOUT = 120             # сколько живёт приглаш
 RAID_INVITE_DELETE_SECONDS = 30       # автоудаление сообщения после решения
 RAID_MAX_PENDING_INVITES = 5          # максимум активных приглашений у отряда
 RAID_GROUP_SYNERGY = 0.10             # +10% к сумме мощи за каждого доп. участника
-RAID_LOOT_RATE = 0.15                 # базовая доля монет цели
+RAID_LOOT_RATE = 0.08                 # базовая доля монет цели
 RAID_TARGET_SHIELD_HOURS = 6          # щит цели после атаки
+RAID_DAILY_LOSS_CAP = 0.25            # максимум потерь цели в сутки
+RAID_MIN_TARGET_POWER_RATIO = 0.25    # не даём фармить слишком слабых
 
 CRAFT_SETTINGS = {
     "basic_gen":      {"chance": 1.00, "gems": 0},
@@ -176,10 +356,10 @@ STAR_UPGRADE = {
 STAR_BONUS = {
     0: 0.00,
     1: 1.10,   # +110% → 2.1x
-    2: 2.90,   # +290% → 3.9x
-    3: 6.50,   # +650% → 7.5x
-    4: 13.00,  # +1300% → 14x
-    5: 25.00,  # +2500% → 26x
+    2: 3.50,   # +350% → 4.5x
+    3: 9.60,   # +960% → 10.6x
+    4: 27.50,  # +2750% → 28.5x
+    5: 92.00,  # +9200% → 93x
 }
 
 CATALYST_PRICE = 10
@@ -194,9 +374,38 @@ STAR_PITY_MAX = 0.30          # максимум +30% от pity
 STAR_HARD_PITY = 10           # 10-я попытка гарантирована
 SELL_RATE = 0.10  # 10% от цены (было 35%)
 SELL_ALLOWED_RARITIES = {"common", "uncommon", "rare"}  # epic+ — только синтез/аукцион
-BANK_MAX_DEPOSIT = 50000       # максимум монет на вклад
-BANK_DAILY_RATE = 0.02         # 2% в день (было 5%)
+
+
+def calculate_sell_price(price: int, stars: int = 0) -> int:
+    """Цена прямой продажи с учётом звёзд."""
+    multiplier = 1 + STAR_BONUS.get(stars, 0)
+    return max(1, int(price * SELL_RATE * multiplier))
+
+
+def calculate_market_buy_prices(
+    price: int, base_price: int, qty: int
+) -> tuple[int, int]:
+    """Средняя цена покупки и новая цена после покупки.
+
+    Покупка пачки не должна идти целиком по старой цене: иначе можно
+    купить 100 предметов, поднять цену до 2× и продать по 70% от неё.
+    """
+    new_price = min(
+        int(base_price * 2) if base_price else int(price * 2),
+        max(1, int(price * (1 + 0.01 * qty))),
+    )
+    avg_price = max(1, int((int(price) + int(new_price)) / 2))
+    return avg_price, new_price
+BANK_MAX_DEPOSIT = 50000       # базовый максимум монет на вклад
+BANK_DAILY_RATE = 0.02         # 2% в день (сложный процент)
 BANK_MAX_DAYS = 30
+BANK_LOAN_LTV = 0.50           # кредит до 50% стоимости залога
+BANK_LOAN_MAX = 25000          # базовый максимум кредита
+BANK_LOAN_MIN = 100
+BANK_LOAN_INTEREST = 0.10      # фиксированная переплата за срок
+BANK_LOAN_TERM_DAYS = 7
+BANK_DEPOSIT_INCOME_HOURS = 24  # лимит вклада = 24 часа дохода
+BANK_LOAN_INCOME_HOURS = 12     # лимит кредита = 12 часов дохода
 START_GRID = 9
 STORAGE_SIZE = 36
 TEMP_STORAGE_SIZE = 100
@@ -210,53 +419,53 @@ GEM_EXCHANGE_MIN = 1
 COIN_EXCHANGE_MIN = 12
 
 QUEST_POOL = {
-    # --- СИНТЕЗ (Награда = стоимость сгоревших предметов + 15%) ---
+    # --- СИНТЕЗ ---
     "craft_1":        ("Сделай 1 синтез", 1, 2, 100),
-    "craft_3":        ("Сделай 3 синтеза", 3, 4, 260),
-    "craft_5":        ("Сделай 5 синтезов", 5, 6, 430),
-    "success_2":      ("Успешно синтезируй 2 раза", 2, 5, 300),
-    "use_catalyst":   ("Используй 1 катализатор", 1, 5, 150),
+    "craft_3":        ("Сделай 3 синтеза", 3, 3, 180),
+    "craft_5":        ("Сделай 5 синтезов", 5, 5, 350),
+    "success_2":      ("Успешно синтезируй 2 раза", 2, 4, 200),
+    "use_catalyst":   ("Используй 1 катализатор", 1, 3, 100),
 
-    # --- ПОКУПКИ (Награда = стоимость покупок + 15%) ---
+    # --- ПОКУПКИ ---
     "buy_3":          ("Купи 3 предмета в магазине", 3, 2, 50),
-    "buy_10":         ("Купи 10 предметов в магазине", 10, 5, 170),
-    "buy_25":         ("Купи 25 предметов в магазине", 25, 10, 430),
+    "buy_10":         ("Купи 10 предметов в магазине", 10, 4, 150),
+    "buy_25":         ("Купи 25 предметов в магазине", 25, 8, 350),
 
-    # --- ЗАМОК И ХРАНИЛИЩЕ (Действия, доступные всегда) ---
+    # --- ЗАМОК И ХРАНИЛИЩЕ ---
     "move_2":         ("Перемести 2 предмета между замком и хранилищем", 2, 2, 30),
-    "move_5":         ("Перемести 5 предметов между замком и хранилищем", 5, 3, 80),
-    "sort_1":         ("Отсортируй генераторы в замке 1 раз", 1, 2, 50),
-    "swap_1":         ("Поменяй местами 1 предмет", 1, 2, 50),
-    "sell_3":         ("Продай 3 предмета в хранилище", 3, 3, 100),
+    "move_5":         ("Перемести 5 предметов между замком и хранилищем", 5, 3, 60),
+    "sort_1":         ("Отсортируй генераторы в замке 1 раз", 1, 2, 40),
+    "swap_1":         ("Поменяй местами 1 предмет", 1, 2, 40),
+    "sell_3":         ("Продай 3 предмета в хранилище", 3, 3, 80),
 
-    # --- ЗВЕЗДЫ (Улучшение доступно, пока есть копии) ---
-    "star_up_1":      ("Улучши любой генератор до 1★", 1, 10, 500),
-    "star_fail_1":    ("Провали улучшение звезды 1 раз", 1, 3, 100),
+    # --- ЗВЕЗДЫ ---
+    "star_up_1":      ("Улучши любой генератор до 1★", 1, 4, 150),
+    "star_fail_1":    ("Провали улучшение звезды 1 раз", 1, 2, 50),
 
     # --- ПАССИВНЫЙ ДОХОД ---
-    "collect_income": ("Собери пассивный доход 1 раз", 1, 2, 100),
-    "collect_income_3":("Собери пассивный доход 3 раза", 3, 5, 300),
+    "collect_income": ("Собери пассивный доход 1 раз", 1, 2, 80),
+    "collect_income_3":("Собери пассивный доход 3 раза", 3, 4, 200),
 
-    # --- ЕЖЕДНЕВНЫЕ НАГРАДЫ (Всегда доступны) ---
-    "claim_daily":    ("Забери ежедневную награду", 1, 5, 200),
+    # --- ЕЖЕДНЕВНЫЕ НАГРАДЫ ---
+    "claim_daily":    ("Забери ежедневную награду", 1, 3, 100),
 
-    # --- АУКЦИОН (Ставку можно сделать всегда, если есть лоты) ---
-    "bid_auction":    ("Сделай ставку на аукционе", 1, 5, 200),
-    "sell_auction":   ("Выстави предмет на аукцион", 1, 10, 300),
+    # --- АУКЦИОН ---
+    "bid_auction":    ("Сделай ставку на аукционе", 1, 2, 80),
+    "sell_auction":   ("Выстави предмет на аукцион", 1, 3, 100),
 
-    # --- БАНК (Открыть и закрыть вклад можно в любой момент) ---
-    "open_deposit":   ("Открой вклад в банке", 1, 10, 300),
-    "close_deposit":  ("Забери вклад из банка", 1, 10, 300),
+    # --- БАНК ---
+    "open_deposit":   ("Открой вклад в банке", 1, 3, 100),
+    "close_deposit":  ("Забери вклад из банка", 1, 3, 100),
 
-    # --- КЛАНЫ (Доступно, если ты в клане) ---
-    "donate_clan":    ("Внеси монеты в сундук клана", 1, 10, 500),
+    # --- КЛАНЫ ---
+    "donate_clan":    ("Внеси монеты в сундук клана", 1, 3, 100),
 
-    # --- ПИТОМЦЫ (Кормление доступно раз в 6 часов) ---
-    "feed_pet":       ("Покорми питомца", 1, 5, 200),
+    # --- ПИТОМЦЫ ---
+    "feed_pet":       ("Покорми питомца", 1, 3, 100),
 
-    # --- РЕЙДЫ И ДУЭЛИ (Кулдаун 1 час, можно выполнить) ---
-    "raid_1":         ("Соверши 1 рейд", 1, 8, 300),
-    "duel_1":         ("Сыграй 1 дуэль", 1, 8, 300),
+    # --- РЕЙДЫ И ДУЭЛИ ---
+    "raid_1":         ("Соверши 1 рейд", 1, 3, 120),
+    "duel_1":         ("Сыграй 1 дуэль", 1, 3, 120),
 }
 
 TOGGLEABLE_COMMANDS = {
@@ -615,9 +824,9 @@ PET_TYPES = {
         "name": "Кот",
         "emoji": str(BOT_BTN_EMOJIS.get("_cat", "🐱")),
         "price_gems": 50,
-        "desc": "+2.5% к доходу монет за уровень",
+        "desc": "+1.5% к доходу монет за уровень",
         "effect": "income_coins",
-        "per_level": 0.025,
+        "per_level": 0.015,
     },
     "dog": {
         "name": "Пёс",
@@ -767,22 +976,64 @@ ADVENT_REWARDS = {
 #  🤖 БОТ
 # ============================================================
 
+async def get_table_columns(conn, table: str) -> set[str]:
+    async with conn.execute(f"PRAGMA table_info({table})") as c:
+        return {row[1] for row in await c.fetchall()}
+
+
+async def ensure_column(
+    conn,
+    table: str,
+    column: str,
+    definition: str,
+    backfill_sql: str | None = None,
+) -> bool:
+    """Добавляет колонку, если её нет, и выполняет backfill.
+
+    Возвращает True, если колонка была добавлена.
+    """
+    columns = await get_table_columns(conn, table)
+    added = column not in columns
+    if added:
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        log.info("Миграция схемы: %s.%s добавлена", table, column)
+    if backfill_sql:
+        await conn.execute(backfill_sql)
+    return added
+
+
+async def verify_columns(conn, table: str, required: list[str]) -> None:
+    columns = await get_table_columns(conn, table)
+    missing = sorted(set(required) - columns)
+    if missing:
+        raise RuntimeError(
+            f"В таблице {table} отсутствуют обязательные колонки: {', '.join(missing)}"
+        )
+
+
 intents = discord.Intents.default()
 
 class CastleBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
         self.db = None
+        self.db_path = None
+        self.data_dir = None
+        self.backup_dir = None
+        self.background_tasks = []
+        self._closing = False
 
     async def setup_hook(self):
         # 1. Создаём папку data
-        DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.data_dir = Path(os.getenv("DATA_DIR", "/app/data"))
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.backup_dir = self.data_dir / "backups"
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
 
         # Файловый лог, чтобы ошибки не терялись на хостинге.
         try:
             file_handler = RotatingFileHandler(
-                DATA_DIR / "bot.log",
+                self.data_dir / "bot.log",
                 maxBytes=5 * 1024 * 1024,
                 backupCount=3,
                 encoding="utf-8",
@@ -795,26 +1046,157 @@ class CastleBot(commands.Bot):
             pass
 
         # 2. Подключаемся к базе
-        DB_PATH = DATA_DIR / "castle.db"
+        DB_PATH = self.data_dir / "castle.db"
         self.db = await aiosqlite.connect(str(DB_PATH))
         self.db_path = str(DB_PATH)
         await self.db.execute("PRAGMA busy_timeout = 10000")
         await self.db.execute("PRAGMA journal_mode = WAL")
         await self.db.execute("PRAGMA foreign_keys = ON")
 
-        # 3. Инициализируем таблицы и синхронизируем команды
+        # 3. Бэкап перед миграциями и инициализация таблиц
+        await self.backup_database("startup")
         await self.init_db()
         await self.tree.sync()
 
         await self.load_application_emojis()
 
         # 4. Запускаем фоновые задачи
-        asyncio.create_task(self.auction_closer())
-        asyncio.create_task(self.market_updater())
-        asyncio.create_task(self.tax_collector())
-        asyncio.create_task(self.autocollector_task())
-        asyncio.create_task(self.notification_task())
-        asyncio.create_task(self.war_closer())
+        self.background_tasks = [
+            asyncio.create_task(self.auction_closer()),
+            asyncio.create_task(self.market_updater()),
+            asyncio.create_task(self.market_order_closer()),
+            asyncio.create_task(self.bank_loan_closer()),
+            asyncio.create_task(self.tax_collector()),
+            asyncio.create_task(self.autocollector_task()),
+            asyncio.create_task(self.notification_task()),
+            asyncio.create_task(self.war_closer()),
+            asyncio.create_task(self.backup_task()),
+            asyncio.create_task(self.retention_task()),
+        ]
+
+    def _rotate_backups(self):
+        if not self.backup_dir:
+            return
+        backups = sorted(
+            self.backup_dir.glob("castle_*.db"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for old in backups[max(1, BACKUP_KEEP):]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    async def backup_database(self, reason: str = "manual"):
+        """Создаёт консистентный бэкап SQLite через backup API."""
+        if not self.db or not self.db_path or not self.backup_dir:
+            return None
+        if _IN_MANAGED_TX.get():
+            log.warning("Бэкап пропущен: активная managed-транзакция")
+            return None
+
+        temp_path = None
+        try:
+            if not Path(self.db_path).exists() or Path(self.db_path).stat().st_size < 1024:
+                return None
+
+            async with _DB_WRITE_LOCK:
+                if self.db.in_transaction:
+                    await self.db.commit()
+                await self.db.execute("PRAGMA wal_checkpoint(FULL)")
+
+                stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", reason)[:24] or "manual"
+                final_path = self.backup_dir / f"castle_{stamp}_{safe_reason}.db"
+                temp_path = self.backup_dir / f".castle_{stamp}_{safe_reason}.tmp"
+                if temp_path.exists():
+                    temp_path.unlink()
+
+                target = await aiosqlite.connect(str(temp_path))
+                try:
+                    await self.db.backup(target)
+                finally:
+                    await target.close()
+
+                check = await aiosqlite.connect(str(temp_path))
+                try:
+                    async with check.execute("PRAGMA integrity_check") as c:
+                        row = await c.fetchone()
+                finally:
+                    await check.close()
+                if not row or row[0] != "ok":
+                    raise RuntimeError(f"integrity_check: {row!r}")
+
+                os.replace(temp_path, final_path)
+                self._rotate_backups()
+                log.info("Бэкап БД создан: %s", final_path.name)
+                return final_path
+        except Exception:
+            log.exception("Не удалось создать бэкап БД")
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            return None
+
+    async def backup_task(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(max(1, BACKUP_INTERVAL_HOURS) * 3600)
+                await self.backup_database("scheduled")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Ошибка фонового бэкапа")
+                await asyncio.sleep(300)
+
+    async def retention_task(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(86400)
+                now = datetime.datetime.now()
+                removed = {}
+                for table, (column, days) in RETENTION_LIMITS.items():
+                    cutoff = (now - datetime.timedelta(days=days)).isoformat()
+                    cur = await self.db.execute(
+                        f"DELETE FROM {table} WHERE {column} < ?", (cutoff,)
+                    )
+                    removed[table] = cur.rowcount
+                await self.db.commit()
+                if any(removed.values()):
+                    log.info("Retention: удалено %s", removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Ошибка retention-задачи")
+                await asyncio.sleep(3600)
+
+    async def close(self):
+        if self._closing:
+            return
+        self._closing = True
+
+        for task in self.background_tasks:
+            task.cancel()
+        if self.background_tasks:
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        self.background_tasks = []
+
+        if self.db:
+            await self.backup_database("shutdown")
+            try:
+                await self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                await self.db.close()
+            except Exception:
+                log.exception("Ошибка при закрытии БД")
+            finally:
+                self.db = None
+
+        await super().close()
 
     async def war_closer(self):
         await self.wait_until_ready()
@@ -881,17 +1263,36 @@ class CastleBot(commands.Bot):
 
                 await self.db.commit()
             except Exception as e:
-                print(f"[WAR_CLOSER] Ошибка: {e}")
+                log.exception("WAR_CLOSER: ошибка фоновой задачи")
                 await asyncio.sleep(600)
       
 
     async def init_db(self):
-        await self.db.execute("""
+        await self.db.execute(f"""
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
-                coins INTEGER DEFAULT 3,
+                coins INTEGER DEFAULT {DEFAULT_START_COINS},
                 gems INTEGER DEFAULT 0,
-                last_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                last_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_gem_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_tax_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                lifetime_production INTEGER DEFAULT 0
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS onboarding_progress (
+                user_id INTEGER,
+                step TEXT,
+                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, step)
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -907,6 +1308,18 @@ class CastleBot(commands.Bot):
         """)
 
         await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS mailbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                item_id TEXT,
+                quantity INTEGER DEFAULT 1,
+                stars INTEGER DEFAULT 0,
+                reason TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await self.db.execute("""
             CREATE TABLE IF NOT EXISTS items (
                 id TEXT PRIMARY KEY,
                 name TEXT,
@@ -918,14 +1331,12 @@ class CastleBot(commands.Bot):
                 income_gems_per_hour REAL DEFAULT 0
             )
         """)
-        try:
-            await self.db.execute("ALTER TABLE items ADD COLUMN emoji_by_star TEXT DEFAULT '{}'")
-        except Exception:
-            pass
+        await ensure_column(
+            self.db, "items", "emoji_by_star", "TEXT DEFAULT '{}'"
+        )
 
         for column, definition in [
             ("catalysts", "INTEGER DEFAULT 0"),
-            ("last_gem_collected", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
             ("daily_quest_date", "TEXT DEFAULT NULL"),
             ("daily_quest_progress", "TEXT DEFAULT '{}'"),
             ("daily_quest_claimed", "TEXT DEFAULT '[]'"),
@@ -937,10 +1348,17 @@ class CastleBot(commands.Bot):
             ("raid_wins", "INTEGER DEFAULT 0"),
             ("prestige_points", "INTEGER DEFAULT 0"),
         ]:
-            try:
-                await self.db.execute(f"ALTER TABLE players ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+            await ensure_column(self.db, "players", column, definition)
+
+        await ensure_column(
+            self.db,
+            "players",
+            "last_gem_collected",
+            "TIMESTAMP DEFAULT NULL",
+            "UPDATE players SET last_gem_collected = "
+            "COALESCE(last_collected, CURRENT_TIMESTAMP) "
+            "WHERE last_gem_collected IS NULL",
+        )
 
         for column, definition in [
             ("emoji", "TEXT DEFAULT '📦'"),
@@ -948,15 +1366,9 @@ class CastleBot(commands.Bot):
             ("buyable", "INTEGER DEFAULT 1"),
             ("income_gems_per_hour", "REAL DEFAULT 0"),
         ]:
-            try:
-                await self.db.execute(f"ALTER TABLE items ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+            await ensure_column(self.db, "items", column, definition)
 
-        try:
-            await self.db.execute("ALTER TABLE inventory ADD COLUMN stars INTEGER DEFAULT 0")
-        except Exception:
-            pass
+        await ensure_column(self.db, "inventory", "stars", "INTEGER DEFAULT 0")
 
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS craft_log (
@@ -1018,19 +1430,20 @@ class CastleBot(commands.Bot):
             SELECT DISTINCT user_id, item_id FROM inventory
         """)
 
-        await self.db.execute("""
+        await self.db.execute(f"""
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 bot_name TEXT DEFAULT 'Gen Mania',
-                custom_emojis TEXT DEFAULT '{}',
+                custom_emojis TEXT DEFAULT '{{}}',
                 currency_coins TEXT DEFAULT 'монеты',
                 currency_gems TEXT DEFAULT 'гемы',
                 prefix TEXT DEFAULT '/',
                 gem_cap INTEGER DEFAULT 6,
-                start_coins INTEGER DEFAULT 3,
+                start_coins INTEGER DEFAULT {DEFAULT_START_COINS},
                 passive_limit INTEGER DEFAULT 100000,
                 disabled_commands TEXT DEFAULT '[]',
-                status_roles TEXT DEFAULT '{}',
+                status_roles TEXT DEFAULT '{{}}',
+                battlepass_enabled INTEGER DEFAULT 1,
                 admin_role_id INTEGER DEFAULT NULL
             )
         """)
@@ -1040,16 +1453,14 @@ class CastleBot(commands.Bot):
             ("currency_gems", "TEXT DEFAULT 'гемы'"),
             ("prefix", "TEXT DEFAULT '/'"),
             ("gem_cap", "INTEGER DEFAULT 6"),
-            ("start_coins", "INTEGER DEFAULT 3"),
+            ("start_coins", f"INTEGER DEFAULT {DEFAULT_START_COINS}"),
             ("passive_limit", "INTEGER DEFAULT 100000"),
             ("disabled_commands", "TEXT DEFAULT '[]'"),
             ("status_roles", "TEXT DEFAULT '{}'"),
+            ("battlepass_enabled", "INTEGER DEFAULT 1"),
             ("admin_role_id", "INTEGER DEFAULT NULL"),
         ]:
-            try:
-                await self.db.execute(f"ALTER TABLE guild_settings ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+            await ensure_column(self.db, "guild_settings", column, definition)
 
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS gem_shop (
@@ -1374,40 +1785,31 @@ class CastleBot(commands.Bot):
             "legendary_gen": 0.10,
         }
         
-        def round_price(p: float) -> int:
-            if p < 100:
-                return int(p)
-            elif p < 1000:
-                return int(p / 10) * 10
-            elif p < 10000:
-                return int(p / 100) * 100
-            elif p < 100000:
-                return int(p / 1000) * 1000
-            else:
-                return int(p / 10000) * 10000
-
-        # --- НОВАЯ ЛОГИКА ЦЕН И ДОХОДА ---
-        base_price = 15        # Начальная цена чуть выше
-        base_income_hour = 2.0 # Начальный доход
-        
-        price = base_price
-        income_hour = base_income_hour
+        # --- ЦЕНЫ И ДОХОД ГЕНЕРАТОРОВ ---
         items_data = []
-        
+
         for index, (item_id, name, emoji, rarity, is_gem) in enumerate(gen_names, start=1):
             # В магазине доступны только первые 27 генераторов (до light_gen)
             # 28, 29, 30 (time, space, divine) и legendary_gen — buyable = 0
             buyable = 1 if index <= 27 else 0
-            
+            price, income_hour = generator_price_income(index)
+
             if is_gem:
                 gem_income = GEM_INCOME.get(item_id, 0.02)
-                items_data.append((item_id, name, round_price(price * 10), 0, emoji, rarity, buyable, gem_income / 3600))
+                # Гем-генераторы не должны быть хуже предыдущего тира:
+                # сохраняем обычный доход и добавляем гемы.
+                items_data.append((
+                    item_id,
+                    name,
+                    round_price(price * 10),
+                    income_hour / 3600,
+                    emoji,
+                    rarity,
+                    buyable,
+                    gem_income / 3600,
+                ))
             else:
                 items_data.append((item_id, name, round_price(price), income_hour / 3600, emoji, rarity, buyable, 0))
-                
-            # Множители для следующего уровня (более плавный рост)
-            price *= 1.85        # Цена растет в 1.85 раза
-            income_hour *= 1.42  # Доход растет в 1.42 раза
 
         for item in items_data:
             await self.db.execute(
@@ -1480,12 +1882,9 @@ class CastleBot(commands.Bot):
                 updated_at TIMESTAMP DEFAULT NULL
             )
         """)
-        try:
-            await self.db.execute(
-                "ALTER TABLE raid_parties ADD COLUMN updated_at TIMESTAMP DEFAULT NULL"
-            )
-        except Exception:
-            pass
+        await ensure_column(
+            self.db, "raid_parties", "updated_at", "TIMESTAMP DEFAULT NULL"
+        )
 
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS raid_party_invites (
@@ -1510,6 +1909,12 @@ class CastleBot(commands.Bot):
                 winner_id INTEGER, loser_id INTEGER, bet INTEGER, type TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS duel_cooldowns (
+                user_id INTEGER PRIMARY KEY,
+                last_duel_time TIMESTAMP
+            )
+        """)
 
         # --- КЛАНЫ ---
         await self.db.execute("""
@@ -1526,14 +1931,15 @@ class CastleBot(commands.Bot):
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        try:
-            await self.db.execute("ALTER TABLE clan_members ADD COLUMN role TEXT DEFAULT 'member'")
-        except Exception:
-            pass
-        try:
-            await self.db.execute("ALTER TABLE clan_members ADD COLUMN joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except Exception:
-            pass
+        await ensure_column(self.db, "clan_members", "role", "TEXT DEFAULT 'member'")
+        await ensure_column(
+            self.db,
+            "clan_members",
+            "joined_at",
+            "TIMESTAMP DEFAULT NULL",
+            "UPDATE clan_members SET joined_at = CURRENT_TIMESTAMP "
+            "WHERE joined_at IS NULL",
+        )
 
         # --- ЭКОНОМИКА ---
         await self.db.execute("""
@@ -1547,31 +1953,30 @@ class CastleBot(commands.Bot):
         """)
 
         # Миграция для bank_deposits (если таблица уже была создана без start_time)
-        for column, definition in [
-            ("start_time", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-            ("end_time", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-            ("interest_rate", "REAL DEFAULT 0.05"),
-        ]:
-            try:
-                await self.db.execute(f"ALTER TABLE bank_deposits ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+        await ensure_column(
+            self.db,
+            "bank_deposits",
+            "start_time",
+            "TIMESTAMP DEFAULT NULL",
+            "UPDATE bank_deposits SET start_time = "
+            "COALESCE(end_time, CURRENT_TIMESTAMP) WHERE start_time IS NULL",
+        )
+        await ensure_column(
+            self.db,
+            "bank_deposits",
+            "end_time",
+            "TIMESTAMP DEFAULT NULL",
+            "UPDATE bank_deposits SET end_time = "
+            "COALESCE(start_time, CURRENT_TIMESTAMP) WHERE end_time IS NULL",
+        )
+        await ensure_column(self.db, "bank_deposits", "interest_rate", "REAL DEFAULT 0.05")
                 
-        await self.db.execute("""
-            CREATE TABLE IF NOT EXISTS market_listings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, seller_id INTEGER, item_id TEXT, stars INTEGER, price INTEGER, expires_at TIMESTAMP
-            )
-        """)
-
         # --- ПРОГРЕССИЯ И КОСМЕТИКА ---
         
         # Ежедневный вход
-        try: await self.db.execute("ALTER TABLE players ADD COLUMN streak_days INTEGER DEFAULT 0")
-        except Exception: pass
-        try: await self.db.execute("ALTER TABLE players ADD COLUMN last_daily TIMESTAMP DEFAULT NULL")
-        except Exception: pass
-        try: await self.db.execute("ALTER TABLE players ADD COLUMN title TEXT DEFAULT 'Новичок'")
-        except Exception: pass
+        await ensure_column(self.db, "players", "streak_days", "INTEGER DEFAULT 0")
+        await ensure_column(self.db, "players", "last_daily", "TIMESTAMP DEFAULT NULL")
+        await ensure_column(self.db, "players", "title", "TEXT DEFAULT 'Новичок'")
 
         # Косметика
         await self.db.execute("""
@@ -1646,6 +2051,14 @@ class CastleBot(commands.Bot):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await ensure_column(
+            self.db,
+            "clans",
+            "created_at",
+            "TIMESTAMP DEFAULT NULL",
+            "UPDATE clans SET created_at = CURRENT_TIMESTAMP "
+            "WHERE created_at IS NULL",
+        )
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS clan_members (
                 user_id INTEGER PRIMARY KEY,
@@ -1658,10 +2071,7 @@ class CastleBot(commands.Bot):
             ("level", "INTEGER DEFAULT 1"),
             ("xp", "INTEGER DEFAULT 0"),
         ]:
-            try:
-                await self.db.execute(f"ALTER TABLE clans ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+            await ensure_column(self.db, "clans", column, definition)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS clan_inventory (
                 clan_id INTEGER,
@@ -1696,10 +2106,7 @@ class CastleBot(commands.Bot):
             ("clan1_damage", "INTEGER DEFAULT 0"),
             ("clan2_damage", "INTEGER DEFAULT 0"),
         ]:
-            try:
-                await self.db.execute(f"ALTER TABLE clan_wars ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+            await ensure_column(self.db, "clan_wars", column, definition)
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS clan_war_attacks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1763,19 +2170,29 @@ class CastleBot(commands.Bot):
                 start_price INTEGER,
                 current_bid INTEGER DEFAULT 0,
                 current_bidder INTEGER DEFAULT NULL,
+                buyout_price INTEGER DEFAULT NULL,
                 end_time TIMESTAMP,
                 status TEXT DEFAULT 'active'
             )
         """)
+        for column, definition in [
+            ("buyout_price", "INTEGER DEFAULT NULL"),
+        ]:
+            await ensure_column(self.db, "auctions", column, definition)
+
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS auction_bids (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 auction_id INTEGER,
                 bidder_id INTEGER,
                 amount INTEGER,
+                kind TEXT DEFAULT 'bid',
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await ensure_column(
+            self.db, "auction_bids", "kind", "TEXT DEFAULT 'bid'"
+        )
 
         # --- БИРЖА (рыночные цены) ---
         await self.db.execute("""
@@ -1786,6 +2203,32 @@ class CastleBot(commands.Bot):
                 last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 demand INTEGER DEFAULT 0,
                 supply INTEGER DEFAULT 0
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS market_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT,
+                price INTEGER,
+                demand INTEGER DEFAULT 0,
+                supply INTEGER DEFAULT 0,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS market_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                side TEXT,
+                item_id TEXT,
+                stars INTEGER DEFAULT 0,
+                price INTEGER,
+                quantity INTEGER,
+                filled INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
             )
         """)
 
@@ -1830,22 +2273,29 @@ class CastleBot(commands.Bot):
         """)
 
         # Миграции в players и guild_settings
-        try:
-            await self.db.execute("ALTER TABLE players ADD COLUMN last_tax_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except Exception:
-            pass
-        try:
-            await self.db.execute("ALTER TABLE guild_settings ADD COLUMN tax_rate REAL DEFAULT 0.02")  # 2% в сутки
-        except Exception:
-            pass
-        try:
-            await self.db.execute("ALTER TABLE guild_settings ADD COLUMN inflation_rate REAL DEFAULT 0.0")  # 0% по умолчанию
-        except Exception:
-            pass
-        try:
-            await self.db.execute("ALTER TABLE guild_settings ADD COLUMN auction_fee REAL DEFAULT 0.05")  # 5% комиссия аукциона
-        except Exception:
-            pass
+        await ensure_column(
+            self.db,
+            "players",
+            "last_tax_time",
+            "TIMESTAMP DEFAULT NULL",
+            "UPDATE players SET last_tax_time = CURRENT_TIMESTAMP "
+            "WHERE last_tax_time IS NULL",
+        )
+        await ensure_column(self.db, "guild_settings", "tax_rate", "REAL DEFAULT 0.02")
+        await ensure_column(self.db, "guild_settings", "inflation_rate", "REAL DEFAULT 0.0")
+        await ensure_column(self.db, "guild_settings", "auction_fee", "REAL DEFAULT 0.05")
+
+        for column, definition in [
+            ("collateral_stars", "INTEGER DEFAULT 0"),
+            ("issued_at", "TIMESTAMP DEFAULT NULL"),
+            ("status", "TEXT DEFAULT 'active'"),
+        ]:
+            await ensure_column(self.db, "bank_loans", column, definition)
+        for column, definition in [
+            ("kind", "TEXT DEFAULT 'deposit'"),
+            ("details", "TEXT DEFAULT NULL"),
+        ]:
+            await ensure_column(self.db, "bank_history", column, definition)
 
         async with self.db.execute("SELECT id, price FROM items WHERE buyable = 1") as c:
             items = await c.fetchall()
@@ -1854,6 +2304,14 @@ class CastleBot(commands.Bot):
                 "INSERT OR IGNORE INTO market_prices (item_id, base_price, current_price) VALUES (?, ?, ?)",
                 (item_id, base_price, base_price)
             )
+        await self.db.execute("""
+            INSERT INTO market_history (item_id, price, demand, supply)
+            SELECT mp.item_id, mp.current_price, mp.demand, mp.supply
+            FROM market_prices mp
+            WHERE NOT EXISTS (
+                SELECT 1 FROM market_history mh WHERE mh.item_id = mp.item_id
+            )
+        """)
         await self.db.commit()
 
             # --- pets (пересоздаём с составным ключом) ---
@@ -1879,10 +2337,9 @@ class CastleBot(commands.Bot):
             pass
 
         # активный питомец
-        try:
-            await self.db.execute("ALTER TABLE players ADD COLUMN active_pet TEXT DEFAULT NULL")
-        except Exception:
-            pass
+        await ensure_column(
+            self.db, "players", "active_pet", "TEXT DEFAULT NULL"
+        )
 
             # --- автосборщик ---
         await self.db.execute("""
@@ -1925,10 +2382,17 @@ class CastleBot(commands.Bot):
             ("total_coins_earned", "INTEGER DEFAULT 0"),
             ("total_gems_earned", "INTEGER DEFAULT 0"),
         ]:
-            try:
-                await self.db.execute(f"ALTER TABLE players ADD COLUMN {column} {definition}")
-            except Exception:
-                pass
+            await ensure_column(self.db, "players", column, definition)
+
+        await ensure_column(
+            self.db,
+            "players",
+            "lifetime_production",
+            "INTEGER DEFAULT 0",
+            "UPDATE players SET lifetime_production = COALESCE(total_coins_earned, 0) "
+            "WHERE COALESCE(lifetime_production, 0) = 0 "
+            "AND COALESCE(total_coins_earned, 0) > 0",
+        )
 
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS raid_loot_log (
@@ -1946,16 +2410,22 @@ class CastleBot(commands.Bot):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 admin_id INTEGER,
                 target_id INTEGER,
+                guild_id INTEGER,
                 action TEXT,
                 details TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await ensure_column(self.db, "admin_log", "guild_id", "INTEGER")
 
         # Индексы для частых запросов. Без них SQLite будет сканировать таблицы.
         for index_sql in (
             "CREATE INDEX IF NOT EXISTS idx_inventory_user_item ON inventory(user_id, item_id, stars, location)",
             "CREATE INDEX IF NOT EXISTS idx_auctions_status_end ON auctions(status, end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_auction_bids_auction ON auction_bids(auction_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_market_history_item ON market_history(item_id, id)",
+            "CREATE INDEX IF NOT EXISTS idx_market_orders_status ON market_orders(status, expires_at)",
+            "CREATE INDEX IF NOT EXISTS idx_market_orders_user ON market_orders(user_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_clan_members_clan ON clan_members(clan_id)",
             "CREATE INDEX IF NOT EXISTS idx_clan_quests_clan ON clan_quests(clan_id, week_start)",
             "CREATE INDEX IF NOT EXISTS idx_clan_wars_status ON clan_wars(status)",
@@ -1973,9 +2443,215 @@ class CastleBot(commands.Bot):
             "CREATE INDEX IF NOT EXISTS idx_duel_history_winner ON duel_history(winner_id)",
             "CREATE INDEX IF NOT EXISTS idx_duel_history_loser ON duel_history(loser_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_notifications_user ON user_notifications(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_mailbox_user ON mailbox(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_players_coins ON players(coins)",
+            "CREATE INDEX IF NOT EXISTS idx_players_gems ON players(gems)",
+            "CREATE INDEX IF NOT EXISTS idx_players_last_collected ON players(last_collected)",
+            "CREATE INDEX IF NOT EXISTS idx_players_last_tax ON players(last_tax_time)",
+            "CREATE INDEX IF NOT EXISTS idx_bank_loans_status_due ON bank_loans(status, due_time)",
+            "CREATE INDEX IF NOT EXISTS idx_clan_invites_target ON clan_invites(target_id)",
+            "CREATE INDEX IF NOT EXISTS idx_raid_parties_member2 ON raid_parties(member2_id)",
+            "CREATE INDEX IF NOT EXISTS idx_raid_parties_member3 ON raid_parties(member3_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_log_guild ON admin_log(guild_id)",
         ):
             await self.db.execute(index_sql)
+
+        # При изменении состава генераторов в замке сбрасываем точку
+        # накопления. Иначе можно купить генератор после недели офлайна
+        # и мгновенно получить доход за всё это время.
+        for trigger_sql in (
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_inventory_income_insert
+            AFTER INSERT ON inventory
+            WHEN NEW.location = 'profile' AND EXISTS (
+                SELECT 1 FROM items
+                WHERE id = NEW.item_id
+                  AND COALESCE(income_per_hour, 0)
+                    + COALESCE(income_gems_per_hour, 0) > 0
+            )
+            BEGIN
+                UPDATE players
+                SET last_collected = datetime('now', 'localtime'),
+                    last_gem_collected = datetime('now', 'localtime')
+                WHERE user_id = NEW.user_id;
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_inventory_income_delete
+            AFTER DELETE ON inventory
+            WHEN OLD.location = 'profile' AND EXISTS (
+                SELECT 1 FROM items
+                WHERE id = OLD.item_id
+                  AND COALESCE(income_per_hour, 0)
+                    + COALESCE(income_gems_per_hour, 0) > 0
+            )
+            BEGIN
+                UPDATE players
+                SET last_collected = datetime('now', 'localtime'),
+                    last_gem_collected = datetime('now', 'localtime')
+                WHERE user_id = OLD.user_id;
+            END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_inventory_income_update
+            AFTER UPDATE OF item_id, location, stars ON inventory
+            WHEN (OLD.location = 'profile' OR NEW.location = 'profile')
+             AND (
+                EXISTS (
+                    SELECT 1 FROM items
+                    WHERE id = OLD.item_id
+                      AND COALESCE(income_per_hour, 0)
+                        + COALESCE(income_gems_per_hour, 0) > 0
+                )
+                OR EXISTS (
+                    SELECT 1 FROM items
+                    WHERE id = NEW.item_id
+                      AND COALESCE(income_per_hour, 0)
+                        + COALESCE(income_gems_per_hour, 0) > 0
+                )
+             )
+            BEGIN
+                UPDATE players
+                SET last_collected = datetime('now', 'localtime'),
+                    last_gem_collected = datetime('now', 'localtime')
+                WHERE user_id = NEW.user_id;
+            END
+            """,
+        ):
+            await self.db.execute(trigger_sql)
+
+        await verify_columns(
+            self.db,
+            "players",
+            [
+                "user_id", "coins", "gems", "last_collected",
+                "last_gem_collected", "last_tax_time",
+                "total_coins_earned", "total_gems_earned",
+                "lifetime_production",
+                "prestige_points", "grid_size", "storage_size",
+                "title", "streak_days", "last_daily",
+            ],
+        )
+        await verify_columns(
+            self.db,
+            "bank_deposits",
+            ["user_id", "amount", "interest_rate", "start_time", "end_time"],
+        )
+        await verify_columns(
+            self.db, "clan_members", ["user_id", "clan_id", "role", "joined_at"]
+        )
+        await verify_columns(
+            self.db,
+            "clans",
+            ["id", "name", "leader_id", "treasury", "bonus", "created_at"],
+        )
+        await self.db.execute(
+            "INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)",
+            (f"schema_v{SCHEMA_VERSION}",),
+        )
+        await self.db.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+
+        # Фиксируем схему до контентной миграции, чтобы она шла отдельной
+        # managed-транзакцией без «висящего» init_db.
         await self.db.commit()
+        await self.apply_content_migrations(
+            items_data, achievements_data, gem_items, grid_items, daily_gens
+        )
+        await self.db.commit()
+
+    async def apply_content_migrations(
+        self,
+        items_data: list,
+        achievements_data: list,
+        gem_items: list,
+        grid_items: list,
+        daily_gens: list,
+    ):
+        """Одноразовая синхронизация контента по CONTENT_VERSION.
+
+        Обновляет названия/цены/доходы, но сохраняет кастомные emoji,
+        buyable и emoji_by_star, которые могли изменить админы.
+        """
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS content_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        async with self.db.execute(
+            "SELECT value FROM content_meta WHERE key = 'content_version'"
+        ) as c:
+            row = await c.fetchone()
+        try:
+            current_version = int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            current_version = 0
+
+        if current_version >= CONTENT_VERSION:
+            return
+
+        try:
+            async with db_transaction():
+                for item in items_data:
+                    item_id, name, price, income, _emoji, rarity, _buyable, gem_income = item
+                    await self.db.execute(
+                        "UPDATE items SET name = ?, price = ?, "
+                        "income_per_hour = ?, income_gems_per_hour = ?, rarity = ? "
+                        "WHERE id = ?",
+                        (name, price, income, gem_income, rarity, item_id),
+                    )
+                    await self.db.execute(
+                        "UPDATE market_prices SET base_price = ? WHERE item_id = ?",
+                        (price, item_id),
+                    )
+
+                for item_id, name, _emoji, rarity, price in daily_gens:
+                    await self.db.execute(
+                        "UPDATE items SET name = ?, rarity = ?, price = ?, "
+                        "income_per_hour = ? WHERE id = ?",
+                        (name, rarity, price, 1.5 / 3600, item_id),
+                    )
+
+                for ach_id, name, description, reward_gems, _emoji in achievements_data:
+                    await self.db.execute(
+                        "UPDATE achievements SET name = ?, description = ?, "
+                        "reward_gems = ? WHERE id = ?",
+                        (name, description, reward_gems, ach_id),
+                    )
+
+                for upgrade_id, name, description, price, _emoji, category, max_level in gem_items:
+                    await self.db.execute(
+                        "UPDATE gem_shop SET name = ?, description = ?, "
+                        "price_gems = ?, category = ?, max_level = ? WHERE id = ?",
+                        (name, description, price, category, max_level, upgrade_id),
+                    )
+
+                for grid_id, name, description, price, size, _emoji in grid_items:
+                    await self.db.execute(
+                        "UPDATE grid_shop SET name = ?, description = ?, "
+                        "price_coins = ?, size = ? WHERE id = ?",
+                        (name, description, price, size, grid_id),
+                    )
+
+                # Старый дефолт 3 не позволял новичку купить первый генератор.
+                # Меняем только значение, которое совпадает со старым дефолтом.
+                await self.db.execute(
+                    "UPDATE guild_settings SET start_coins = ? WHERE start_coins = ?",
+                    (DEFAULT_START_COINS, 3),
+                )
+
+                await self.db.execute(
+                    "INSERT INTO content_meta (key, value) VALUES ('content_version', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (str(CONTENT_VERSION),),
+                )
+            log.info(
+                "Контент мигрировал: %s → %s",
+                current_version,
+                CONTENT_VERSION,
+            )
+        except Exception:
+            log.exception("Не удалось применить миграцию контента")
 
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 
@@ -1993,25 +2669,52 @@ class CastleBot(commands.Bot):
                     lots = await c.fetchall()
 
                 for lot in lots:
-                    aid, seller_id, item_id, stars, current_bid, bidder = lot
-                    if bidder:
-                        # Передаём предмет победителю (с сохранением звёзд)
-                        await grant_item_or_compensation(bidder, item_id, 1, stars)
-                        # Продавцу — деньги с комиссией 5%
-                        fee = int(current_bid * 0.05)
-                        await self.db.execute(
-                            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-                            (current_bid - fee, seller_id)
+                    aid = lot[0]
+                    async with db_transaction():
+                        cur = await self.db.execute(
+                            "UPDATE auctions SET status = 'closing' "
+                            "WHERE id = ? AND status = 'active'",
+                            (aid,),
                         )
-                    else:
-                        # Никто не купил — возвращаем предмет (с сохранением звёзд)
-                        await grant_item_or_compensation(seller_id, item_id, 1, stars)
-                    await self.db.execute(
-                        "UPDATE auctions SET status = 'finished' WHERE id = ?", (aid,)
-                    )
+                        if cur.rowcount == 0:
+                            continue
+
+                        async with self.db.execute(
+                            "SELECT seller_id, item_id, stars, current_bid, "
+                            "current_bidder FROM auctions WHERE id = ?",
+                            (aid,),
+                        ) as c:
+                            fresh = await c.fetchone()
+                        if not fresh:
+                            continue
+                        seller_id, item_id, stars, current_bid, bidder = fresh
+
+                        if bidder:
+                            # Передаём предмет победителю (с сохранением звёзд)
+                            await grant_item_or_compensation(
+                                bidder, item_id, 1, stars
+                            )
+                            # Продавцу — деньги с комиссией 5%
+                            fee = int(current_bid * AUCTION_FEE_RATE)
+                            net = current_bid - fee
+                            await self.db.execute(
+                                "UPDATE players SET coins = coins + ? "
+                                "WHERE user_id = ?",
+                                (net, seller_id),
+                            )
+                        else:
+                            # Никто не купил — возвращаем предмет
+                            await grant_item_or_compensation(
+                                seller_id, item_id, 1, stars
+                            )
+                        await self.db.execute(
+                            "UPDATE auctions SET status = 'finished' "
+                            "WHERE id = ? AND status = 'closing'",
+                            (aid,),
+                        )
                 await self.db.commit()
             except Exception as e:
-                print(f"[AUCTION_CLOSER] Ошибка: {e}")
+                log.exception("AUCTION_CLOSER: ошибка фоновой задачи")
                 await asyncio.sleep(60)
 
 
@@ -2034,11 +2737,34 @@ class CastleBot(commands.Bot):
                         "last_update = ? WHERE item_id = ?",
                         (new_price, datetime.datetime.now().isoformat(), item_id)
                     )
+                    await record_market_price(
+                        item_id, new_price, 0, 0, commit=False
+                    )
                 await self.db.commit()
             except Exception as e:
-                print(f"[MARKET_UPDATER] Ошибка: {e}")
+                log.exception("MARKET_UPDATER: ошибка фоновой задачи")
                 await asyncio.sleep(300)
 
+
+    async def market_order_closer(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(600)  # 10 минут
+                await expire_market_orders()
+            except Exception as e:
+                log.exception("MARKET_ORDER_CLOSER: ошибка фоновой задачи")
+                await asyncio.sleep(60)
+
+    async def bank_loan_closer(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(1800)  # 30 минут
+                await expire_bank_loans()
+            except Exception as e:
+                log.exception("BANK_LOAN_CLOSER: ошибка фоновой задачи")
+                await asyncio.sleep(300)
 
     async def tax_collector(self):
         await self.wait_until_ready()
@@ -2051,10 +2777,11 @@ class CastleBot(commands.Bot):
 
                 now = datetime.datetime.now()
                 for uid, coins, last_tax in players:
-                    last = datetime.datetime.fromisoformat(last_tax) if last_tax else now
-                    if (now - last).total_seconds() < 86400:
+                    last = _parse_db_time(last_tax)
+                    if last and (now - last).total_seconds() < 86400:
                         continue
-                    tax = int(coins * 0.02)
+                    rate = await get_tax_rate_for_user(uid)
+                    tax = int((coins or 0) * rate)
                     await self.db.execute(
                         "UPDATE players SET coins = coins - ?, last_tax_time = ? WHERE user_id = ?",
                         (tax, now.isoformat(), uid)
@@ -2066,10 +2793,20 @@ class CastleBot(commands.Bot):
                         )
                 await self.db.commit()
             except Exception as e:
-                print(f"[TAX_COLLECTOR] Ошибка: {e}")
+                log.exception("TAX_COLLECTOR: ошибка фоновой задачи")
                 await asyncio.sleep(600)
                 continue
             await asyncio.sleep(3600)
+
+    def _find_user_guild_id(self, user_id: int):
+        """Ищет гильдию, где бот видит участника (для gem_cap)."""
+        for guild in getattr(self, "guilds", []) or []:
+            try:
+                if guild.get_member(user_id) is not None:
+                    return guild.id
+            except Exception:
+                continue
+        return None
 
     async def autocollector_task(self):
         await self.wait_until_ready()
@@ -2084,34 +2821,55 @@ class CastleBot(commands.Bot):
 
                 for uid, level, last_auto in rows:
                     interval = AUTOCOLLECT_LEVELS.get(level, (0, 4))[1]
-                    if last_auto:
-                        last = datetime.datetime.fromisoformat(last_auto)
-                        if (now - last).total_seconds() < interval * 3600:
-                            continue
-                    else:
-                        last = now - datetime.timedelta(hours=interval)
+                    last = _parse_db_time(last_auto)
+                    if last and (now - last).total_seconds() < interval * 3600:
+                        continue
 
-                    # Собираем доход
-                    coins, gems = await calculate_passive_income(uid)
-                    if coins > 0 or gems > 0:
+                    guild_id = self._find_user_guild_id(uid)
+                    async with db_transaction():
+                        # Повторная проверка внутри транзакции: пока ждали
+                        # writer-lock, авт сбор мог уже пройти.
+                        async with self.db.execute(
+                            "SELECT last_auto FROM autocollectors WHERE user_id = ?",
+                            (uid,),
+                        ) as c:
+                            fresh = await c.fetchone()
+                        fresh_last = _parse_db_time(fresh[0]) if fresh else None
+                        if fresh_last and (now - fresh_last).total_seconds() < interval * 3600:
+                            continue
+
+                        coins, gems = await calculate_full_passive_income(uid, guild_id)
                         now_iso = now.isoformat()
+
                         if coins > 0:
                             await self.db.execute(
-                                "UPDATE players SET coins = coins + ?, last_collected = ? WHERE user_id = ?",
-                                (coins, now_iso, uid)
+                                "UPDATE players SET coins = coins + ?, "
+                                "total_coins_earned = total_coins_earned + ?, "
+                                "lifetime_production = lifetime_production + ?, "
+                                "last_collected = ? WHERE user_id = ?",
+                                (coins, coins, coins, now_iso, uid),
                             )
                         if gems > 0:
                             await self.db.execute(
-                                "UPDATE players SET gems = gems + ?, last_gem_collected = ? WHERE user_id = ?",
-                                (gems, now_iso, uid)
+                                "UPDATE players SET gems = gems + ?, "
+                                "total_gems_earned = total_gems_earned + ?, "
+                                "last_gem_collected = ? WHERE user_id = ?",
+                                (gems, gems, now_iso, uid),
                             )
                         await self.db.execute(
                             "UPDATE autocollectors SET last_auto = ? WHERE user_id = ?",
-                            (now_iso, uid)
+                            (now_iso, uid),
                         )
-                await self.db.commit()
+
+                        if coins > 0 or gems > 0:
+                            await update_quest_progress(uid, "collect_income")
+                            await update_quest_progress(uid, "collect_income_3")
+                            if coins > 0:
+                                await update_story_quests(uid, "coins", coins)
+                            await update_story_quests(uid, "collect_income", 1)
+                            await check_achievements(uid)
             except Exception as e:
-                print(f"[AUTOCOLLECTOR] Ошибка: {e}")
+                log.exception("AUTOCOLLECTOR: ошибка фоновой задачи")
                 await asyncio.sleep(60)
 
     async def notification_task(self):
@@ -2304,7 +3062,7 @@ class CastleBot(commands.Bot):
                             sent_count += 1
 
             except Exception as e:
-                print(f"[NOTIFICATION_TASK] Ошибка: {e}")
+                log.exception("NOTIFICATION_TASK: ошибка фоновой задачи")
                 await asyncio.sleep(600)
 
     async def load_application_emojis(self):
@@ -2370,6 +3128,27 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
 _settings_cache: dict[int, tuple[float, dict]] = {}
 _SETTINGS_CACHE_TTL = 30.0
 
+# Единый writer-lock и признак вложенной managed-транзакции.
+_DB_WRITE_LOCK = asyncio.Lock()
+_IN_MANAGED_TX: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gen_mania_in_managed_tx", default=False
+)
+
+
+async def commit_if_needed():
+    """Коммитит только вне managed-транзакции.
+
+    Внутри `db_transaction()` коммит делает внешний контекст.
+    """
+    if not _IN_MANAGED_TX.get():
+        await bot.db.commit()
+
+
+async def rollback_if_needed():
+    """Откатывает только вне managed-транзакции."""
+    if not _IN_MANAGED_TX.get():
+        await bot.db.rollback()
+
 
 async def get_settings(guild_id: int) -> dict:
     defaults = {
@@ -2383,7 +3162,11 @@ async def get_settings(guild_id: int) -> dict:
         "passive_limit": DEFAULT_PASSIVE_LIMIT,
         "disabled_commands": [],
         "status_roles": {},
+        "battlepass_enabled": True,
         "admin_role_id": None,
+        "tax_rate": DEFAULT_TAX_RATE,
+        "inflation_rate": 0.0,
+        "auction_fee": AUCTION_FEE_RATE,
     }
     if not guild_id:
         return defaults
@@ -2393,10 +3176,11 @@ async def get_settings(guild_id: int) -> dict:
     if cached and (now_ts - cached[0]) < _SETTINGS_CACHE_TTL:
         return copy.deepcopy(cached[1])
 
-    await bot.db.execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,))
     async with bot.db.execute("""
         SELECT bot_name, custom_emojis, currency_coins, currency_gems, prefix,
-               gem_cap, start_coins, passive_limit, disabled_commands, status_roles, admin_role_id
+               gem_cap, start_coins, passive_limit, disabled_commands, status_roles,
+               battlepass_enabled, admin_role_id, tax_rate, inflation_rate,
+               auction_fee
         FROM guild_settings WHERE guild_id = ?
     """, (guild_id,)) as c:
         row = await c.fetchone()
@@ -2415,10 +3199,71 @@ async def get_settings(guild_id: int) -> dict:
         "passive_limit": row[7] or DEFAULT_PASSIVE_LIMIT,
         "disabled_commands": json.loads(row[8] or "[]"),
         "status_roles": json.loads(row[9] or "{}"),
-        "admin_role_id": row[10],
+        "battlepass_enabled": bool(row[10]) if row[10] is not None else True,
+        "admin_role_id": row[11],
+        "tax_rate": row[12] if row[12] is not None else DEFAULT_TAX_RATE,
+        "inflation_rate": row[13] or 0.0,
+        "auction_fee": row[14] if row[14] is not None else AUCTION_FEE_RATE,
     }
     _settings_cache[guild_id] = (now_ts, result)
     return copy.deepcopy(result)
+
+
+async def get_tax_rate_for_user(user_id: int) -> float:
+    """Ставка налога: максимум по общим гильдиям, иначе дефолт.
+
+    Профиль игрока глобальный, поэтому нельзя брать настройку одной
+    случайной гильдии: иначе можно укрыться в гильдии с нулевым налогом.
+    """
+    rates = []
+    for guild in getattr(bot, "guilds", []) or []:
+        try:
+            if guild.get_member(user_id) is None:
+                continue
+        except Exception:
+            continue
+        settings = await get_settings(guild.id)
+        rate = settings.get("tax_rate", DEFAULT_TAX_RATE)
+        if rate is not None:
+            rates.append(float(rate))
+    if not rates:
+        return DEFAULT_TAX_RATE
+    return max(0.0, min(1.0, max(rates)))
+
+
+async def has_admin_access(interaction: discord.Interaction) -> bool:
+    """Проверяет права администратора гильдии в момент callback."""
+    guild = getattr(interaction, "guild", None)
+    guild_id = getattr(interaction, "guild_id", None)
+    if guild is None or guild_id is None:
+        return False
+    settings = await get_settings(guild_id)
+    member = guild.get_member(interaction.user.id)
+    if member is None:
+        return False
+
+    if getattr(guild, "owner_id", None) == interaction.user.id:
+        return True
+
+    permissions = getattr(member, "guild_permissions", None)
+    if permissions and getattr(permissions, "administrator", False):
+        return True
+
+    admin_role_id = settings.get("admin_role_id")
+    if not admin_role_id:
+        return False
+    return any(
+        getattr(role, "id", None) == admin_role_id
+        for role in getattr(member, "roles", ())
+    )
+
+
+async def is_global_owner(interaction: discord.Interaction) -> bool:
+    """Владелец бота, а не просто админ сервера."""
+    try:
+        return await bot.is_owner(interaction.user)
+    except Exception:
+        return False
 
 def format_price(price: int) -> str:
     """Форматирует цену: 1500 -> '1 500', 100000 -> '100 000'."""
@@ -2611,24 +3456,6 @@ async def fix_embed_emojis(embed: discord.Embed) -> discord.Embed:
 
 
 
-async def get_btn_emoji(guild_id: int, key: str, default: str) -> discord.PartialEmoji | str:
-    """Возвращает кастомный эмодзи для кнопки (если настроен) или стандартный."""
-    if not guild_id:
-        return default
-    
-    settings = await get_settings(guild_id)
-    custom = settings.get("custom_emojis", {})
-    emoji_str = custom.get(key, default)
-    
-    # Если это кастомный эмодзи вида <:name:id> или <a:name:id>
-    if emoji_str.startswith("<") and emoji_str.endswith(">"):
-        # Парсим ID из строки
-        m = re.search(r":(\d+)>$", emoji_str)
-        if m:
-            return discord.PartialEmoji(name="custom", id=int(m.group(1)))
-            
-    return emoji_str
-
 async def get_star_emoji(item_id: str, stars: int, default_emoji: str) -> str:
     """Возвращает эмодзи для генератора с учётом звёздности.
 
@@ -2659,12 +3486,54 @@ async def get_star_emoji(item_id: str, stars: int, default_emoji: str) -> str:
         return f"{default_emoji}({stars}⭐)"
     return default_emoji
 
-async def save_setting(guild_id: int, key: str, value):
+SETTING_COLUMNS = {
+    "bot_name": "bot_name",
+    "custom_emojis": "custom_emojis",
+    "currency_coins": "currency_coins",
+    "currency_gems": "currency_gems",
+    "prefix": "prefix",
+    "gem_cap": "gem_cap",
+    "start_coins": "start_coins",
+    "passive_limit": "passive_limit",
+    "disabled_commands": "disabled_commands",
+    "status_roles": "status_roles",
+    "battlepass_enabled": "battlepass_enabled",
+    "admin_role_id": "admin_role_id",
+    "tax_rate": "tax_rate",
+    "inflation_rate": "inflation_rate",
+    "auction_fee": "auction_fee",
+}
+
+
+async def save_setting(guild_id: int, key: str, value, actor_id: int | None = None):
+    column = SETTING_COLUMNS.get(key)
+    if not column:
+        log.warning("Неизвестный ключ настройки: %s", key)
+        return
     if isinstance(value, (dict, list)):
         value = json.dumps(value)
-    await bot.db.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?", (value, guild_id))
-    await bot.db.commit()
+    await bot.db.execute(
+        "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,)
+    )
+    await bot.db.execute(
+        f"UPDATE guild_settings SET {column} = ? WHERE guild_id = ?",
+        (value, guild_id),
+    )
+    await commit_if_needed()
     _settings_cache.pop(guild_id, None)
+
+    actor_id = actor_id or _CURRENT_ACTOR_ID.get()
+    if actor_id:
+        rendered = str(value)
+        if len(rendered) > 200:
+            rendered = rendered[:197] + "..."
+        await log_admin_action(
+            actor_id,
+            0,
+            "setting_change",
+            f"{key}={rendered}",
+            guild_id=guild_id,
+        )
 
 
 async def is_command_disabled(guild_id: int, command_key: str) -> bool:
@@ -2698,14 +3567,6 @@ def is_valid_emoji(s: str) -> bool:
     if len(s) <= 8 and not s.isascii(): return True
     return False
 
-def format_slot(emoji: str, stars: int) -> str:
-    """Добавляет пробелы, не ломая кастомные эмодзи."""
-    if stars > 0:
-        text = f"{emoji}({stars}⭐)"
-    else:
-        text = emoji
-    return text + "  "  # Просто 2 пробела, Discord сам выровняет картинку
-
 def make_select(placeholder: str, options: list[discord.SelectOption], callback, row: int = 0, **kwargs) -> discord.ui.Select:
     select = discord.ui.Select(placeholder=placeholder, options=options, row=row, **kwargs)
     select.callback = callback
@@ -2724,10 +3585,12 @@ async def get_player_stats(user_id: int, guild_id: int = None):
             settings = await get_settings(guild_id)
             start = settings["start_coins"]
         await bot.db.execute(
-            "INSERT OR IGNORE INTO players (user_id, coins, grid_size, storage_size) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO players "
+            "(user_id, coins, grid_size, storage_size, last_gem_collected, last_tax_time) "
+            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             (user_id, start, START_GRID, STORAGE_SIZE)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         return START_GRID, 0.0, 0, start
 
     return row[0] or START_GRID, row[1] or 0.0, row[2] or 0, row[3] or 0
@@ -2736,26 +3599,37 @@ async def get_player_stats(user_id: int, guild_id: int = None):
 async def db_transaction():
     """Контекстный менеджер для транзакций SQLite.
 
-    Если транзакция уже открыта, использует SAVEPOINT, чтобы не ломать
-    внешнюю транзакцию.
+    Внешняя транзакция сериализуется writer-lock'ом и всегда завершается
+    COMMIT/ROLLBACK. Вложенные вызовы используют SAVEPOINT.
     """
-    if bot.db.in_transaction:
+    if _IN_MANAGED_TX.get():
         await bot.db.execute("SAVEPOINT gen_mania_sp")
         try:
             yield
             await bot.db.execute("RELEASE SAVEPOINT gen_mania_sp")
-        except Exception:
+        except BaseException:
             await bot.db.execute("ROLLBACK TO SAVEPOINT gen_mania_sp")
             await bot.db.execute("RELEASE SAVEPOINT gen_mania_sp")
             raise
-    else:
+        return
+
+    async with _DB_WRITE_LOCK:
+        # После исправления get_settings() это не должно срабатывать.
+        # Оставляем защиту от старых незакоммиченных DML.
+        if bot.db.in_transaction:
+            log.warning("Найдена незавершённая транзакция перед BEGIN — коммитим")
+            await bot.db.commit()
+
         await bot.db.execute("BEGIN IMMEDIATE")
+        token = _IN_MANAGED_TX.set(True)
         try:
             yield
             await bot.db.commit()
-        except Exception:
+        except BaseException:
             await bot.db.rollback()
             raise
+        finally:
+            _IN_MANAGED_TX.reset(token)
 
 # ============================================================
 #  🗓️ СЕЗОНЫ / BATTLE PASS
@@ -2818,7 +3692,7 @@ def season_reward(level: int, premium: bool = False) -> dict:
     gems = 0
     catalysts = 0
     if premium:
-        gems = 5 + level * 2
+        gems = 1 + level // 2
         if level % 5 == 0:
             catalysts = 1
     else:
@@ -2853,7 +3727,7 @@ async def get_season_data(user_id: int) -> dict:
         "VALUES (?, ?, ?)",
         (user_id, season_id, datetime.datetime.now().isoformat()),
     )
-    await bot.db.commit()
+    await commit_if_needed()
 
     async with bot.db.execute(
         "SELECT xp, premium, claimed_free, claimed_premium "
@@ -2890,10 +3764,18 @@ async def get_season_data(user_id: int) -> dict:
     }
 
 
-async def add_season_xp(user_id: int, base_amount: int) -> int:
+async def add_season_xp(
+    user_id: int,
+    base_amount: int,
+    guild_id: int | None = None,
+) -> int:
     """Начисляет сезонный XP. Ошибки не должны ломать основное действие."""
     if base_amount <= 0:
         return 0
+    if guild_id:
+        settings = await get_settings(guild_id)
+        if not settings.get("battlepass_enabled", True):
+            return 0
     amount = max(1, int(round(base_amount * season_event_multiplier())))
     season_id = current_season_id()
     now = datetime.datetime.now().isoformat()
@@ -3006,10 +3888,11 @@ async def claim_season_rewards(user_id: int) -> tuple[bool, str, dict]:
                 "UPDATE players SET coins = coins + ?, gems = gems + ?, "
                 "catalysts = catalysts + ?, "
                 "total_coins_earned = total_coins_earned + ?, "
+                "lifetime_production = lifetime_production + ?, "
                 "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
                 (
                     totals["coins"], totals["gems"], totals["catalysts"],
-                    totals["coins"], totals["gems"], user_id,
+                    totals["coins"], totals["coins"], totals["gems"], user_id,
                 ),
             )
 
@@ -3102,7 +3985,7 @@ async def log_clan(clan_id: int, action: str, details: str = ""):
         "INSERT INTO clan_log (clan_id, action, details) VALUES (?, ?, ?)",
         (clan_id, action, details)
     )
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 async def get_clan_level_info(clan_id: int) -> tuple[int, int, float]:
@@ -3293,14 +4176,14 @@ async def attack_clan_war(war_id: int, user_id: int) -> tuple[bool, str, bool]:
             "UPDATE clan_wars SET status = 'finished', winner_id = ?, end_time = ? WHERE id = ?",
             (clan_id, now.isoformat(), war_id),
         )
-    await bot.db.commit()
+    await commit_if_needed()
 
     if finished:
         await bot.db.execute(
             "UPDATE clans SET treasury = treasury + ? WHERE id = ?",
             (CLAN_WAR_REWARD, clan_id),
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_clan(clan_id, "war_win", f"Война #{war_id}, урон {damage}")
         await add_clan_xp(clan_id, 200)
         await update_clan_quest(clan_id, "war", 1)
@@ -3356,15 +4239,16 @@ async def get_per_second_income(user_id: int) -> tuple[float, float]:
     title_coins = await get_title_bonus(user_id, "income_coins")
     title_gems = await get_title_bonus(user_id, "income_gems")
 
-    # бонус престижа и коллекции
+    # бонус престижа, коллекции и сетов
     prestige_bonus = await get_prestige_bonus(user_id)
     collection_bonus = await get_collection_bonus(user_id)
+    set_bonus = await get_set_bonus(user_id)
 
     multiplier_coins = multiplier * (
-        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus + set_bonus
     )
     multiplier_gems = multiplier * (
-        1 + pet_gems + title_gems + prestige_bonus + collection_bonus
+        1 + pet_gems + title_gems + prestige_bonus + collection_bonus + set_bonus
     )
 
     async with bot.db.execute("""
@@ -3398,10 +4282,9 @@ async def calculate_passive_income(user_id: int, guild_id: int = None):
     last_coins_str, last_gems_str = row
 
     settings = await get_settings(guild_id) if guild_id else {
-        "gem_cap": DEFAULT_GEM_CAP, "passive_limit": DEFAULT_PASSIVE_LIMIT
+        "gem_cap": DEFAULT_GEM_CAP,
     }
     gem_cap = settings["gem_cap"]
-    passive_limit = settings["passive_limit"]
 
     # Все бонусы (статус + клан + питомцы) уже учтены в get_per_second_income
     per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
@@ -3420,53 +4303,100 @@ async def calculate_passive_income(user_id: int, guild_id: int = None):
         last = datetime.datetime.fromisoformat(last_coins_str)
         seconds = (now - last).total_seconds()
         penalty = apply_offline_penalty(seconds)
-        coins = min(int(seconds * per_sec_coins * penalty), passive_limit)
+        coins = cap_passive_income(
+            seconds * per_sec_coins * penalty, seconds, 0
+        )
 
     gems = 0
     if per_sec_gems > 0:
         last = datetime.datetime.fromisoformat(last_gems_str)
         seconds = (now - last).total_seconds()
         penalty = apply_offline_penalty(seconds)
-        raw = seconds * per_sec_gems * penalty
-        gems = min(int(raw), gem_cap)
+        gems = min(
+            cap_passive_income(seconds * per_sec_gems * penalty, seconds, 0),
+            gem_cap,
+        )
+
+    return coins, gems
+
+
+async def calculate_full_passive_income(
+    user_id: int, guild_id: int | None = None
+) -> tuple[int, int]:
+    """Полный доход без офлайн-штрафа и без потолка монет.
+
+    Используется автосборщиком. Гемы всё равно упираются в gem_cap
+    гильдии, чтобы не обесценить гем-генераторы.
+    """
+    async with bot.db.execute(
+        "SELECT last_collected, last_gem_collected FROM players WHERE user_id = ?",
+        (user_id,),
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return 0, 0
+
+    last_coins_str, last_gems_str = row
+    settings = await get_settings(guild_id) if guild_id else {
+        "gem_cap": DEFAULT_GEM_CAP,
+    }
+    gem_cap = settings["gem_cap"]
+
+    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
+    now = datetime.datetime.now()
+
+    coins = 0
+    last_coins = _parse_db_time(last_coins_str)
+    if per_sec_coins > 0 and last_coins:
+        seconds = max(0.0, (now - last_coins).total_seconds())
+        coins = int(seconds * per_sec_coins)
+
+    gems = 0
+    last_gems = _parse_db_time(last_gems_str)
+    if per_sec_gems > 0 and last_gems:
+        seconds = max(0.0, (now - last_gems).total_seconds())
+        gems = int(seconds * per_sec_gems)
+        if gem_cap is not None:
+            gems = min(gems, int(gem_cap))
 
     return coins, gems
 
 
 async def collect_income(user_id: int, guild_id: int = None):
-    coins_earned, gems_earned = await calculate_passive_income(user_id, guild_id)
-    if coins_earned <= 0 and gems_earned <= 0:
-        return 0, 0
+    async with db_transaction():
+        coins_earned, gems_earned = await calculate_passive_income(user_id, guild_id)
+        if coins_earned <= 0 and gems_earned <= 0:
+            return 0, 0
 
-    now_iso = datetime.datetime.now().isoformat()
-    if coins_earned > 0:
-        await bot.db.execute(
-            "UPDATE players SET coins = coins + ?, "
-            "total_coins_earned = total_coins_earned + ?, "
-            "last_collected = ? WHERE user_id = ?",
-            (coins_earned, coins_earned, now_iso, user_id)
-        )
-    if gems_earned > 0:
-        await bot.db.execute(
-            "UPDATE players SET gems = gems + ?, "
-            "total_gems_earned = total_gems_earned + ?, "
-            "last_gem_collected = ? WHERE user_id = ?",
-            (gems_earned, gems_earned, now_iso, user_id)
-        )
-    await bot.db.commit()
+        now_iso = datetime.datetime.now().isoformat()
+        if coins_earned > 0:
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ?, "
+                "total_coins_earned = total_coins_earned + ?, "
+                "lifetime_production = lifetime_production + ?, "
+                "last_collected = ? WHERE user_id = ?",
+                (coins_earned, coins_earned, coins_earned, now_iso, user_id)
+            )
+        if gems_earned > 0:
+            await bot.db.execute(
+                "UPDATE players SET gems = gems + ?, "
+                "total_gems_earned = total_gems_earned + ?, "
+                "last_gem_collected = ? WHERE user_id = ?",
+                (gems_earned, gems_earned, now_iso, user_id)
+            )
 
-    # ежедневные задания
-    await update_quest_progress(user_id, "collect_income")
-    await update_quest_progress(user_id, "collect_income_3")
+        # ежедневные задания
+        await update_quest_progress(user_id, "collect_income")
+        await update_quest_progress(user_id, "collect_income_3")
 
-    # сюжетные квесты
-    await update_story_quests(user_id, "coins", coins_earned)
-    await update_story_quests(user_id, "collect_income", 1)
+        # сюжетные квесты
+        await update_story_quests(user_id, "coins", coins_earned)
+        await update_story_quests(user_id, "collect_income", 1)
 
-    # достижения за накопление монет/гемов
-    await check_achievements(user_id)
+        # достижения за накопление монет/гемов
+        await check_achievements(user_id)
 
-    return coins_earned, gems_earned
+        return coins_earned, gems_earned
 
 async def get_menu_welcome_notification(user_id: int, guild_id: int = None) -> str | None:
     """Проверяет, сколько прошло времени с последнего сбора, и возвращает текст уведомления."""
@@ -3574,28 +4504,32 @@ async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = 
         (user_id, item_id),
     )
     if commit:
-        await bot.db.commit()
+        await commit_if_needed()
     return to_profile, to_storage, to_temp
 
 
 async def grant_item_or_compensation(user_id: int, item_id: str, quantity: int = 1, stars: int = 0) -> tuple[str, int]:
-    """Выдаёт предмет или компенсирует его стоимость монетами, если нет места."""
-    async with bot.db.execute("SELECT name, price FROM items WHERE id = ?", (item_id,)) as c:
+    """Выдаёт предмет. Если места нет — отправляет его в почту.
+
+    Второй элемент возврата оставлен для совместимости и всегда 0:
+    полная денежная компенсация больше не начисляется.
+    """
+    async with bot.db.execute("SELECT name FROM items WHERE id = ?", (item_id,)) as c:
         row = await c.fetchone()
-    name, price = row if row else (item_id, 0)
+    name = row[0] if row else item_id
 
     try:
-        await place_items(user_id, item_id, quantity, stars=stars)
+        await place_items(user_id, item_id, quantity, commit=False, stars=stars)
+        await commit_if_needed()
         return name, 0
     except ValueError:
-        compensation = max(1, int(price or 0)) * quantity
         await bot.db.execute(
-            "UPDATE players SET coins = coins + ?, "
-            "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
-            (compensation, compensation, user_id),
+            "INSERT INTO mailbox (user_id, item_id, quantity, stars, reason) "
+            "VALUES (?, ?, ?, ?, 'no_space')",
+            (user_id, item_id, quantity, stars),
         )
-        await bot.db.commit()
-        return f"{name} (нет места — компенсация 🪙 {compensation})", compensation
+        await commit_if_needed()
+        return f"{name} (нет места — отправлен в почту)", 0
 
 
 async def _reslot_inventory(user_id: int, location: str, rows: list):
@@ -3615,7 +4549,7 @@ async def _reslot_inventory(user_id: int, location: str, rows: list):
             "UPDATE inventory SET slot = ? WHERE user_id = ? AND location = ? AND slot = ?",
             (new_slot, user_id, location, -(new_slot + 1)),
         )
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 async def sort_inventory(user_id: int, location: str):
@@ -3664,68 +4598,63 @@ async def sort_inventory_by(user_id: int, location: str, sort_type: str):
 
     await _reslot_inventory(user_id, location, rows)
 
-async def log_admin_action(admin_id: int, target_id: int, action: str, details: str = ""):
+async def log_admin_action(
+    admin_id: int,
+    target_id: int,
+    action: str,
+    details: str = "",
+    guild_id: int | None = None,
+):
+    if guild_id is None:
+        guild_id = _CURRENT_GUILD_ID.get()
     await bot.db.execute(
-        "INSERT INTO admin_log (admin_id, target_id, action, details) VALUES (?, ?, ?, ?)",
-        (admin_id, target_id, action, details)
+        "INSERT INTO admin_log (admin_id, target_id, guild_id, action, details) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (admin_id, target_id, guild_id, action, details),
     )
-    await bot.db.commit()
-
-async def invite_to_clan(inviter_id: int, target_id: int) -> str:
-    inviter_clan = await get_clan(inviter_id)
-    if not inviter_clan:
-        return "❌ Ты не в клане."
-    if inviter_clan[2] != inviter_id:
-        return "❌ Только лидер клана может приглашать."
-
-    target_clan = await get_clan(target_id)
-    if target_clan:
-        return "❌ Этот игрок уже в клане."
-
-    # Проверка, что приглашение не дублируется
-    async with bot.db.execute(
-        "SELECT 1 FROM clan_invites WHERE clan_id = ? AND target_id = ?",
-        (inviter_clan[0], target_id)
-    ) as c:
-        if await c.fetchone():
-            return "❌ Приглашение уже отправлено."
-
-    await bot.db.execute(
-        "INSERT INTO clan_invites (clan_id, inviter_id, target_id) VALUES (?, ?, ?)",
-        (inviter_clan[0], inviter_id, target_id)
-    )
-    await bot.db.commit()
-    return f"✅ Приглашение отправлено <@{target_id}>."
+    await commit_if_needed()
 
 async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
     """Обновляет прогресс сюжетных квестов при действиях."""
-    async with bot.db.execute("SELECT quest_id, progress FROM player_quests WHERE user_id = ?", (user_id,)) as c:
-        rows = await c.fetchall()
-    progress_map = {r[0]: r[1] for r in rows}
     completed_count = 0
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT quest_id, progress FROM player_quests WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+        progress_map = {r[0]: r[1] for r in rows}
 
-    for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
-        if q_type != action_type:
-            continue
-        current = progress_map.get(qid, 0)
-        if current >= target:
-            continue
+        for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
+            if q_type != action_type:
+                continue
+            current = progress_map.get(qid, 0)
+            if current >= target:
+                continue
 
-        new_val = min(current + amount, target)
-        await bot.db.execute(
-            "INSERT INTO player_quests (user_id, quest_id, progress, completed) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(user_id, quest_id) DO UPDATE SET progress = ?, completed = ?",
-            (user_id, qid, new_val, int(new_val >= target), new_val, int(new_val >= target))
-        )
-        # Если квест только что выполнен — даём награду
-        if new_val >= target and current < target:
-            completed_count += 1
+            new_val = min(current + amount, target)
             await bot.db.execute(
-                "UPDATE players SET gems = gems + ?, "
-                "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
-                (reward, reward, user_id),
+                "INSERT INTO player_quests "
+                "(user_id, quest_id, progress, completed) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, quest_id) DO UPDATE SET progress = ?, "
+                "completed = ?",
+                (
+                    user_id,
+                    qid,
+                    new_val,
+                    int(new_val >= target),
+                    new_val,
+                    int(new_val >= target),
+                ),
             )
-    await bot.db.commit()
+            # Если квест только что выполнен — даём награду
+            if new_val >= target and current < target:
+                completed_count += 1
+                await bot.db.execute(
+                    "UPDATE players SET gems = gems + ?, "
+                    "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
+                    (reward, reward, user_id),
+                )
     if completed_count:
         await add_season_xp(user_id, 50 * completed_count)
 
@@ -3770,50 +4699,63 @@ async def sync_story_achievements(user_id: int):
                 (reward, reward, user_id),
             )
 
-    await bot.db.commit()
+    await commit_if_needed()
 
 async def claim_daily(user_id: int) -> dict:
-    async with bot.db.execute(
-        "SELECT last_daily, streak_days FROM players WHERE user_id = ?", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return {"ok": False, "reason": "Профиль не найден."}
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT last_daily, streak_days FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            return {"ok": False, "reason": "Профиль не найден."}
 
-    last_daily, streak = row
-    now = datetime.datetime.now()
-    today = now.date()
+        last_daily, streak = row
+        now = datetime.datetime.now()
+        today = now.date()
 
-    if last_daily:
-        last_date = datetime.datetime.fromisoformat(last_daily).date()
-        delta = (today - last_date).days
-        if delta == 0:
-            return {"ok": False, "reason": "Ты уже забирал награду сегодня. Возвращайся завтра!"}
-        new_streak = min(streak + 1, 30) if delta == 1 else 1
-    else:
-        new_streak = 1
+        if last_daily:
+            last_date = datetime.datetime.fromisoformat(last_daily).date()
+            delta = (today - last_date).days
+            if delta == 0:
+                return {
+                    "ok": False,
+                    "reason": "Ты уже забирал награду сегодня. Возвращайся завтра!",
+                }
+            new_streak = streak + 1 if delta == 1 and streak < 30 else 1
+        else:
+            new_streak = 1
 
-    coins, gems, item_id = DAILY_REWARDS[new_streak]
+        coins, gems, item_id = DAILY_REWARDS[new_streak]
 
-    await bot.db.execute(
-        "UPDATE players SET coins = coins + ?, gems = gems + ?, "
-        "total_coins_earned = total_coins_earned + ?, "
-        "total_gems_earned = total_gems_earned + ?, "
-        "last_daily = ?, streak_days = ? WHERE user_id = ?",
-        (coins, gems, coins, gems, now.isoformat(), new_streak, user_id)
-    )
-    await bot.db.commit()
+        await bot.db.execute(
+            "UPDATE players SET coins = coins + ?, gems = gems + ?, "
+            "total_coins_earned = total_coins_earned + ?, "
+            "lifetime_production = lifetime_production + ?, "
+            "total_gems_earned = total_gems_earned + ?, "
+            "last_daily = ?, streak_days = ? WHERE user_id = ?",
+            (coins, gems, coins, coins, gems, now.isoformat(), new_streak, user_id)
+        )
 
-    item_name = None
-    if item_id:
-        item_name, _ = await grant_item_or_compensation(user_id, item_id, 1)
+        item_name = None
+        if item_id:
+            item_name, _ = await grant_item_or_compensation(user_id, item_id, 1)
 
-    await update_quest_progress(user_id, "claim_daily")
-    await check_achievements(user_id)
-    await add_season_xp(user_id, 25)
+        await update_quest_progress(user_id, "claim_daily")
+        await check_achievements(user_id)
+        await add_season_xp(user_id, 25)
+        onboarding = await complete_onboarding_step(user_id, "claim_daily")
 
-    return {"ok": True, "day": new_streak, "coins": coins, "gems": gems,
-            "item": item_name, "streak": new_streak}
+        return {
+            "ok": True,
+            "day": new_streak,
+            "coins": coins,
+            "gems": gems,
+            "item": item_name,
+            "streak": new_streak,
+            "onboarding": onboarding,
+        }
 
 
 async def get_unlocked_titles(user_id: int) -> set:
@@ -3862,7 +4804,8 @@ async def get_unlocked_titles(user_id: int) -> set:
 
     # --- Банк ---
     async with bot.db.execute(
-        "SELECT COUNT(*) FROM bank_history WHERE user_id = ?", (user_id,)
+        "SELECT COUNT(*) FROM bank_history WHERE user_id = ? "
+        "AND COALESCE(kind, 'deposit') = 'deposit'", (user_id,)
     ) as c:
         bank_deposits = (await c.fetchone())[0] or 0
 
@@ -4117,8 +5060,9 @@ async def open_advent_day(user_id: int, day: int) -> tuple[bool, str, dict]:
     await bot.db.execute(
         "UPDATE players SET coins = coins + ?, gems = gems + ?, "
         "total_coins_earned = total_coins_earned + ?, "
+        "lifetime_production = lifetime_production + ?, "
         "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
-        (coins, gems, coins, gems, user_id)
+        (coins, gems, coins, coins, gems, user_id)
     )
 
     item_name = None
@@ -4136,7 +5080,7 @@ async def open_advent_day(user_id: int, day: int) -> tuple[bool, str, dict]:
         VALUES (?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET last_opened_day = ?, last_opened_date = ?
     """, (user_id, day, today_str, day, today_str))
-    await bot.db.commit()
+    await commit_if_needed()
 
     await check_achievements(user_id)
 
@@ -4377,7 +5321,8 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
 
     # --- Достижения ---
     async with bot.db.execute(
-        "SELECT total_coins_earned, total_gems_earned FROM players WHERE user_id = ?", (user_id,)
+        "SELECT lifetime_production, total_gems_earned FROM players WHERE user_id = ?",
+        (user_id,),
     ) as c:
         tce, tge = await c.fetchone()
 
@@ -4507,7 +5452,7 @@ async def set_notification(user_id: int, notif_type: str, enabled: bool):
         VALUES (?, ?, ?)
         ON CONFLICT(user_id, notif_type) DO UPDATE SET enabled = ?
     """, (user_id, notif_type, int(enabled), int(enabled)))
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 async def can_send_notification(user_id: int, notif_type: str) -> bool:
@@ -4540,7 +5485,7 @@ async def mark_notification_sent(user_id: int, notif_type: str):
         VALUES (?, ?, 1, ?)
         ON CONFLICT(user_id, notif_type) DO UPDATE SET last_sent = ?
     """, (user_id, notif_type, now_iso, now_iso))
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 async def send_dm_notification(user_id: int, notif_type: str, text: str, embed: discord.Embed = None) -> bool:
@@ -4700,12 +5645,13 @@ async def get_total_bonus_line(user_id: int) -> str:
     title_gems = await get_title_bonus(user_id, "income_gems")
     prestige_bonus = await get_prestige_bonus(user_id)
     collection_bonus = await get_collection_bonus(user_id)
+    set_bonus = await get_set_bonus(user_id)
 
     mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (
-        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus + set_bonus
     )
     mult_gems = (1 + status_bonus) * (1 + clan_bonus) * (
-        1 + pet_gems + title_gems + prestige_bonus + collection_bonus
+        1 + pet_gems + title_gems + prestige_bonus + collection_bonus + set_bonus
     )
     coin_pct = int((mult_coins - 1) * 100)
     gem_pct = int((mult_gems - 1) * 100)
@@ -4723,6 +5669,8 @@ async def get_total_bonus_line(user_id: int) -> str:
         parts.append(f"престиж +{int(prestige_bonus*100)}%")
     if collection_bonus > 0:
         parts.append(f"коллекция +{int(collection_bonus*100)}%")
+    if set_bonus > 0:
+        parts.append(f"сеты +{int(set_bonus*100)}%")
 
     suffix = f" ({', '.join(parts)})" if parts else " (нет бонусов)"
     return f"**Монеты: +{coin_pct}%** | **Гемы: +{gem_pct}%**{suffix}"
@@ -4747,9 +5695,10 @@ async def get_total_bonus_percent(user_id: int) -> int:
     title_coins = await get_title_bonus(user_id, "income_coins")
     prestige_bonus = await get_prestige_bonus(user_id)
     collection_bonus = await get_collection_bonus(user_id)
+    set_bonus = await get_set_bonus(user_id)
 
     mult_coins = (1 + status_bonus) * (1 + clan_bonus) * (
-        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus + set_bonus
     )
     return int((mult_coins - 1) * 100)
 
@@ -4768,7 +5717,25 @@ async def get_prestige_points(user_id: int) -> int:
 
 async def get_prestige_bonus(user_id: int) -> float:
     points = await get_prestige_points(user_id)
-    return points * PRESTIGE_BONUS_PER_POINT
+    return min(points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP)
+
+
+def status_rank(upgrade_id: str) -> int:
+    """Ранг статуса в линейке; -1 для не-статуса."""
+    try:
+        return STATUS_ORDER.index(upgrade_id)
+    except ValueError:
+        return -1
+
+
+def best_status_bonus(status_ids) -> float:
+    """Бонус лучшего статуса из набора."""
+    best = 0.0
+    for status_id in status_ids:
+        bonus = STATUS_BONUSES.get(status_id, 0.0)
+        if bonus > best:
+            best = bonus
+    return best
 
 
 async def get_collection_count(user_id: int) -> int:
@@ -4785,9 +5752,92 @@ async def get_collection_bonus(user_id: int) -> float:
     return (await get_collection_count(user_id)) * COLLECTION_BONUS_PER_ITEM
 
 
+def get_set_tier(set_id: str, count: int) -> tuple[int, float]:
+    """Возвращает лучший достигнутый порог сета и его бонус."""
+    for threshold, bonus in SET_DEFINITIONS[set_id]["tiers"]:
+        if count >= threshold:
+            return threshold, bonus
+    return 0, 0.0
+
+
+def compute_set_synergy(rows, grid_size: int) -> dict:
+    """Считает бонусы сетов по раскладке замка.
+
+    rows: [(slot, item_id), ...] только из location='profile'.
+    """
+    set_items = {set_id: set() for set_id in SET_DEFINITIONS}
+    slot_sets = {}
+
+    for slot, item_id in rows:
+        set_id = ITEM_SET.get(item_id)
+        if not set_id:
+            continue
+        set_items[set_id].add(item_id)
+        slot_sets[int(slot)] = set_id
+
+    set_counts = {set_id: len(items) for set_id, items in set_items.items()}
+    set_tiers = {}
+    set_bonus = 0.0
+    for set_id, count in set_counts.items():
+        threshold, bonus = get_set_tier(set_id, count)
+        set_tiers[set_id] = (threshold, bonus)
+        set_bonus += bonus
+
+    width = max(1, int(grid_size ** 0.5))
+    adjacency_pairs = 0
+    for slot, set_id in slot_sets.items():
+        right = slot + 1
+        if right < grid_size and slot % width != width - 1:
+            if slot_sets.get(right) == set_id:
+                adjacency_pairs += 1
+        down = slot + width
+        if down < grid_size and slot_sets.get(down) == set_id:
+            adjacency_pairs += 1
+
+    full_rows = 0
+    for start in range(0, grid_size, width):
+        row_sets = [
+            slot_sets.get(slot)
+            for slot in range(start, min(start + width, grid_size))
+        ]
+        if row_sets and all(row_sets) and len(set(row_sets)) == 1:
+            full_rows += 1
+
+    adjacency_bonus = min(adjacency_pairs * SET_ADJACENCY_BONUS, SET_ADJACENCY_MAX)
+    floor_bonus = min(full_rows * SET_FLOOR_BONUS, SET_FLOOR_MAX)
+    total = min(set_bonus + adjacency_bonus + floor_bonus, SET_TOTAL_MAX)
+
+    return {
+        "set_counts": set_counts,
+        "set_tiers": set_tiers,
+        "set_bonus": set_bonus,
+        "adjacency_pairs": adjacency_pairs,
+        "adjacency_bonus": adjacency_bonus,
+        "full_rows": full_rows,
+        "floor_bonus": floor_bonus,
+        "total": total,
+    }
+
+
+async def get_set_synergy_details(user_id: int) -> dict:
+    grid_size = await get_grid_size(user_id)
+    async with bot.db.execute(
+        "SELECT slot, item_id FROM inventory "
+        "WHERE user_id = ? AND location = 'profile'",
+        (user_id,),
+    ) as c:
+        rows = await c.fetchall()
+    return compute_set_synergy(rows, grid_size)
+
+
+async def get_set_bonus(user_id: int) -> float:
+    details = await get_set_synergy_details(user_id)
+    return details["total"]
+
+
 async def calculate_prestige_gain(user_id: int) -> int:
     async with bot.db.execute(
-        "SELECT total_coins_earned, prestige_points FROM players WHERE user_id = ?",
+        "SELECT lifetime_production, prestige_points FROM players WHERE user_id = ?",
         (user_id,),
     ) as c:
         row = await c.fetchone()
@@ -4808,7 +5858,7 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
     try:
         async with db_transaction():
             async with bot.db.execute(
-                "SELECT total_coins_earned, prestige_points FROM players WHERE user_id = ?",
+                "SELECT lifetime_production, prestige_points FROM players WHERE user_id = ?",
                 (user_id,),
             ) as c:
                 row = await c.fetchone()
@@ -4823,6 +5873,26 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
                 raise ValueError(
                     f"Нужно ещё 🪙 {max(0, need)} всего заработанных монет."
                 )
+
+            for label, sql in (
+                ("вклад", "SELECT 1 FROM bank_deposits WHERE user_id = ?"),
+                (
+                    "кредит",
+                    "SELECT 1 FROM bank_loans WHERE user_id = ? "
+                    "AND COALESCE(status, 'active') = 'active'",
+                ),
+                (
+                    "ордера",
+                    "SELECT 1 FROM market_orders WHERE user_id = ? "
+                    "AND status = 'active'",
+                ),
+            ):
+                async with bot.db.execute(sql, (user_id,)) as c:
+                    if await c.fetchone():
+                        raise ValueError(
+                            f"Сначала закрой {label}: перерождение не должно "
+                            "терять активные обязательства."
+                        )
 
             # Закрываем активные лоты игрока и возвращаем ставки.
             async with bot.db.execute(
@@ -4842,14 +5912,21 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
                 )
                 await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
 
+            async with bot.db.execute(
+                "SELECT upgrade_id FROM player_upgrades WHERE user_id = ? "
+                "AND upgrade_id IN ('vip','gold','platinum','diamond')",
+                (user_id,),
+            ) as c:
+                statuses = [r[0] for r in await c.fetchall()]
+            status_bonus = best_status_bonus(statuses)
+
             await bot.db.execute("""
                 UPDATE players SET
                     coins = ?,
                     grid_size = 9,
                     storage_size = 36,
-                    income_bonus = 0.0,
+                    income_bonus = ?,
                     catalysts = 0,
-                    title = 'Новичок',
                     prestige_points = prestige_points + ?,
                     daily_quest_date = NULL,
                     daily_quest_progress = '{}',
@@ -4858,27 +5935,36 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
                     last_gem_collected = CURRENT_TIMESTAMP,
                     last_tax_time = CURRENT_TIMESTAMP
                 WHERE user_id = ?
-            """, (start_coins, gain, user_id))
+            """, (start_coins, status_bonus, gain, user_id))
 
             await bot.db.execute("DELETE FROM inventory WHERE user_id = ?", (user_id,))
             await bot.db.execute(
-                "DELETE FROM player_upgrades WHERE user_id = ?", (user_id,)
+                "DELETE FROM market_orders WHERE user_id = ?", (user_id,)
+            )
+            # Сетки сбрасываются вместе с замком, а купленные статусы
+            # остаются навсегда.
+            await bot.db.execute(
+                "DELETE FROM player_upgrades WHERE user_id = ? "
+                "AND (upgrade_id IS NULL OR upgrade_id NOT IN "
+                "('vip','gold','platinum','diamond'))",
+                (user_id,),
             )
             await bot.db.execute(
                 "DELETE FROM bank_deposits WHERE user_id = ?", (user_id,)
             )
             await bot.db.execute(
-                "DELETE FROM market_listings WHERE seller_id = ?", (user_id,)
+                "DELETE FROM bank_loans WHERE user_id = ?", (user_id,)
             )
     except ValueError as e:
         return False, f"❌ {e}", 0, points
 
-    await add_season_xp(user_id, 100)
+    await add_season_xp(user_id, 100, guild_id)
     new_points = points + gain
     return (
         True,
         f"{get_emoji('_rebirth')} Перерождение завершено! Получено **{gain}** очков престижа.\n"
-        f"Всего очков: **{new_points}** (+{int(new_points * PRESTIGE_BONUS_PER_POINT * 100)}% к доходу).",
+        f"Всего очков: **{new_points}** "
+        f"(+{int(min(new_points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100)}% к доходу).",
         gain,
         new_points,
     )
@@ -4945,29 +6031,33 @@ async def check_achievements(user_id: int):
     }
 
     newly_unlocked = []
-    for ach_id, ok in conditions.items():
-        if ok and ach_id not in unlocked:
-            async with bot.db.execute(
-                "SELECT reward_gems, name, emoji FROM achievements WHERE id = ?", (ach_id,)
-            ) as c:
-                ach_row = await c.fetchone()
-            if not ach_row:
-                continue
-            reward_gems, name, emoji = ach_row
+    async with db_transaction():
+        for ach_id, ok in conditions.items():
+            if ok and ach_id not in unlocked:
+                async with bot.db.execute(
+                    "SELECT reward_gems, name, emoji FROM achievements WHERE id = ?",
+                    (ach_id,),
+                ) as c:
+                    ach_row = await c.fetchone()
+                if not ach_row:
+                    continue
+                reward_gems, name, emoji = ach_row
 
-            await bot.db.execute(
-                "INSERT OR IGNORE INTO player_achievements (user_id, achievement_id) VALUES (?, ?)",
-                (user_id, ach_id)
-            )
-            await bot.db.execute(
-                "UPDATE players SET gems = gems + ?, "
-                "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
-                (reward_gems, reward_gems, user_id)
-            )
-            newly_unlocked.append((emoji, name, reward_gems))
+                cur = await bot.db.execute(
+                    "INSERT OR IGNORE INTO player_achievements "
+                    "(user_id, achievement_id) VALUES (?, ?)",
+                    (user_id, ach_id),
+                )
+                if cur.rowcount == 0:
+                    continue
+                await bot.db.execute(
+                    "UPDATE players SET gems = gems + ?, "
+                    "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
+                    (reward_gems, reward_gems, user_id)
+                )
+                newly_unlocked.append((emoji, name, reward_gems))
 
     if newly_unlocked:
-        await bot.db.commit()
         await sync_story_achievements(user_id)
         await add_season_xp(user_id, 30 * len(newly_unlocked))
     return newly_unlocked
@@ -5038,7 +6128,7 @@ async def get_or_create_daily_quests(user_id: int):
             "daily_quest_claimed = ? WHERE user_id = ?",
             (today, json.dumps(progress), json.dumps(claimed), user_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         return chosen, progress, claimed
 
     progress = json.loads(progress_json or "{}")
@@ -5056,7 +6146,7 @@ async def update_quest_progress(user_id: int, quest_id: str, amount: int = 1):
         "UPDATE players SET daily_quest_progress = ? WHERE user_id = ?",
         (json.dumps(progress), user_id)
     )
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 # ============================================================
@@ -5082,7 +6172,11 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
         parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
     if per_sec_gems > 0:
         parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
-    income_str = " | ".join(parts) if parts else "нет генераторов"
+    income_str = (
+        " | ".join(parts)
+        if parts
+        else "нет генераторов · купи первый в «Магазине»"
+    )
 
     # --- Собираем все бонусы ---
     # статус (income_bonus из players)
@@ -5121,11 +6215,23 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонус", value=f"+{total_pct}%", inline=True)
     embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
-    embed.add_field(
-        name="Сезон",
-        value=f"Ур. **{season['level']}/{SEASON_LEVELS}** · {season['days_left']} дн.",
-        inline=True,
+    season_value = (
+        f"Ур. **{season['level']}/{SEASON_LEVELS}** · {season['days_left']} дн."
+        if settings.get("battlepass_enabled", True)
+        else "Отключён"
     )
+    embed.add_field(name="Сезон", value=season_value, inline=True)
+    onboarding_done = await get_onboarding_progress(user_id)
+    if len(onboarding_done) < len(ONBOARDING_STEPS):
+        _next_step, next_data = get_next_onboarding_step(onboarding_done)
+        embed.add_field(
+            name="Первые шаги",
+            value=(
+                f"**{len(onboarding_done)}/{len(ONBOARDING_STEPS)}** · "
+                f"следующее: {next_data[0] if next_data else 'готово'}"
+            ),
+            inline=False,
+        )
     embed = await fix_embed_emojis(embed)
     return embed
 
@@ -5137,17 +6243,37 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "🪙 Монеты — пассивный доход, дейли, квесты, продажа.\n"
             "💎 Гемы — дейли, квесты, достижения, аукцион.\n\n"
             "**Обмен:** 12 монет = 1 гем, 1 гем = 9 монет.\n\n"
-            "**Банк:** вклад до 50 000 монет, 2% в день, срок 1–30 дней.\n\n"
-            "**Налоги:** 2% в сутки от баланса монет.\n\n"
-            "**Где смотреть:** «Мой профиль» → «Обмен», «Социум» → «Банк» / «Налоги»."
+            "**Офлайн-доход:** после 2 часов ручной сбор даёт 70% дохода; "
+            "автосборщик собирает 100%. Потолка накопления больше нет.\n\n"
+            "**Гемы:** накопление ограничено `gem_cap` гильдии (по умолчанию 6).\n\n"
+            f"**Банк:** вклад до {format_price(BANK_MAX_DEPOSIT)} монет (или 24 ч дохода), "
+            f"{int(BANK_DAILY_RATE * 100)}% в день (сложный процент), срок 1–30 дней. "
+            "Кредит под залог генератора до 50% его стоимости.\n\n"
+            f"**Налоги:** {int(DEFAULT_TAX_RATE * 100)}% в сутки от баланса монет "
+            "(значение задаётся в настройках гильдии). Вклады не облагаются.\n\n"
+            "**Продажа:** прямая продажа — 10% цены; биржа — около 70%, "
+            "но с комиссией и ожиданием покупателя.\n\n"
+            "**Где смотреть:** главное меню → «Обмен валют»; «Социум» → «Банк» / «Налоги»."
+        ),
+        "offline": (
+            "🌙 Офлайн-доход",
+            "**Накопление:** доход копится, пока ты офлайн. Потолка накопления больше нет.\n\n"
+            "**Штраф:** после 2 часов ручной сбор даёт 70% дохода. "
+            "До 2 часов — 100%.\n\n"
+            "**Автосборщик:** собирает 100% дохода без штрафа и без потолка.\n\n"
+            "**Гемы:** накопление ограничено `gem_cap` гильдии (по умолчанию 6). "
+            "Лишние гемы не начисляются.\n\n"
+            "**Смена генераторов:** при установке/снятии генератора точка накопления сбрасывается, "
+            "чтобы нельзя было получить доход за прошлое время.\n\n"
+            "**Где:** главное меню показывает доход; «Магазин» → «Автосборщик»."
         ),
         "prestige": (
             "🔁 Перерождение",
             "**Что это:** сброс замка ради постоянного бонуса к доходу.\n\n"
-            "**Очки:** 1 очко за каждые 100 000 всего заработанных монет.\n\n"
+            f"**Очки:** 1 очко за каждые {format_price(PRESTIGE_COIN_REQUIREMENT)} всего заработанных монет.\n\n"
             "**Бонус:** +5% к доходу за каждое очко. Очки сохраняются навсегда.\n\n"
             "**Сбрасывается:** монеты, инвентарь, сетка, катализаторы, улучшения, вклад, ежедневные квесты.\n\n"
-            "**Остаётся:** гемы, питомцы, титулы, достижения, клан, косметика, сюжетные квесты, статистика.\n\n"
+            "**Остаётся:** гемы, питомцы, титулы, статусы, достижения, клан, косметика, сюжетные квесты, статистика.\n\n"
             "**Где:** главное меню → «Перерождение»."
         ),
         "collection": (
@@ -5160,11 +6286,21 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
         "generators": (
             "🏗️ Генераторы",
             "**Покупка:** «Магазин» → «Генераторы».\n\n"
-            "**Синтез:** 5 одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 4%). Стоимость в гемах растёт. Катализатор +15%.\n\n"
-            "**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +110%, 2★ +290%, 3★ +650%, 4★ +1300%, 5★ +2500%.\n\n"
+            f"**Синтез:** {CRAFT_COST} одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 4%). Стоимость в гемах растёт. Катализатор +15%.\n\n"
+            f"**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +{int(STAR_BONUS[1] * 100)}%, 2★ +{int(STAR_BONUS[2] * 100)}%, 3★ +{int(STAR_BONUS[3] * 100)}%, 4★ +{int(STAR_BONUS[4] * 100)}%, 5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
             "**Продажа:** только `common`/`uncommon`/`rare`, 10% от цены. `epic`+ — только синтез или аукцион.\n\n"
             "**Хранилище:** «Замок» → «Хранилище». Генераторы там не дают доход.\n\n"
             "**Временное хранилище:** 100 слотов для предметов, которым не хватило места в замке и хранилище."
+        ),
+        "sets": (
+            "🧩 Сеты",
+            "**Что это:** генераторы объединяются в сеты по теме.\n\n"
+            "**Бонусы:**\n"
+            "• за количество предметов сета — пороговый бонус;\n"
+            "• за соседние пары одного сета — дополнительный бонус;\n"
+            "• за заполненные ряды — бонус этажа.\n\n"
+            "**Где смотреть:** «Замок» → поле «Сеты»; подробности — в профиле.\n\n"
+            "**Совет:** ставь генераторы одного сета рядом, чтобы получать больше."
         ),
         "pets": (
             "🐾 Питомцы",
@@ -5194,7 +6330,8 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "**Создание:** 500 🪙.\n\n"
             "**Роли:** лидер, заместитель, офицер, ветеран, участник.\n\n"
             "**Сундук:** общий банк клана.\n\n"
-            "**Сетка:** 6×6, генераторы работают на клан.\n\n"
+            "**Сетка:** у клана отдельная сетка 6×6 и клановое хранилище. "
+            "Личные генераторы в замке не работают на клан.\n\n"
             "**Квесты:** недельные (синтезы, покупки, рейды, войны).\n\n"
             "**Войны:** 24 ч, у кланов есть HP. Участники атакуют раз в 1 ч; урон зависит от мощи. Победитель получает сундук и XP.\n\n"
             "**Где:** «Социум» → «Клан»."
@@ -5202,28 +6339,47 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
         "pvp": (
             "⚔️ PvP",
             "**Рейды:**\n"
-            "• 1–3 чел, кулдаун 1 ч / 6 ч.\n"
-            "• Кража 15% (+бонус волка).\n"
-            "• Дневной лимит: 50% от своего баланса (мин. 1000).\n"
+            "• 1–3 чел, кулдаун 1 ч; щит цели 6 ч.\n"
+            f"• Кража {int(RAID_LOOT_RATE * 100)}% кошелька (+бонус волка).\n"
+            f"• Дневной лимит потерь цели: {int(RAID_DAILY_LOSS_CAP * 100)}% баланса.\n"
+            f"• Нельзя атаковать цель слабее {int(RAID_MIN_TARGET_POWER_RATIO * 100)}% мощи отряда.\n"
+            "• Дневной лимит добычи атакующего: 50% своего баланса (мин. 1000).\n"
             "• Мощь = сумма (цена × (1 + звёзды × 0.5)).\n\n"
             "**Дуэли:**\n"
-            "• 1-на-1, ставка в монетах.\n"
-            "• Режимы: `dice` (рандом) или `power` (мощь).\n"
+            f"• Ставка не больше {int(DUEL_MAX_BET_PCT * 100)}% баланса каждого.\n"
+            f"• КД после дуэли: {DUEL_COOLDOWN_SECONDS // 60} мин.\n"
+            "• Режимы: `dice` (рандом) или `power` (мощь с разбросом).\n"
             "• Победитель забирает банк.\n\n"
             "**Где:** «Социум» → «Рейд» / «Дуэль»."
         ),
         "auction": (
-            "🏛️ Аукцион и биржа",
-            "**Аукцион:**\n"
-            "• Выставить лот (любой генератор, 1–72 ч).\n"
-            "• Ставка должна быть выше текущей.\n"
-            "• Комиссия 5% с продавца.\n"
-            "• При закрытии предмет передаётся победителю (или возвращается, если ставок нет).\n\n"
-            "**Биржа:**\n"
-            "• Покупка — по текущей цене, продажа — 70% от неё.\n"
-            "• Цены зависят от спроса/предложения.\n"
-            "• Обновление раз в 6 ч.\n\n"
-            "**Где:** «Социум» → «Аукцион» / «Биржа»."
+            "🏛️ Аукцион",
+            "**Лоты:** любой генератор, 1–72 ч.\n\n"
+            "**Ставка:** должна быть выше текущей; при ставке в последнюю минуту лот продлевается.\n\n"
+            "**Buyout:** если у лота задан buyout, его можно выкупить мгновенно. "
+            "Buyout должен быть больше стартовой цены и текущей ставки.\n\n"
+            "**Комиссия:** 5% с продавца.\n\n"
+            "**Закрытие:** предмет передаётся победителю или возвращается продавцу, если ставок не было.\n\n"
+            "**Где:** «Социум» → «Аукцион»."
+        ),
+        "buyout": (
+            "💸 Buyout",
+            "**Что это:** мгновенный выкуп лота по фиксированной цене.\n\n"
+            "**Как работает:**\n"
+            "• продавец задаёт buyout при выставлении лота;\n"
+            "• buyout должен быть больше стартовой цены;\n"
+            "• если цена buyout не больше текущей ставки, кнопка выкупа недоступна;\n"
+            "• покупатель сразу получает предмет, продавец — деньги за вычетом 5%.\n\n"
+            "**Где:** «Социум» → «Аукцион» → выбрать лот."
+        ),
+        "orders": (
+            "📋 Ордера биржи",
+            "**Что это:** заявка на покупку или продажу предметов по своей цене.\n\n"
+            "**Продажа:** предмет уходит в эскроу, при исполнении продавец получает деньги.\n\n"
+            "**Покупка:** монеты резервируются, при исполнении покупатель получает предмет.\n\n"
+            "**Отмена:** активный ордер можно отменить; эскроу/резерв возвращается.\n\n"
+            "**Ограничения:** только `common`/`uncommon`/`rare` и 0★; ордер исполняется полностью.\n\n"
+            "**Где:** «Социум» → «Биржа» → «Мои ордера»."
         ),
         "quests": (
             "📜 Квесты",
@@ -5240,6 +6396,17 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "10. Коллекционер — 5 достижений (100 💎)\n\n"
             "**Ежедневные:** 3 случайных из пула (синтезы, покупки, перемещения).\n\n"
             "**Где:** «Квесты» → «Сюжетные» / «Ежедневные»."
+        ),
+        "season": (
+            "🎫 Сезон",
+            "**Что это:** месячный battle pass на 30 уровней.\n\n"
+            "**XP:** дают дейли, квесты, синтезы, рейды, дуэли, достижения и другие действия. "
+            f"Каждый следующий уровень требует на {SEASON_XP_STEP} XP больше.\n\n"
+            "**Награды:** бесплатная линейка — монеты, гемы и предметы; "
+            "премиум — косметика и дополнительные награды.\n\n"
+            "**Премиум:** покупается за гемы; награды выдаются только один раз.\n\n"
+            "**Сброс:** в начале нового месяца прогресс начинается заново.\n\n"
+            "**Где:** главное меню → «Сезон» или «Квесты» → «Сезон»."
         ),
         "daily": (
             "📅 Дейли и адвент",
@@ -5281,8 +6448,8 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
             "1 ур. — раз в 4 ч (после покупки)\n"
             "2 ур. — 300 💎, раз в 3 ч\n"
             "3 ур. — 700 💎, раз в 2 ч\n\n"
-            "**Эффект:** собирает доход автоматически, даже когда ты офлайн.\n\n"
-            "**Где:** «Магазин» → «Автосборщик» или «Мой профиль» → «Автосборщик»."
+            "**Эффект:** собирает 100% дохода автоматически, без офлайн-штрафа и без потолка.\n\n"
+            "**Где:** «Магазин» → «Автосборщик»."
         ),
         "notifications": (
             "📬 Уведомления",
@@ -5356,7 +6523,11 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
         parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
     if per_sec_gems > 0:
         parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
-    income_str = " | ".join(parts) if parts else "нет генераторов"
+    income_str = (
+        " | ".join(parts)
+        if parts
+        else "нет генераторов · купи первый в «Магазине»"
+    )
 
     # --- Бонусы ---
     status_bonus = bonus or 0.0
@@ -5375,6 +6546,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     title_bonus = max(title_coins, title_gems)
 
     total_pct = await get_total_bonus_percent(user_id)
+    set_details = await get_set_synergy_details(user_id)
 
     width = max(1, int(grid_size ** 0.5))
     async with bot.db.execute(
@@ -5391,6 +6563,11 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     )
     if cos_bg:
         embed.set_image(url=cos_bg)
+    if not rows:
+        embed.description = (
+            "Замок пуст. Купи первый генератор в «Магазине» — "
+            "он начнёт приносить доход."
+        )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     embed.add_field(name="Кошелёк", value=f"{coin} {coins} | {gem} {gems}", inline=False)
     embed.add_field(name="Доход", value=income_str, inline=False)
@@ -5404,6 +6581,19 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
             inline=True
         )
     embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
+    active_sets = [
+        f"{set_def['name']} {set_details['set_counts'][set_id]}/{len(set_def['items'])}"
+        for set_id, set_def in SET_DEFINITIONS.items()
+        if set_details["set_counts"][set_id] > 0
+    ]
+    embed.add_field(
+        name="Сеты",
+        value=(
+            f"**+{int(set_details['total'] * 100)}%**\n"
+            + (", ".join(active_sets) if active_sets else "нет активных сетов")
+        ),
+        inline=True,
+    )
 
     # Выводим сетку по рядам (поддерживает неквадратные размеры)
     for start in range(0, grid_size, width):
@@ -5448,12 +6638,14 @@ async def build_generator_details_embed(
     title_gems = await get_title_bonus(user_id, "income_gems")
     prestige_bonus = await get_prestige_bonus(user_id)
     collection_bonus = await get_collection_bonus(user_id)
+    set_details = await get_set_synergy_details(user_id)
+    set_bonus = set_details["total"]
 
     mult_coins = (1 + bonus) * (1 + clan_bonus) * (
-        1 + pet_coins + title_coins + prestige_bonus + collection_bonus
+        1 + pet_coins + title_coins + prestige_bonus + collection_bonus + set_bonus
     )
     mult_gems = (1 + bonus) * (1 + clan_bonus) * (
-        1 + pet_gems + title_gems + prestige_bonus + collection_bonus
+        1 + pet_gems + title_gems + prestige_bonus + collection_bonus + set_bonus
     )
 
     details = []
@@ -5465,7 +6657,8 @@ async def build_generator_details_embed(
         eff_gems = inc_gems * star_mult * 3600 * mult_gems
         total_coins += eff_coins
         total_gems += eff_gems
-        details.append((slot, name, default_emoji, stars, rarity, eff_coins, eff_gems))
+        set_name = SET_DEFINITIONS.get(ITEM_SET.get(item_id), {}).get("name", "—")
+        details.append((slot, name, default_emoji, stars, rarity, eff_coins, eff_gems, set_name))
 
     page_size = PAGE_SIZE
     total_pages = max(1, (len(details) + page_size - 1) // page_size)
@@ -5474,19 +6667,50 @@ async def build_generator_details_embed(
 
     embed.description = (
         f"Страница {page + 1}/{total_pages}. "
-        "Доход с учётом звёзд и всех бонусов (статус, клан, питомец, титул, престиж, коллекция)."
+        "Доход с учётом звёзд и всех бонусов (статус, клан, питомец, титул, престиж, коллекция, сеты)."
     )
 
-    for slot, name, default_emoji, stars, rarity, eff_coins, eff_gems in chunk:
+    for slot, name, default_emoji, stars, rarity, eff_coins, eff_gems, set_name in chunk:
         star_str = f"{stars}★" if stars > 0 else "—"
         inc_str = f"🪙 {eff_coins:.2f}/час"
         if eff_gems > 0:
             inc_str += f" | 💎 {eff_gems:.4f}/час"
         embed.add_field(
             name=f"Слот {slot}: {default_emoji} {name} ({star_str})"[:256],
-            value=f"{RARITY_NAMES.get(rarity, rarity)}\n{inc_str}",
+            value=(
+                f"{RARITY_NAMES.get(rarity, rarity)}\n"
+                f"{inc_str}\nСет: {set_name}"
+            ),
             inline=False,
         )
+
+    set_lines = []
+    for set_id, set_def in SET_DEFINITIONS.items():
+        count = set_details["set_counts"].get(set_id, 0)
+        if count <= 0:
+            continue
+        _, bonus = set_details["set_tiers"].get(set_id, (0, 0.0))
+        set_lines.append(
+            f"{set_def['emoji']} {set_def['name']}: {count}/{len(set_def['items'])}"
+            f" (+{int(bonus * 100)}%)"
+        )
+    if set_lines:
+        embed.add_field(
+            name="Синергия сетов",
+            value=(
+                "Сеты: +{s}%\nСоседство: {p} пар → +{a}%\n"
+                "Этажи: {r} → +{f}%\n**Итого: +{t}%**"
+            ).format(
+                s=int(set_details["set_bonus"] * 100),
+                p=set_details["adjacency_pairs"],
+                a=int(set_details["adjacency_bonus"] * 100),
+                r=set_details["full_rows"],
+                f=int(set_details["floor_bonus"] * 100),
+                t=int(set_details["total"] * 100),
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Наборы", value="\n".join(set_lines), inline=False)
 
     embed.add_field(
         name="💰 Итого по замку",
@@ -5531,6 +6755,11 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
         f"Слотов: **{grid_size}** | "
         f"Временное: **{temp_count}/{TEMP_STORAGE_SIZE}**"
     )
+    if not rows:
+        embed.description += (
+            "\n\nХранилище пусто. Перемести сюда предметы из замка, "
+            "чтобы освободить слоты."
+        )
 
     # Выводим сетку по рядам (поддерживает неквадратные размеры)
     for start in range(0, grid_size, width):
@@ -5564,6 +6793,11 @@ async def build_temp_storage_embed(interaction: discord.Interaction) -> discord.
         description=(
             f"Занято: **{len(rows)}/{TEMP_STORAGE_SIZE}**\n"
             "Сюда попадают предметы, которым не хватило слотов в замке и хранилище."
+            + (
+                "\n\nВременное хранилище пусто."
+                if not rows
+                else ""
+            )
         ),
         color=0x808080,
     )
@@ -5702,7 +6936,8 @@ async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, s
         return False, "❌ Количество должно быть больше нуля."
 
     async with bot.db.execute("""
-        SELECT i.name, i.price, mp.current_price, mp.base_price
+        SELECT i.name, i.price, mp.current_price, mp.base_price,
+               mp.demand, mp.supply
         FROM items i
         JOIN market_prices mp ON mp.item_id = i.id
         WHERE i.id = ?
@@ -5710,9 +6945,10 @@ async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, s
         row = await c.fetchone()
     if not row:
         return False, "❌ Предмет не найден на бирже."
-    name, item_price, current_price, base_price = row
+    name, item_price, current_price, base_price, demand0, supply0 = row
     price = current_price or item_price or base_price or 1
-    total = int(price) * qty
+    avg_price, new_price = calculate_market_buy_prices(price, base_price, qty)
+    total = avg_price * qty
 
     try:
         async with db_transaction():
@@ -5734,14 +6970,17 @@ async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, s
 
             await place_items(user_id, item_id, qty, commit=False)
 
-            new_price = min(
-                int(base_price * 2) if base_price else int(price * 2),
-                max(1, int(price * (1 + 0.01 * qty))),
-            )
             await bot.db.execute(
                 "UPDATE market_prices SET demand = demand + ?, "
                 "current_price = ?, last_update = ? WHERE item_id = ?",
                 (qty, new_price, datetime.datetime.now().isoformat(), item_id),
+            )
+            await record_market_price(
+                item_id,
+                new_price,
+                (demand0 or 0) + qty,
+                supply0 or 0,
+                commit=False,
             )
     except ValueError as e:
         return False, f"❌ {e}"
@@ -5758,7 +6997,8 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
         return False, "❌ Количество должно быть больше нуля."
 
     async with bot.db.execute("""
-        SELECT i.name, i.price, i.rarity, mp.current_price, mp.base_price
+        SELECT i.name, i.price, i.rarity, mp.current_price, mp.base_price,
+               mp.demand, mp.supply
         FROM items i
         JOIN market_prices mp ON mp.item_id = i.id
         WHERE i.id = ?
@@ -5766,7 +7006,7 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
         row = await c.fetchone()
     if not row:
         return False, "❌ Предмет не найден на бирже."
-    name, item_price, rarity, current_price, base_price = row
+    name, item_price, rarity, current_price, base_price, demand0, supply0 = row
     if rarity not in SELL_ALLOWED_RARITIES:
         return False, "❌ Предметы этой редкости продаются только через аукцион."
 
@@ -5778,7 +7018,7 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
             async with bot.db.execute(
                 "SELECT slot FROM inventory "
                 "WHERE user_id = ? AND location = 'storage' AND item_id = ? "
-                "ORDER BY slot ASC LIMIT ?",
+                "AND stars = 0 ORDER BY slot ASC LIMIT ?",
                 (user_id, item_id, qty),
             ) as c:
                 slots = [r[0] for r in await c.fetchall()]
@@ -5790,7 +7030,8 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
             for slot in slots:
                 cur = await bot.db.execute(
                     "DELETE FROM inventory "
-                    "WHERE user_id = ? AND location = 'storage' AND slot = ? AND item_id = ?",
+                    "WHERE user_id = ? AND location = 'storage' AND slot = ? "
+                    "AND item_id = ? AND stars = 0",
                     (user_id, slot, item_id),
                 )
                 if cur.rowcount == 0:
@@ -5811,6 +7052,13 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
                 "current_price = ?, last_update = ? WHERE item_id = ?",
                 (qty, new_price, datetime.datetime.now().isoformat(), item_id),
             )
+            await record_market_price(
+                item_id,
+                new_price,
+                demand0 or 0,
+                (supply0 or 0) + qty,
+                commit=False,
+            )
     except ValueError as e:
         return False, f"❌ {e}"
 
@@ -5819,42 +7067,451 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
     return True, f"✅ Продано **{name}** ×{qty} за 🪙 {proceeds}."
 
 
-async def build_market_embed(interaction: discord.Interaction) -> discord.Embed:
-    async with bot.db.execute("""
+async def record_market_price(
+    item_id: str,
+    price: int,
+    demand: int = 0,
+    supply: int = 0,
+    commit: bool = True,
+):
+    await bot.db.execute(
+        "INSERT INTO market_history (item_id, price, demand, supply) "
+        "VALUES (?, ?, ?, ?)",
+        (item_id, int(price), int(demand), int(supply)),
+    )
+    await bot.db.execute(
+        "DELETE FROM market_history WHERE item_id = ? AND id NOT IN ("
+        "SELECT id FROM market_history WHERE item_id = ? "
+        "ORDER BY id DESC LIMIT 50)",
+        (item_id, item_id),
+    )
+    if commit:
+        await commit_if_needed()
+
+
+def market_sparkline(prices: list[int]) -> str:
+    if not prices:
+        return "—"
+    chars = "▁▂▃▄▅▆▇█"
+    low = min(prices)
+    high = max(prices)
+    if high == low:
+        return chars[3] * len(prices)
+    return "".join(
+        chars[min(7, max(0, int((price - low) / (high - low) * 7)))]
+        for price in prices
+    )
+
+
+async def build_market_history_embed(item_id: str) -> discord.Embed:
+    async with bot.db.execute(
+        "SELECT i.name, i.emoji, mp.base_price, mp.current_price, "
+        "mp.demand, mp.supply FROM items i "
+        "JOIN market_prices mp ON mp.item_id = i.id WHERE i.id = ?",
+        (item_id,),
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return BotEmbed(
+            title="История цен",
+            description="Предмет не найден на бирже.",
+            color=0xe74c3c,
+        )
+
+    name, emoji, base, current, demand, supply = row
+    async with bot.db.execute(
+        "SELECT price FROM market_history WHERE item_id = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (item_id, MARKET_HISTORY_LIMIT),
+    ) as c:
+        history = [r[0] for r in await c.fetchall()]
+    history.reverse()
+    if not history:
+        history = [current]
+
+    change = history[-1] - history[0]
+    change_pct = (change / history[0] * 100) if history[0] else 0
+    spark = market_sparkline(history)
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} История цен: {name}",
+        description=(
+            f"{emoji or '📦'} База: 🪙 **{base}** · Сейчас: 🪙 **{current}**\n"
+            f"`{spark}`\n"
+            f"Изменение: **{change:+d}** ({change_pct:+.1f}%)"
+        ),
+        color=0x9b59b6,
+    )
+    embed.add_field(
+        name="Диапазон",
+        value=(
+            f"Мин: 🪙 **{min(history)}**\n"
+            f"Макс: 🪙 **{max(history)}**\n"
+            f"Точек: **{len(history)}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Спрос / предложение",
+        value=f"Спрос: **{demand or 0}**\nПредложение: **{supply or 0}**",
+        inline=True,
+    )
+    embed.set_footer(text="История обновляется при покупках, продажах и рыночных циклах.")
+    return embed
+
+
+async def build_market_embed(
+    interaction: discord.Interaction,
+    rarity: str | None = None,
+    sort: str = "change",
+    page: int = 0,
+) -> tuple[discord.Embed, int]:
+    sort_map = {
+        "change": "ABS(mp.current_price - mp.base_price) DESC",
+        "price_desc": "mp.current_price DESC",
+        "price_asc": "mp.current_price ASC",
+        "demand": "mp.demand DESC, mp.supply ASC",
+        "name": "i.name ASC",
+    }
+    sort = sort if sort in sort_map else "change"
+    where = ""
+    params: list = []
+    if rarity:
+        where = "WHERE i.rarity = ?"
+        params.append(rarity)
+
+    async with bot.db.execute(
+        f"SELECT COUNT(*) FROM market_prices mp "
+        f"JOIN items i ON i.id = mp.item_id {where}",
+        params,
+    ) as c:
+        total = (await c.fetchone())[0] or 0
+    page_size = 10
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+
+    async with bot.db.execute(
+        f"""
         SELECT mp.item_id, i.name, i.emoji, mp.base_price, mp.current_price,
-               mp.demand, mp.supply
+               mp.demand, mp.supply,
+               (SELECT GROUP_CONCAT(price, ',') FROM (
+                    SELECT price FROM market_history mh
+                    WHERE mh.item_id = mp.item_id ORDER BY mh.id DESC LIMIT 6
+               )) AS recent
         FROM market_prices mp
         JOIN items i ON i.id = mp.item_id
-        ORDER BY ABS(mp.current_price - mp.base_price) DESC
-        LIMIT 10
-    """) as c:
+        {where}
+        ORDER BY {sort_map[sort]}
+        LIMIT ? OFFSET ?
+        """,
+        (*params, page_size, page * page_size),
+    ) as c:
         rows = await c.fetchall()
 
+    rarity_label = RARITY_NAMES.get(rarity, "Все") if rarity else "Все"
+    sort_names = {
+        "change": "по изменению",
+        "price_desc": "дорогие",
+        "price_asc": "дешёвые",
+        "demand": "по спросу",
+        "name": "по названию",
+    }
     embed = BotEmbed(
         title=f"{get_emoji('_market')} Биржа",
         description=(
-            "Покупка — по текущей цене. Продажа — "
+            f"Страница {page + 1}/{total_pages}\n"
+            "Покупка — по средней цене пачки. Продажа — "
             f"**{int(MARKET_SELL_RATE * 100)}%** от текущей цены.\n"
-            "Цены меняются от спроса и предложения."
+            f"Фильтр: **{rarity_label}** · Сортировка: **{sort_names[sort]}**"
         ),
         color=0x9b59b6,
     )
     if not rows:
         embed.add_field(name="Пусто", value="На бирже пока нет товаров.")
-        return await fix_embed_emojis(embed)
+        return await fix_embed_emojis(embed), total_pages
 
-    for item_id, name, emoji, base, current, demand, supply in rows:
+    for item_id, name, emoji, base, current, demand, supply, recent in rows:
         trend = "🟢" if current > base else ("🔴" if current < base else "⚪")
+        prices = [
+            int(value) for value in (recent or "").split(",") if value
+        ]
+        spark = market_sparkline(prices) if prices else "—"
         embed.add_field(
             name=f"{trend} {emoji} {name}",
             value=(
                 f"Цена: 🪙 **{current}** (база {base})\n"
-                f"Спрос: **{demand}** | Предложение: **{supply}**"
+                f"Спрос: **{demand}** | Предложение: **{supply}**\n"
+                f"`{spark}`"
             ),
             inline=False,
         )
     embed.set_footer(text="Обновление цен — раз в 6 часов")
-    return await fix_embed_emojis(embed)
+    return await fix_embed_emojis(embed), total_pages
+
+
+async def create_market_order(
+    user_id: int, side: str, item_id: str, quantity: int, price: int
+) -> tuple[bool, str]:
+    if side not in ("buy", "sell"):
+        return False, "❌ Неверная сторона ордера."
+    if quantity <= 0 or price <= 0:
+        return False, "❌ Количество и цена должны быть больше нуля."
+
+    async with bot.db.execute(
+        "SELECT name, rarity FROM items WHERE id = ?", (item_id,)
+    ) as c:
+        item = await c.fetchone()
+    if not item:
+        return False, "❌ Предмет не найден."
+    name, rarity = item
+    if rarity not in MARKET_ORDER_RARITIES:
+        return False, "❌ Ордера доступны только для common/uncommon/rare."
+
+    expires = (
+        datetime.datetime.now()
+        + datetime.timedelta(hours=MARKET_ORDER_DURATION_HOURS)
+    ).isoformat()
+    try:
+        async with db_transaction():
+            if side == "sell":
+                async with bot.db.execute(
+                    "SELECT slot FROM inventory WHERE user_id = ? "
+                    "AND location = 'storage' AND item_id = ? AND stars = 0 "
+                    "ORDER BY slot ASC LIMIT ?",
+                    (user_id, item_id, quantity),
+                ) as c:
+                    slots = [r[0] for r in await c.fetchall()]
+                if len(slots) < quantity:
+                    raise ValueError(
+                        f"В хранилище только {len(slots)} шт. **{name}**."
+                    )
+                for slot in slots:
+                    await bot.db.execute(
+                        "DELETE FROM inventory WHERE user_id = ? "
+                        "AND location = 'storage' AND slot = ? AND item_id = ?",
+                        (user_id, slot, item_id),
+                    )
+            else:
+                total = price * quantity
+                cur = await bot.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (total, user_id, total),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"Нужно 🪙 {total} для резерва.")
+
+            await bot.db.execute(
+                "INSERT INTO market_orders "
+                "(user_id, side, item_id, stars, price, quantity, "
+                "filled, status, expires_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, 0, 'active', ?)",
+                (user_id, side, item_id, price, quantity, expires),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+
+    if side == "sell":
+        return True, (
+            f"✅ Ордер на продажу **{name}** ×{quantity} "
+            f"по 🪙 {price} создан."
+        )
+    return True, (
+        f"✅ Ордер на покупку **{name}** ×{quantity} "
+        f"по 🪙 {price} создан. Резерв: 🪙 {price * quantity}."
+    )
+
+
+async def fill_market_order(order_id: int, user_id: int) -> tuple[bool, str]:
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT user_id, side, item_id, stars, price, quantity, "
+                "filled, status, expires_at FROM market_orders WHERE id = ?",
+                (order_id,),
+            ) as c:
+                order = await c.fetchone()
+            if not order:
+                raise ValueError("Ордер не найден.")
+            (
+                owner_id, side, item_id, stars, price, quantity,
+                filled, status, expires_at,
+            ) = order
+            if status != "active":
+                raise ValueError("Ордер уже закрыт.")
+            if datetime.datetime.fromisoformat(expires_at) < datetime.datetime.now():
+                raise ValueError("Ордер истёк.")
+            if owner_id == user_id:
+                raise ValueError("Нельзя исполнить свой ордер.")
+
+            remaining = quantity - filled
+            if remaining <= 0:
+                raise ValueError("Ордер уже исполнен.")
+            total = price * remaining
+
+            if side == "sell":
+                cur = await bot.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (total, user_id, total),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Недостаточно монет.")
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ?, "
+                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                    (total, total, owner_id),
+                )
+                await place_items(
+                    user_id, item_id, remaining, commit=False, stars=stars or 0
+                )
+                buyer_id, seller_id = user_id, owner_id
+            else:
+                async with bot.db.execute(
+                    "SELECT slot FROM inventory WHERE user_id = ? "
+                    "AND location = 'storage' AND item_id = ? AND stars = 0 "
+                    "ORDER BY slot ASC LIMIT ?",
+                    (user_id, item_id, remaining),
+                ) as c:
+                    slots = [r[0] for r in await c.fetchall()]
+                if len(slots) < remaining:
+                    raise ValueError(
+                        f"В хранилище только {len(slots)} шт., нужно {remaining}."
+                    )
+                for slot in slots:
+                    cur = await bot.db.execute(
+                        "DELETE FROM inventory WHERE user_id = ? "
+                        "AND location = 'storage' AND slot = ? AND item_id = ?",
+                        (user_id, slot, item_id),
+                    )
+                    if cur.rowcount == 0:
+                        raise ValueError("Предмет уже продан или перемещён.")
+                await place_items(
+                    owner_id, item_id, remaining, commit=False, stars=stars or 0
+                )
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ?, "
+                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                    (total, total, user_id),
+                )
+                buyer_id, seller_id = owner_id, user_id
+
+            new_filled = filled + remaining
+            await bot.db.execute(
+                "UPDATE market_orders SET filled = ?, status = ? WHERE id = ?",
+                (
+                    new_filled,
+                    "filled" if new_filled >= quantity else "active",
+                    order_id,
+                ),
+            )
+            async with bot.db.execute(
+                "SELECT demand, supply FROM market_prices WHERE item_id = ?",
+                (item_id,),
+            ) as c:
+                market_row = await c.fetchone()
+            demand, supply = market_row or (0, 0)
+            await record_market_price(
+                item_id, price, demand, supply, commit=False
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+
+    await update_quest_progress(buyer_id, "buy_3", remaining)
+    await update_quest_progress(seller_id, "sell_3", remaining)
+    await check_achievements(buyer_id)
+    await check_achievements(seller_id)
+    return True, (
+        f"✅ Ордер #{order_id} исполнен: **{remaining}** шт. "
+        f"по 🪙 {price} (всего 🪙 {price * remaining})."
+    )
+
+
+async def cancel_market_order(order_id: int, user_id: int) -> tuple[bool, str]:
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT user_id, side, item_id, price, quantity, filled, status "
+                "FROM market_orders WHERE id = ?",
+                (order_id,),
+            ) as c:
+                order = await c.fetchone()
+            if not order:
+                raise ValueError("Ордер не найден.")
+            owner_id, side, item_id, price, quantity, filled, status = order
+            if owner_id != user_id:
+                raise ValueError("Это не твой ордер.")
+            if status != "active":
+                raise ValueError("Ордер уже закрыт.")
+            remaining = quantity - filled
+            if remaining <= 0:
+                raise ValueError("Ордер уже исполнен.")
+
+            if side == "sell":
+                await place_items(
+                    user_id, item_id, remaining, commit=False, stars=0
+                )
+            else:
+                refund = price * remaining
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ?, "
+                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                    (refund, refund, user_id),
+                )
+
+            await bot.db.execute(
+                "UPDATE market_orders SET status = 'cancelled' WHERE id = ?",
+                (order_id,),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+    return True, f"✅ Ордер #{order_id} отменён."
+
+
+async def expire_market_orders():
+    now = datetime.datetime.now().isoformat()
+    async with bot.db.execute(
+        "SELECT id, user_id, side, item_id, price, quantity, filled "
+        "FROM market_orders WHERE status = 'active' AND expires_at < ?",
+        (now,),
+    ) as c:
+        orders = await c.fetchall()
+
+    for order_id, user_id, side, item_id, price, quantity, filled in orders:
+        remaining = max(0, (quantity or 0) - (filled or 0))
+        if remaining <= 0:
+            await bot.db.execute(
+                "UPDATE market_orders SET status = 'expired' WHERE id = ?",
+                (order_id,),
+            )
+            continue
+        if side == "buy":
+            refund = (price or 0) * remaining
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ?, "
+                "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                (refund, refund, user_id),
+            )
+        else:
+            try:
+                await place_items(
+                    user_id, item_id, remaining, commit=False, stars=0
+                )
+            except ValueError:
+                async with bot.db.execute(
+                    "SELECT price FROM items WHERE id = ?", (item_id,)
+                ) as c:
+                    price_row = await c.fetchone()
+                compensation = max(1, int((price_row[0] if price_row else 0) or 0)) * remaining
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ?, "
+                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                    (compensation, compensation, user_id),
+                )
+        await bot.db.execute(
+            "UPDATE market_orders SET status = 'expired' WHERE id = ?",
+            (order_id,),
+        )
+    await commit_if_needed()
 
 
 async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
@@ -5875,8 +7532,27 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
+    page_total = sum(
+        price for _id, _name, price, _inc, _emoji, _rarity, _gems, buyable in chunk
+        if buyable
+    )
+    async with bot.db.execute(
+        "SELECT coins, gems FROM players WHERE user_id = ?", (interaction.user.id,)
+    ) as c:
+        player_row = await c.fetchone()
+    balance_coins = (player_row[0] if player_row else 0) or 0
+    balance_gems = (player_row[1] if player_row else 0) or 0
 
-    embed = BotEmbed(title=f"{shop_emoji} Магазин", description=f"Страница {page + 1}/{total_pages}", color=0xf1c40f)
+    embed = BotEmbed(
+        title=f"{shop_emoji} Магазин",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            f"Баланс: {coin} **{format_price(balance_coins)}** | "
+            f"{gem} **{format_price(balance_gems)}**\n"
+            f"Стоимость всей страницы: {coin} **{format_price(page_total)}**"
+        ),
+        color=0xf1c40f,
+    )
     
     for item_id, name, price, income_coins, default_emoji, rarity, income_gems, buyable in chunk:
         emoji = custom.get(item_id, default_emoji)
@@ -6017,8 +7693,32 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
+    page_coins = sum(
+        price for _id, _name, _desc, price, _emoji, currency, _size in chunk
+        if currency == "coins"
+    )
+    page_gems = sum(
+        price for _id, _name, _desc, price, _emoji, currency, _size in chunk
+        if currency == "gems"
+    )
+    async with bot.db.execute(
+        "SELECT coins, gems FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        balance_row = await c.fetchone()
+    balance_coins = (balance_row[0] if balance_row else 0) or 0
+    balance_gems = (balance_row[1] if balance_row else 0) or 0
 
-    embed = BotEmbed(title=f"{up_emoji} Магазин улучшений", description=f"Страница {page + 1}/{total_pages}", color=0x9b59b6)
+    embed = BotEmbed(
+        title=f"{up_emoji} Магазин улучшений",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            f"Баланс: {coin} **{format_price(balance_coins)}** | "
+            f"{gem} **{format_price(balance_gems)}**\n"
+            f"На странице: {coin} **{format_price(page_coins)}** | "
+            f"{gem} **{format_price(page_gems)}**"
+        ),
+        color=0x9b59b6,
+    )
     
     for gid, name, desc, price, emoji, currency, size in chunk:
         price_str = f"{coin} {format_price(price)}" if currency == "coins" else f"{gem} {format_price(price)}"
@@ -6057,6 +7757,13 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     quests, progress, claimed = await get_or_create_daily_quests(user_id)
 
     embed = BotEmbed(title=f"{quest_emoji} Ежедневные задания", color=0x3498db)
+    if not quests:
+        embed.description = "Заданий пока нет. Загляни позже."
+    elif all(qid in claimed for qid in quests):
+        embed.description = (
+            "Все награды за сегодня получены. "
+            "Возвращайся завтра — задания обновятся."
+        )
     for qid in quests:
         # Распаковываем 4 значения: описание, цель, гемы, монеты
         desc, target, reward_gems, reward_coins = QUEST_POOL[qid]
@@ -6304,7 +8011,7 @@ async def build_cosmetics_embed(interaction: discord.Interaction) -> discord.Emb
         row = await c.fetchone()
     if not row:
         await bot.db.execute("INSERT OR IGNORE INTO user_cosmetics (user_id) VALUES (?)", (user_id,))
-        await bot.db.commit()
+        await commit_if_needed()
         row = (65280, None, None)
     color, bg, icon = row
     embed = BotEmbed(
@@ -6408,30 +8115,108 @@ async def build_notifications_embed(interaction: discord.Interaction) -> discord
 #  🎛️ БАЗОВЫЙ VIEW
 # ============================================================
 
-class BaseView(discord.ui.View):
-    def __init__(self, author_id: int, timeout: int = 600):
-        super().__init__(timeout=timeout)
-        self.author_id = author_id
+class SafeView(discord.ui.View):
+    """Базовый View: таймаут, ошибки и запоминание сообщения."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.message = None
+        home_row = getattr(self, "home_row", None)
+        if home_row is not None:
+            home = discord.ui.Button(
+                label="В меню",
+                emoji=get_emoji("_castle"),
+                style=discord.ButtonStyle.secondary,
+                row=home_row,
+            )
+            home.callback = self._home_callback
+            self.add_item(home)
+
+    async def _home_callback(self, interaction: discord.Interaction):
+        await self.back_to_home(interaction)
+
+    async def back_to_home(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        author_id = getattr(self, "author_id", interaction.user.id)
+        await interaction.edit_original_response(
+            embed=embed, view=MainMenuView(author_id)
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Это меню открыто не тобой.", ephemeral=True)
+        # Запоминаем сообщение, чтобы on_timeout мог его отредактировать.
+        self.message = interaction.message
+        _CURRENT_GUILD_ID.set(getattr(interaction, "guild_id", None))
+        _CURRENT_ACTOR_ID.set(interaction.user.id)
+        return True
+
+    async def check_owner(self, interaction: discord.Interaction) -> bool:
+        self.message = interaction.message
+        _CURRENT_GUILD_ID.set(getattr(interaction, "guild_id", None))
+        _CURRENT_ACTOR_ID.set(interaction.user.id)
+        author_id = getattr(self, "author_id", None)
+        if author_id is not None and interaction.user.id != author_id:
+            text = "❌ Это меню открыто не тобой."
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
             return False
         return True
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item):
         log.exception("Ошибка View", exc_info=error)
         try:
+            text = "❌ Ошибка меню. Попробуй открыть заново."
             if interaction.response.is_done():
-                await interaction.followup.send(
-                    "❌ Ошибка меню. Попробуй открыть заново.", ephemeral=True
-                )
+                await interaction.followup.send(text, ephemeral=True)
             else:
-                await interaction.response.send_message(
-                    "❌ Ошибка меню. Попробуй открыть заново.", ephemeral=True
-                )
-        except discord.HTTPException:
+                await interaction.response.send_message(text, ephemeral=True)
+        except (discord.HTTPException, discord.InteractionResponded):
             pass
+
+    async def on_timeout(self):
+        message = getattr(self, "message", None)
+        if not message:
+            return
+        try:
+            await message.edit(
+                content="⏳ Меню устарело. Открой /меню заново.",
+                embed=None,
+                view=None,
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+
+class BaseView(SafeView):
+    def __init__(self, author_id: int, timeout: int = 600):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.check_owner(interaction)
+
+
+class AdminView(BaseView):
+    """BaseView с повторной проверкой админ-прав на каждом callback."""
+
+    def __init__(self, author_id: int | None = None, timeout: int = 600):
+        SafeView.__init__(self, timeout=timeout)
+        if author_id is not None:
+            self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await super().interaction_check(interaction):
+            return False
+        if not await has_admin_access(interaction):
+            await interaction.response.send_message(
+                "❌ У тебя нет доступа к админ-панели.", ephemeral=True
+            )
+            return False
+        return True
+
 
     async def back_to_main(self, interaction: discord.Interaction):
         embed = await build_main_embed(interaction)
@@ -6464,7 +8249,100 @@ class BaseView(discord.ui.View):
 
 # Приветствие новых игроков
 
-class WelcomeView(discord.ui.View):
+async def get_onboarding_progress(user_id: int) -> set[str]:
+    async with bot.db.execute(
+        "SELECT step FROM onboarding_progress WHERE user_id = ?", (user_id,)
+    ) as c:
+        return {row[0] for row in await c.fetchall()}
+
+
+def get_next_onboarding_step(completed: set[str]):
+    for step, data in ONBOARDING_STEPS.items():
+        if step not in completed:
+            return step, data
+    return None, None
+
+
+async def complete_onboarding_step(user_id: int, step: str):
+    """Закрывает шаг онбординга и выдаёт награду один раз."""
+    data = ONBOARDING_STEPS.get(step)
+    if not data:
+        return None
+    _title, _hint, coins, gems = data
+
+    async with db_transaction():
+        cur = await bot.db.execute(
+            "INSERT OR IGNORE INTO onboarding_progress (user_id, step) "
+            "VALUES (?, ?)",
+            (user_id, step),
+        )
+        if cur.rowcount == 0:
+            return None
+        await bot.db.execute(
+            "UPDATE players SET coins = coins + ?, gems = gems + ?, "
+            "total_coins_earned = total_coins_earned + ?, "
+            "total_gems_earned = total_gems_earned + ?, "
+            "lifetime_production = lifetime_production + ? "
+            "WHERE user_id = ?",
+            (coins, gems, coins, gems, coins, user_id),
+        )
+    return {"step": step, "coins": coins, "gems": gems}
+
+
+async def build_onboarding_embed(interaction: discord.Interaction) -> discord.Embed:
+    completed = await get_onboarding_progress(interaction.user.id)
+    lines = []
+    for index, (step, (title, hint, coins, gems)) in enumerate(
+        ONBOARDING_STEPS.items(), start=1
+    ):
+        mark = "✅" if step in completed else "⬜"
+        reward = []
+        if coins:
+            reward.append(f"🪙 {coins}")
+        if gems:
+            reward.append(f"💎 {gems}")
+        reward_text = " + ".join(reward) if reward else "без награды"
+        lines.append(
+            f"{mark} **{index}. {title}**\n"
+            f"-# {hint} · награда: {reward_text}"
+        )
+
+    next_step, next_data = get_next_onboarding_step(completed)
+    if next_data:
+        footer_line = (
+            f"Следующий шаг: **{next_data[0]}** ({next_data[1]})."
+        )
+    else:
+        footer_line = "🎉 Все первые шаги пройдены!"
+
+    return BotEmbed(
+        title="🚀 Первые шаги",
+        description=(
+            f"Пройдено **{len(completed)}/{len(ONBOARDING_STEPS)}**.\n\n"
+            + "\n\n".join(lines)
+            + f"\n\n{footer_line}\n"
+            "Открыть главное меню: `/меню`."
+        ),
+        color=0x3498db,
+    )
+
+
+class OnboardingView(BaseView):
+    home_row = 1
+
+    @discord.ui.button(
+        label="Обновить",
+        emoji=get_emoji("_swap"),
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_onboarding_embed(interaction)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+
+class WelcomeView(SafeView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -6485,10 +8363,12 @@ class WelcomeView(discord.ui.View):
         start_coins = settings["start_coins"]
         
         async with bot.db.execute(
-            "INSERT OR IGNORE INTO players (user_id, coins, grid_size, storage_size) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO players "
+            "(user_id, coins, grid_size, storage_size, last_gem_collected, last_tax_time) "
+            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             (self.author_id, start_coins, START_GRID, STORAGE_SIZE)
         ) as c:
-            await bot.db.commit()
+            await commit_if_needed()
             
         await collect_income(self.author_id, guild_id)
         embed = await build_main_embed(interaction)
@@ -6516,6 +8396,7 @@ class MainMenuView(BaseView):
     @discord.ui.button(label="Социум", emoji=get_emoji("_clan"), style=discord.ButtonStyle.danger, row=0)
     async def tab_social(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
+        await complete_onboarding_step(self.author_id, "social")
         embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
 
@@ -6530,6 +8411,7 @@ class MainMenuView(BaseView):
         if await deny_if_disabled(interaction, "quests"):
             return
         await interaction.response.defer()
+        await complete_onboarding_step(self.author_id, "open_quests")
         embed = BotEmbed(
             title=f"{get_emoji('_quests')} Квесты",
             description="Выбери раздел:",
@@ -6576,11 +8458,19 @@ class MainMenuView(BaseView):
         await interaction.response.defer()
         await open_season_view(interaction, self.author_id)
 
+    @discord.ui.button(label="Первые шаги", emoji=get_emoji("_info"), style=discord.ButtonStyle.secondary, row=4)
+    async def tab_onboarding(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_onboarding_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=OnboardingView(self.author_id)
+        )
+
 
 async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
     async with bot.db.execute(
-        "SELECT total_coins_earned, prestige_points FROM players WHERE user_id = ?",
+        "SELECT lifetime_production, prestige_points FROM players WHERE user_id = ?",
         (user_id,),
     ) as c:
         row = await c.fetchone()
@@ -6592,7 +8482,9 @@ async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embe
     next_need = 0 if gain > 0 else max(
         0, (points + 1) * PRESTIGE_COIN_REQUIREMENT - total
     )
-    bonus_pct = int(points * PRESTIGE_BONUS_PER_POINT * 100)
+    bonus_pct = int(
+        min(points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100
+    )
 
     embed = BotEmbed(
         title="🔁 Перерождение",
@@ -6618,21 +8510,25 @@ async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embe
     embed.add_field(
         name="Что сбросится",
         value=(
-            "монеты, инвентарь, сетка, катализаторы, улучшения, вклад, "
-            "ежедневные квесты"
+            "монеты, инвентарь, сетка, катализаторы, улучшения, "
+            "ежедневные квесты. Вклад, кредит и активные ордера нужно "
+            "закрыть заранее."
         ),
         inline=False,
     )
     embed.add_field(
         name="Что останется",
         value=(
-            "гемы, питомцы, титулы, достижения, клан, косметика, "
-            "сюжетные квесты, статистика"
+            "гемы, питомцы, титулы, статусы VIP/Gold/Platinum/Diamond, "
+            "достижения, клан, косметика, сюжетные квесты, статистика"
         ),
         inline=False,
     )
     embed.set_footer(
-        text=f"1 очко = {format_price(PRESTIGE_COIN_REQUIREMENT)} всего заработанных монет"
+        text=(
+            f"1 очко = {format_price(PRESTIGE_COIN_REQUIREMENT)} всего заработанных; "
+            f"макс. бонус +{int(PRESTIGE_BONUS_CAP * 100)}%"
+        )
     )
     embed = await fix_embed_emojis(embed)
     return embed
@@ -6676,15 +8572,20 @@ class PrestigeConfirmModal(discord.ui.Modal, title="Подтверждение �
 
 GUIDE_SECTIONS = {
     "economy": ("Экономика", "Монеты, гемы, доход, обмен, банк, налоги"),
+    "offline": ("Офлайн-доход", "Накопление, штраф, автосборщик, gem_cap"),
     "prestige": ("Перерождение", "Сброс замка, очки престижа, постоянный бонус"),
     "collection": ("Коллекция", "Открытые генераторы и бонус к доходу"),
     "generators": ("Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
+    "sets": ("Сеты", "Синергии, соседство, этажи"),
     "pets": ("Питомцы", "5 видов, кормление, уровни, бонусы"),
     "titles": ("Титулы", "21 титул, условия, бонусы"),
     "clans": ("Кланы", "Создание, роли, войны, сундук, квесты"),
     "pvp": ("PvP", "Рейды, дуэли, мощь, лимиты"),
-    "auction": ("Аукцион и биржа", "Лоты, ставки, комиссия, цены"),
+    "auction": ("Аукцион", "Лоты, ставки, buyout, комиссия"),
+    "buyout": ("Buyout", "Мгновенный выкуп лота"),
+    "orders": ("Ордера биржи", "Покупка, продажа, эскроу, отмена"),
     "quests": ("Квесты", "Сюжетные (10 глав), ежедневные задания"),
+    "season": ("Сезон", "Battle pass, 30 уровней, XP, премиум"),
     "daily": ("Дейли и адвент", "30-дневный стрик, адвент-календарь"),
     "achievements": ("Достижения", "14 штук, награды гемами"),
     "cosmetics": ("Кастомизация", "Цвет, фон, иконка, титулы"),
@@ -6696,15 +8597,20 @@ GUIDE_SECTIONS = {
 
 GUIDE_SECTION_EMOJIS = {
     "economy": "_coin",
+    "offline": "_autocollector",
     "prestige": "_rebirth",
     "collection": "_inventory",
     "generators": "_shop",
+    "sets": "_storage",
     "pets": "_pets",
     "titles": "_title",
     "clans": "_clan",
     "pvp": "_raid",
     "auction": "_market",
+    "buyout": "_buy",
+    "orders": "_market",
     "quests": "_quests",
+    "season": "_advent",
     "daily": "_dailyquests",
     "achievements": "_achievements",
     "cosmetics": "_customization",
@@ -6906,7 +8812,7 @@ class QuestsHubView(BaseView):
     @discord.ui.button(label="Сезон", emoji=get_emoji("_advent"), style=discord.ButtonStyle.primary, row=0)
     async def btn_season(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await open_season_view(interaction, self.author_id)
+        await open_season_view(interaction, self.author_id, return_to="quests")
 
     @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6983,17 +8889,57 @@ async def build_season_embed(user_id: int):
     return embed, data
 
 
-async def open_season_view(interaction: discord.Interaction, author_id: int):
+async def open_season_view(
+    interaction: discord.Interaction,
+    author_id: int,
+    return_to: str = "main",
+):
+    settings = await get_settings(interaction.guild_id)
+    if not settings.get("battlepass_enabled", True):
+        embed = BotEmbed(
+            title="🏆 Баттлпасс отключён",
+            description="Администратор сервера отключил сезонный пропуск.",
+            color=0x808080,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=SeasonDisabledView(author_id, return_to)
+        )
+        return
     embed, data = await build_season_embed(author_id)
     await interaction.edit_original_response(
-        embed=embed, view=SeasonView(author_id, data)
+        embed=embed, view=SeasonView(author_id, data, return_to)
     )
 
 
+class SeasonDisabledView(BaseView):
+    def __init__(self, author_id: int, return_to: str = "main"):
+        super().__init__(author_id)
+        self.return_to = return_to
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        if self.return_to == "quests":
+            embed = BotEmbed(
+                title=f"{get_emoji('_quests')} Квесты",
+                description="Выбери раздел:",
+                color=0x3498db,
+            )
+            await interaction.edit_original_response(
+                embed=embed, view=QuestsHubView(self.author_id)
+            )
+        else:
+            embed = await build_main_embed(interaction)
+            await interaction.edit_original_response(
+                embed=embed, view=MainMenuView(self.author_id)
+            )
+
+
 class SeasonView(BaseView):
-    def __init__(self, author_id: int, data: dict):
+    def __init__(self, author_id: int, data: dict, return_to: str = "main"):
         super().__init__(author_id)
         self.data = data
+        self.return_to = return_to
         self.btn_premium.disabled = bool(data["premium"])
         if data["premium"]:
             self.btn_premium.label = "Премиум активен"
@@ -7006,7 +8952,7 @@ class SeasonView(BaseView):
         await interaction.response.defer()
         _ok, msg, _totals = await claim_season_rewards(self.author_id)
         await interaction.followup.send(msg, ephemeral=True)
-        await open_season_view(interaction, self.author_id)
+        await open_season_view(interaction, self.author_id, self.return_to)
 
     @discord.ui.button(label="Премиум", emoji=get_emoji("_vip"), style=discord.ButtonStyle.primary, row=0)
     async def btn_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7020,28 +8966,51 @@ class SeasonView(BaseView):
                 ),
                 color=0x9b59b6,
             ),
-            view=SeasonPremiumConfirmView(self.author_id, SEASON_PREMIUM_COST_GEMS),
+            view=SeasonPremiumConfirmView(
+                self.author_id,
+                SEASON_PREMIUM_COST_GEMS,
+                return_to=self.return_to,
+                main_message=interaction.message,
+            ),
             ephemeral=True,
         )
 
     @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=1)
     async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await open_season_view(interaction, self.author_id)
+        await open_season_view(interaction, self.author_id, self.return_to)
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(
-            embed=embed, view=MainMenuView(self.author_id)
-        )
+        if self.return_to == "quests":
+            embed = BotEmbed(
+                title=f"{get_emoji('_quests')} Квесты",
+                description="Выбери раздел:",
+                color=0x3498db,
+            )
+            await interaction.edit_original_response(
+                embed=embed, view=QuestsHubView(self.author_id)
+            )
+        else:
+            embed = await build_main_embed(interaction)
+            await interaction.edit_original_response(
+                embed=embed, view=MainMenuView(self.author_id)
+            )
 
 
 class SeasonPremiumConfirmView(BaseView):
-    def __init__(self, author_id: int, cost: int):
+    def __init__(
+        self,
+        author_id: int,
+        cost: int,
+        return_to: str = "main",
+        main_message=None,
+    ):
         super().__init__(author_id)
         self.cost = cost
+        self.return_to = return_to
+        self.main_message = main_message
 
     @discord.ui.button(label=f"Купить за {SEASON_PREMIUM_COST_GEMS}", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
     async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7050,12 +9019,24 @@ class SeasonPremiumConfirmView(BaseView):
         if not ok:
             await interaction.followup.send(msg, ephemeral=True)
             return
-        await open_season_view(interaction, self.author_id)
+        await interaction.edit_original_response(
+            embed=BotEmbed(title="✅ Премиум активирован", description=msg, color=0x2ecc71),
+            view=None,
+        )
+        if self.main_message:
+            embed, data = await build_season_embed(self.author_id)
+            try:
+                await self.main_message.edit(
+                    embed=embed,
+                    view=SeasonView(self.author_id, data, self.return_to),
+                )
+            except discord.HTTPException:
+                pass
 
     @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
     async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await open_season_view(interaction, self.author_id)
+        await interaction.delete_original_response()
 
 
 class AutocollectorView(BaseView):
@@ -7150,8 +9131,8 @@ class TopView(BaseView):
 
     async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+        embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
 
 class AdventView(BaseView):
     def __init__(self, author_id: int, page: int = 0, timeout: int = 600):
@@ -7213,8 +9194,10 @@ class AdventView(BaseView):
 
     async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=UserProfileView(self.author_id)
+        )
 
 class AnalyticsView(BaseView):
     def __init__(self, author_id: int, return_to: str = "profile", timeout: int = 600):
@@ -7279,6 +9262,35 @@ class NotificationsView(BaseView):
         )
 
 class MarketView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        rarity: str | None = None,
+        sort: str = "change",
+        page: int = 0,
+        total_pages: int = 1,
+    ):
+        super().__init__(author_id)
+        self.rarity = rarity
+        self.sort = sort
+        self.page = page
+        self.total_pages = total_pages
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary, row=3,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary, row=3,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
     @discord.ui.button(label="Купить", emoji=get_emoji("_shop"), style=discord.ButtonStyle.success, row=0)
     async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -7289,17 +9301,834 @@ class MarketView(BaseView):
         await interaction.response.defer()
         await open_market_sell_select(interaction, self.author_id, 0)
 
-    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="История", emoji=get_emoji("_stats"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_history_select(interaction, self.author_id, self.rarity, self.sort)
+
+    @discord.ui.button(label="Ордера", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_orders(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_orders(interaction, self.author_id)
+
+    @discord.ui.button(label="Фильтры", emoji=get_emoji("_settings"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_filters(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_filters(interaction, self.author_id, self.rarity, self.sort)
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = await build_market_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+        await open_market_view(
+            interaction, self.author_id, self.rarity, self.sort, self.page
+        )
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_view(
+            interaction, self.author_id, self.rarity, self.sort, self.page - 1
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_view(
+            interaction, self.author_id, self.rarity, self.sort, self.page + 1
+        )
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+async def open_market_view(
+    interaction: discord.Interaction,
+    author_id: int,
+    rarity: str | None = None,
+    sort: str = "change",
+    page: int = 0,
+):
+    embed, total_pages = await build_market_embed(interaction, rarity, sort, page)
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketView(author_id, rarity, sort, page, total_pages),
+    )
+
+
+async def open_market_filters(
+    interaction: discord.Interaction,
+    author_id: int,
+    rarity: str | None = None,
+    sort: str = "change",
+):
+    embed = BotEmbed(
+        title=f"{get_emoji('_settings')} Фильтры биржи",
+        description="Выбери редкость и сортировку. Изменения применяются сразу.",
+        color=0x9b59b6,
+    )
+    await interaction.edit_original_response(
+        embed=embed, view=MarketFiltersView(author_id, rarity, sort)
+    )
+
+
+class MarketFiltersView(BaseView):
+    def __init__(self, author_id: int, rarity: str | None, sort: str):
+        super().__init__(author_id)
+        self.rarity = rarity
+        self.sort = sort
+        rarity_options = [
+            discord.SelectOption(
+                label="Все редкости",
+                value="all",
+                emoji=parse_emoji_safe(get_emoji("_market")),
+                default=rarity is None,
+            )
+        ]
+        for rarity_id, rarity_name in RARITY_NAMES.items():
+            rarity_options.append(
+                discord.SelectOption(
+                    label=rarity_name,
+                    value=rarity_id,
+                    emoji=parse_emoji_safe(get_emoji("_gem")),
+                    default=rarity == rarity_id,
+                )
+            )
+        sort_options = [
+            discord.SelectOption(
+                label=label,
+                value=value,
+                emoji=parse_emoji_safe(get_emoji("_stats")),
+                default=sort == value,
+            )
+            for value, label in (
+                ("change", "По изменению цены"),
+                ("price_desc", "Сначала дорогие"),
+                ("price_asc", "Сначала дешёвые"),
+                ("demand", "По спросу"),
+                ("name", "По названию"),
+            )
+        ]
+        self.add_item(make_select("Редкость", rarity_options, self.select_rarity, row=0))
+        self.add_item(make_select("Сортировка", sort_options, self.select_sort, row=1))
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select_rarity(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        await interaction.response.defer()
+        await open_market_view(
+            interaction,
+            self.author_id,
+            None if value == "all" else value,
+            self.sort,
+        )
+
+    async def select_sort(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        await interaction.response.defer()
+        await open_market_view(interaction, self.author_id, self.rarity, value)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_view(interaction, self.author_id, self.rarity, self.sort)
+
+
+async def open_market_history_select(
+    interaction: discord.Interaction,
+    author_id: int,
+    rarity: str | None = None,
+    sort: str = "change",
+    page: int = 0,
+    edit: bool = False,
+):
+    async with bot.db.execute(
+        "SELECT mp.item_id, i.name, i.emoji FROM market_prices mp "
+        "JOIN items i ON i.id = mp.item_id "
+        "ORDER BY i.name ASC"
+    ) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return await interaction.followup.send(
+            "❌ На бирже нет товаров.", ephemeral=True
+        )
+
+    page_size = 10
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+    options = [
+        discord.SelectOption(
+            label=name[:100],
+            value=item_id,
+            emoji=parse_emoji_safe(emoji),
+        )
+        for item_id, name, emoji in chunk
+    ]
+    embed = BotEmbed(
+        title=f"{get_emoji('_stats')} История цен",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет.",
+        color=0x9b59b6,
+    )
+    view = MarketHistorySelectView(author_id, options, page, total_pages, rarity, sort)
+    if edit:
+        await interaction.edit_original_response(embed=embed, view=view)
+    else:
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+class MarketHistorySelectView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        options: list[discord.SelectOption],
+        page: int,
+        total_pages: int,
+        rarity: str | None,
+        sort: str,
+    ):
+        super().__init__(author_id)
+        self.page = page
+        self.total_pages = total_pages
+        self.rarity = rarity
+        self.sort = sort
+        self.add_item(make_select("Выбери предмет", options, self.select, row=0))
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary, row=1,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary, row=1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(
+            label="Назад", emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary, row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        embed = await build_market_history_embed(item_id)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_history_select(
+            interaction, self.author_id, self.rarity, self.sort, self.page - 1, edit=True
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_history_select(
+            interaction, self.author_id, self.rarity, self.sort, self.page + 1, edit=True
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+
+async def open_market_orders(
+    interaction: discord.Interaction,
+    author_id: int,
+    page: int = 0,
+    side_filter: str = "all",
+    selected_order: int | None = None,
+):
+    now = datetime.datetime.now().isoformat()
+    where = "o.status = 'active' AND o.expires_at > ?"
+    params: list = [now]
+    if side_filter in ("buy", "sell"):
+        where += " AND o.side = ?"
+        params.append(side_filter)
+
+    async with bot.db.execute(
+        f"SELECT COUNT(*) FROM market_orders o WHERE {where}", params
+    ) as c:
+        total = (await c.fetchone())[0] or 0
+
+    total_pages = max(1, (total + MARKET_ORDER_PAGE_SIZE - 1) // MARKET_ORDER_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    async with bot.db.execute(
+        f"SELECT o.id, o.user_id, o.side, o.item_id, o.stars, o.price, "
+        f"o.quantity, o.filled, o.expires_at, i.name, i.emoji "
+        f"FROM market_orders o LEFT JOIN items i ON i.id = o.item_id "
+        f"WHERE {where} ORDER BY o.price ASC, o.id DESC LIMIT ? OFFSET ?",
+        (*params, MARKET_ORDER_PAGE_SIZE, page * MARKET_ORDER_PAGE_SIZE),
+    ) as c:
+        rows = await c.fetchall()
+
+    selected = None
+    if selected_order is not None:
+        for order in rows:
+            if order[0] == selected_order:
+                selected = order
+                break
+        if selected is None:
+            selected_order = None
+
+    filter_name = {"all": "Все", "buy": "Покупка", "sell": "Продажа"}.get(
+        side_filter, "Все"
+    )
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} Ордера биржи",
+        description=(
+            f"Страница {page + 1}/{total_pages} · {filter_name}\n"
+            "Ордер — заявка на покупку или продажу по своей цене."
+        ),
+        color=0x9b59b6,
+    )
+    if rows:
+        lines = []
+        for order in rows:
+            oid, _owner, side, _item, _stars, price, quantity, filled, _exp, name, emoji = order
+            remaining = max(0, quantity - filled)
+            side_name = "продажа" if side == "sell" else "покупка"
+            lines.append(
+                f"#{oid} {emoji or '📦'} **{name or _item}** ×{remaining} "
+                f"— {side_name} по 🪙 {price}"
+            )
+        embed.add_field(name="Активные ордера", value="\n".join(lines), inline=False)
+
+        if selected:
+            oid, owner, side, _item, _stars, price, quantity, filled, exp, name, emoji = selected
+            remaining = max(0, quantity - filled)
+            side_name = "Продажа" if side == "sell" else "Покупка"
+            embed.add_field(
+                name=f"Выбранный ордер #{oid}",
+                value=(
+                    f"{emoji or '📦'} **{name or _item}**\n"
+                    f"Тип: **{side_name}** · Владелец: <@{owner}>\n"
+                    f"Остаток: **{remaining}** шт.\n"
+                    f"Цена: 🪙 **{price}** · Сумма: 🪙 **{remaining * price}**\n"
+                    f"До: `{str(exp)[:16]}`"
+                ),
+                inline=False,
+            )
+    else:
+        embed.description += "\n\nАктивных ордеров нет."
+
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketOrdersView(
+            author_id, page, total_pages, rows, side_filter, selected_order
+        ),
+    )
+
+
+class MarketOrdersView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        page: int,
+        total_pages: int,
+        rows: list,
+        side_filter: str,
+        selected_order: int | None,
+    ):
+        super().__init__(author_id)
+        self.page = page
+        self.total_pages = total_pages
+        self.rows = rows
+        self.side_filter = side_filter
+        self.selected_order = selected_order
+
+        options = []
+        for order in rows:
+            oid, _owner, side, item_id, _stars, price, quantity, filled, _exp, name, emoji = order
+            remaining = max(0, quantity - filled)
+            side_name = "продажа" if side == "sell" else "покупка"
+            options.append(
+                discord.SelectOption(
+                    label=f"#{oid} {name or item_id} ×{remaining} — {price} ({side_name})"[:100],
+                    value=str(oid),
+                    emoji=parse_emoji_safe(emoji),
+                    default=selected_order == oid,
+                )
+            )
+        if options:
+            self.add_item(make_select("Выбери ордер", options, self.select_order, row=0))
+
+        self.btn_fill.disabled = selected_order is None
+        self.btn_create.disabled = False
+        self.btn_my.disabled = False
+
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary, row=3,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary, row=3,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+    async def select_order(self, interaction: discord.Interaction):
+        order_id = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        await open_market_orders(
+            interaction, self.author_id, self.page, self.side_filter, order_id
+        )
+
+    @discord.ui.button(label="Исполнить", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success, row=1)
+    async def btn_fill(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.selected_order is None:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери ордер.", ephemeral=True
+            )
+        await interaction.response.defer()
+        await open_market_order_fill_confirm(
+            interaction,
+            self.author_id,
+            self.selected_order,
+            self.page,
+            self.side_filter,
+        )
+
+    @discord.ui.button(label="Создать", emoji=get_emoji("_buy"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_create(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_order_create(interaction, self.author_id, "sell", 0)
+
+    @discord.ui.button(label="Мои ордера", emoji=get_emoji("_profile"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_my(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_my_orders(interaction, self.author_id)
+
+    @discord.ui.button(label="Все", emoji=get_emoji("_market"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_orders(interaction, self.author_id, 0, "all")
+
+    @discord.ui.button(label="Покупка", emoji=get_emoji("_buy"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_buy_filter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_orders(interaction, self.author_id, 0, "buy")
+
+    @discord.ui.button(label="Продажа", emoji=get_emoji("_sell"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_sell_filter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_orders(interaction, self.author_id, 0, "sell")
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=4)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_view(interaction, self.author_id)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_orders(
+            interaction, self.author_id, self.page - 1, self.side_filter
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_orders(
+            interaction, self.author_id, self.page + 1, self.side_filter
+        )
+
+
+async def open_market_order_fill_confirm(
+    interaction: discord.Interaction,
+    author_id: int,
+    order_id: int,
+    page: int,
+    side_filter: str,
+):
+    async with bot.db.execute(
+        "SELECT o.side, o.item_id, o.price, o.quantity, o.filled, "
+        "o.status, i.name, i.emoji "
+        "FROM market_orders o LEFT JOIN items i ON i.id = o.item_id "
+        "WHERE o.id = ?",
+        (order_id,),
+    ) as c:
+        order = await c.fetchone()
+    if not order:
+        return await interaction.followup.send("❌ Ордер не найден.", ephemeral=True)
+
+    side, item_id, price, quantity, filled, status, name, emoji = order
+    remaining = max(0, (quantity or 0) - (filled or 0))
+    if status != "active" or remaining <= 0:
+        return await interaction.followup.send(
+            "❌ Ордер уже закрыт.", ephemeral=True
+        )
+
+    side_name = "купить" if side == "sell" else "продать"
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} Подтверждение ордера",
+        description=(
+            f"{emoji or '📦'} **{name or item_id}** ×{remaining}\n"
+            f"Цена: 🪙 **{price}** · Сумма: 🪙 **{price * remaining}**\n\n"
+            f"Ты хочешь **{side_name}** этот объём?"
+        ),
+        color=0x9b59b6,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketOrderFillConfirmView(
+            author_id, order_id, page, side_filter
+        ),
+    )
+
+
+class MarketOrderFillConfirmView(BaseView):
+    def __init__(self, author_id: int, order_id: int, page: int, side_filter: str):
+        super().__init__(author_id)
+        self.order_id = order_id
+        self.page = page
+        self.side_filter = side_filter
+
+    @discord.ui.button(label="Исполнить", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
+    async def btn_confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, message = await fill_market_order(self.order_id, self.author_id)
+        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await open_market_orders(
+                interaction, self.author_id, self.page, self.side_filter
+            )
+
+    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_orders(
+            interaction, self.author_id, self.page, self.side_filter
+        )
+
+
+async def open_market_my_orders(
+    interaction: discord.Interaction,
+    author_id: int,
+    page: int = 0,
+    selected_order: int | None = None,
+):
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM market_orders "
+        "WHERE user_id = ? AND status = 'active'",
+        (author_id,),
+    ) as c:
+        total = (await c.fetchone())[0] or 0
+    page_size = 10
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+
+    async with bot.db.execute(
+        "SELECT o.id, o.side, o.item_id, o.price, o.quantity, o.filled, "
+        "o.expires_at, i.name, i.emoji "
+        "FROM market_orders o LEFT JOIN items i ON i.id = o.item_id "
+        "WHERE o.user_id = ? AND o.status = 'active' "
+        "ORDER BY o.id DESC LIMIT ? OFFSET ?",
+        (author_id, page_size, page * page_size),
+    ) as c:
+        rows = await c.fetchall()
+
+    options = []
+    for order in rows:
+        oid, side, item_id, price, quantity, filled, _exp, name, emoji = order
+        remaining = max(0, quantity - filled)
+        side_name = "продажа" if side == "sell" else "покупка"
+        options.append(
+            discord.SelectOption(
+                label=f"#{oid} {name or item_id} ×{remaining} — {price} ({side_name})"[:100],
+                value=str(oid),
+                emoji=parse_emoji_safe(emoji),
+                default=selected_order == oid,
+            )
+        )
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_profile')} Мои ордера",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            "Выбери ордер для отмены. Неисполненный остаток вернётся."
+            if rows else "У тебя нет активных ордеров."
+        ),
+        color=0x9b59b6,
+    )
+    if selected_order is not None:
+        for order in rows:
+            if order[0] == selected_order:
+                oid, side, item_id, price, quantity, filled, exp, name, emoji = order
+                remaining = max(0, quantity - filled)
+                embed.add_field(
+                    name=f"Ордер #{oid}",
+                    value=(
+                        f"{emoji or '📦'} **{name or item_id}** ×{remaining}\n"
+                        f"Тип: **{'продажа' if side == 'sell' else 'покупка'}**\n"
+                        f"Цена: 🪙 **{price}**\n"
+                        f"До: `{str(exp)[:16]}`"
+                    ),
+                    inline=False,
+                )
+                break
+
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketMyOrdersView(
+            author_id, options, selected_order, page, total_pages
+        ),
+    )
+
+
+class MarketMyOrdersView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        options: list,
+        selected_order: int | None,
+        page: int = 0,
+        total_pages: int = 1,
+    ):
+        super().__init__(author_id)
+        self.selected_order = selected_order
+        self.page = page
+        self.total_pages = total_pages
+        if options:
+            self.add_item(make_select("Выбери ордер", options, self.select_order, row=0))
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.",
+                emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary,
+                row=1,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.",
+                emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary,
+                row=1,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        cancel = discord.ui.Button(
+            label="Отменить",
+            emoji=get_emoji("_cancel"),
+            style=discord.ButtonStyle.danger,
+            row=2,
+            disabled=selected_order is None,
+        )
+        cancel.callback = self.cancel_order
+        self.add_item(cancel)
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select_order(self, interaction: discord.Interaction):
+        order_id = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        await open_market_my_orders(
+            interaction, self.author_id, self.page, order_id
+        )
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_my_orders(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_my_orders(interaction, self.author_id, self.page + 1)
+
+    async def cancel_order(self, interaction: discord.Interaction):
+        if self.selected_order is None:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери ордер.", ephemeral=True
+            )
+        await interaction.response.defer()
+        ok, message = await cancel_market_order(
+            self.selected_order, self.author_id
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        await open_market_my_orders(interaction, self.author_id, self.page)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_orders(interaction, self.author_id)
+
+
+async def open_market_order_create(
+    interaction: discord.Interaction,
+    author_id: int,
+    side: str = "sell",
+    page: int = 0,
+):
+    allowed = tuple(MARKET_ORDER_RARITIES)
+    placeholders = ",".join("?" for _ in allowed)
+    if side == "sell":
+        async with bot.db.execute(
+            f"SELECT inv.item_id, i.name, i.emoji, COUNT(*) AS cnt "
+            f"FROM inventory inv JOIN items i ON i.id = inv.item_id "
+            f"WHERE inv.user_id = ? AND inv.location = 'storage' "
+            f"AND inv.stars = 0 AND i.rarity IN ({placeholders}) "
+            f"GROUP BY inv.item_id ORDER BY i.name ASC",
+            (author_id, *allowed),
+        ) as c:
+            rows = await c.fetchall()
+    else:
+        async with bot.db.execute(
+            f"SELECT mp.item_id, i.name, i.emoji, 0 AS cnt "
+            f"FROM market_prices mp JOIN items i ON i.id = mp.item_id "
+            f"WHERE i.rarity IN ({placeholders}) ORDER BY i.name ASC",
+            allowed,
+        ) as c:
+            rows = await c.fetchall()
+
+    page_size = 10
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+    options = []
+    for item_id, name, emoji, cnt in chunk:
+        label = f"{name} ×{cnt}" if side == "sell" else f"{name}"
+        options.append(
+            discord.SelectOption(
+                label=label[:100],
+                value=item_id,
+                emoji=parse_emoji_safe(emoji),
+            )
+        )
+
+    side_name = "продажу" if side == "sell" else "покупку"
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} Создать ордер",
+        description=(
+            f"Тип: **{side_name}**\n"
+            f"Страница {page + 1}/{total_pages}\n"
+            "Выбери предмет и укажи количество и цену."
+            if rows else f"Нет предметов для ордера на {side_name}."
+        ),
+        color=0x9b59b6,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MarketOrderCreateView(author_id, side, options, page, total_pages),
+    )
+
+
+class MarketOrderCreateView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        side: str,
+        options: list,
+        page: int,
+        total_pages: int,
+    ):
+        super().__init__(author_id)
+        self.side = side
+        self.page = page
+        self.total_pages = total_pages
+        if options:
+            self.add_item(make_select("Выбери предмет", options, self.select_item, row=1))
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary, row=2,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary, row=2,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(
+            label="Назад", emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary, row=3,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    @discord.ui.button(label="Продажа", emoji=get_emoji("_sell"), style=discord.ButtonStyle.primary, row=0)
+    async def btn_sell(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_order_create(interaction, self.author_id, "sell", 0)
+
+    @discord.ui.button(label="Покупка", emoji=get_emoji("_buy"), style=discord.ButtonStyle.success, row=0)
+    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_market_order_create(interaction, self.author_id, "buy", 0)
+
+    async def select_item(self, interaction: discord.Interaction):
+        item_id = interaction.data["values"][0]
+        await interaction.response.send_modal(
+            MarketOrderCreateModal(self.author_id, self.side, item_id, self.page)
+        )
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_order_create(
+            interaction, self.author_id, self.side, self.page - 1
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_order_create(
+            interaction, self.author_id, self.side, self.page + 1
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_market_orders(interaction, self.author_id)
+
+
+class MarketOrderCreateModal(discord.ui.Modal, title="Создать ордер"):
+    quantity = discord.ui.TextInput(label="Количество", default="1", required=True)
+    price = discord.ui.TextInput(label="Цена за 1 шт.", required=True)
+
+    def __init__(self, author_id: int, side: str, item_id: str, page: int = 0):
+        super().__init__()
+        self.author_id = author_id
+        self.side = side
+        self.item_id = item_id
+        self.page = page
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            quantity = int(self.quantity.value)
+            price = int(self.price.value)
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ Количество и цена — числа.", ephemeral=True
+            )
+        ok, message = await create_market_order(
+            self.author_id, self.side, self.item_id, quantity, price
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await open_market_orders(interaction, self.author_id)
 
 
 async def open_market_buy_select(interaction: discord.Interaction, author_id: int, page: int = 0):
@@ -7337,7 +10166,7 @@ async def open_market_buy_select(interaction: discord.Interaction, author_id: in
     )
 
 
-class MarketBuySelectView(discord.ui.View):
+class MarketBuySelectView(SafeView):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -7356,7 +10185,7 @@ class MarketBuySelectView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         item_id = interaction.data["values"][0]
@@ -7372,8 +10201,10 @@ class MarketBuySelectView(discord.ui.View):
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = await build_market_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+        embed, total_pages = await build_market_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=MarketView(self.author_id, total_pages=total_pages)
+        )
 
 
 class MarketBuyModal(discord.ui.Modal, title="Купить на бирже"):
@@ -7393,8 +10224,11 @@ class MarketBuyModal(discord.ui.Modal, title="Купить на бирже"):
         ok, msg = await buy_market_item(self.author_id, self.item_id, qty)
         await interaction.followup.send(msg, ephemeral=True)
         if ok:
-            embed = await build_market_embed(interaction)
-            await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+            embed, total_pages = await build_market_embed(interaction)
+            await interaction.edit_original_response(
+                embed=embed,
+                view=MarketView(self.author_id, total_pages=total_pages),
+            )
 
 
 async def open_market_sell_select(interaction: discord.Interaction, author_id: int, page: int = 0):
@@ -7404,6 +10238,7 @@ async def open_market_sell_select(interaction: discord.Interaction, author_id: i
         JOIN items i ON i.id = inv.item_id
         JOIN market_prices mp ON mp.item_id = inv.item_id
         WHERE inv.user_id = ? AND inv.location = 'storage'
+          AND inv.stars = 0
           AND i.rarity IN ('common', 'uncommon', 'rare')
         GROUP BY inv.item_id
         ORDER BY i.name ASC
@@ -7429,7 +10264,10 @@ async def open_market_sell_select(interaction: discord.Interaction, author_id: i
     ]
     embed = BotEmbed(
         title=f"{get_emoji('_sell')} Биржа — продажа",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет.",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            "Продаются только предметы **0★** из хранилища."
+        ),
         color=0xf1c40f,
     )
     await interaction.edit_original_response(
@@ -7438,7 +10276,7 @@ async def open_market_sell_select(interaction: discord.Interaction, author_id: i
     )
 
 
-class MarketSellSelectView(discord.ui.View):
+class MarketSellSelectView(SafeView):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -7457,7 +10295,7 @@ class MarketSellSelectView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         item_id = interaction.data["values"][0]
@@ -7473,8 +10311,10 @@ class MarketSellSelectView(discord.ui.View):
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = await build_market_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+        embed, total_pages = await build_market_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=MarketView(self.author_id, total_pages=total_pages)
+        )
 
 
 class MarketSellModal(discord.ui.Modal, title="Продать на бирже"):
@@ -7494,8 +10334,11 @@ class MarketSellModal(discord.ui.Modal, title="Продать на бирже"):
         ok, msg = await sell_market_item(self.author_id, self.item_id, qty)
         await interaction.followup.send(msg, ephemeral=True)
         if ok:
-            embed = await build_market_embed(interaction)
-            await interaction.edit_original_response(embed=embed, view=MarketView(self.author_id))
+            embed, total_pages = await build_market_embed(interaction)
+            await interaction.edit_original_response(
+                embed=embed,
+                view=MarketView(self.author_id, total_pages=total_pages),
+            )
 
 
 class SocialView(BaseView):
@@ -7533,71 +10376,21 @@ class SocialView(BaseView):
     @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
     async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT a.id, a.item_id, a.stars, a.current_bid, a.end_time, i.name, i.emoji "
-            "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
-            "WHERE a.status = 'active' ORDER BY a.end_time ASC LIMIT 10"
-        ) as c:
-            lots = await c.fetchall()
-        embed = BotEmbed(title="🏛️ Аукцион", color=0xf1c40f)
-        if lots:
-            for aid, item_id, stars, bid, end, item_name, item_emoji in lots:
-                embed.add_field(
-                    name=f"Лот #{aid}: {item_emoji or '📦'} {item_name or item_id} ({stars}★)",
-                    value=f"Текущая ставка: 🪙 {bid}\nДо: {datetime.datetime.fromisoformat(end).strftime('%d.%m %H:%M')}",
-                    inline=False
-                )
-        else:
-            embed.description = "Активных лотов нет."
-        view = discord.ui.View()
-        s = discord.ui.Button(label="Выставить лот", emoji=get_emoji("_market"), style=discord.ButtonStyle.success)
-        s.callback = lambda i: open_auction_sell_from_button(i, self.author_id)
-        view.add_item(s)
-        b = discord.ui.Button(label="Ставка", emoji=get_emoji("_sell"), style=discord.ButtonStyle.primary)
-        b.callback = lambda i: i.response.send_modal(AuctionBidModal(self.author_id))
-        view.add_item(b)
-        c = discord.ui.Button(label="Мои лоты", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary)
-        c.callback = lambda i: open_auction_cancel_from_button(i, self.author_id)
-        view.add_item(c)
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
-        back.callback = lambda i: self._back_to_social(i)
-        view.add_item(back)
-        await interaction.edit_original_response(embed=embed, view=view)
+        await open_auction_view(interaction, self.author_id)
 
     @discord.ui.button(label="Биржа", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
     async def btn_market(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = await build_market_embed(interaction)
+        embed, total_pages = await build_market_embed(interaction)
         await interaction.edit_original_response(
-            embed=embed, view=MarketView(self.author_id)
+            embed=embed,
+            view=MarketView(self.author_id, total_pages=total_pages),
         )
 
     @discord.ui.button(label="Банк", emoji=get_emoji("_bank"), style=discord.ButtonStyle.primary, row=2)
     async def btn_bank(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        deposit = await get_deposit(self.author_id)
-        embed = BotEmbed(title="🏦 Банк", color=0x2ecc71)
-        if deposit:
-            amount, rate, start, end = deposit
-            embed.description = (
-                f"Вклад: {COIN} {amount}\n"
-                f"Процент: {int(rate * 100)}%\n"
-                f"Срок: до {datetime.datetime.fromisoformat(end).strftime('%d.%m %H:%M')}"
-            )
-            view = discord.ui.View()
-            w = discord.ui.Button(label="Забрать вклад", emoji=get_emoji("_coin"), style=discord.ButtonStyle.success)
-            w.callback = lambda i: i.response.send_modal(BankWithdrawModal(self.author_id))
-            view.add_item(w)
-        else:
-            embed.description = "У тебя нет вклада. Открой его, чтобы получать проценты."
-            view = discord.ui.View()
-            d = discord.ui.Button(label="Открыть вклад", emoji=get_emoji("_bank"), style=discord.ButtonStyle.success)
-            d.callback = lambda i: i.response.send_modal(BankDepositModal(self.author_id))
-            view.add_item(d)
-        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
-        b.callback = lambda i: self._back_to_social(i)
-        view.add_item(b)
-        await interaction.edit_original_response(embed=embed, view=view)
+        await open_bank_view(interaction, self.author_id)
 
     @discord.ui.button(label="Налоги", emoji=get_emoji("_coin"), style=discord.ButtonStyle.danger, row=2)
     async def btn_taxes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7615,7 +10408,7 @@ class SocialView(BaseView):
             embed.description = "Налогов пока не было."
         b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         b.callback = lambda i: self._back_to_social(i)
-        view = discord.ui.View()
+        view = SafeView()
         view.add_item(b)
         await interaction.edit_original_response(embed=embed, view=view)
 
@@ -7683,7 +10476,7 @@ async def open_clan_invites(interaction: discord.Interaction, author_id: int):
     )
 
 
-class ClanInvitesView(discord.ui.View):
+class ClanInvitesView(SafeView):
     def __init__(self, author_id: int, options: list[discord.SelectOption]):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -7695,7 +10488,7 @@ class ClanInvitesView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
@@ -7773,7 +10566,16 @@ class ClanMenuView(BaseView):
     async def btn_invite(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check(interaction, "invite"):
             return
-        await interaction.response.send_modal(ClanInviteModal(self.author_id, self.clan_id))
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="👥 Пригласить в клан",
+            description="Выбери игрока в списке — приглашение придёт ему.",
+            color=0x3498db,
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClanTargetSelectView(self.author_id, self.clan_id, "invite"),
+        )
 
     @discord.ui.button(label="Купить для клана", emoji=get_emoji("_shop"), style=discord.ButtonStyle.primary, row=0)
     async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7829,42 +10631,14 @@ class ClanMenuView(BaseView):
     async def btn_quests(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_clan_quests_embed(self.clan_id)
-        await interaction.edit_original_response(embed=embed, view=self)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanQuestsView(self.author_id, self.clan_id)
+        )
 
     @discord.ui.button(label="Участники", emoji=get_emoji("_coop"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_members(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        members = await get_clan_members(self.clan_id)
-        embed = BotEmbed(title="👥 Участники клана", color=0x9b59b6)
-        role_names = {
-            "leader": "👑 Лидер",
-            "deputy": "🥈 Заместитель",
-            "officer": "🥉 Офицер",
-            "veteran": "🎖️ Ветеран",
-            "member": "👤 Участник",
-        }
-        for uid, role in members:
-            # Пытаемся получить имя пользователя
-            user = bot.get_user(uid)
-            if user is None:
-                try:
-                    user = await bot.fetch_user(uid)
-                except discord.NotFound:
-                    user = None
-                except discord.HTTPException:
-                    user = None
-
-            if user:
-                display = f"**{user.name}**"
-            else:
-                display = f"`{uid}`"
-
-            embed.add_field(
-                name=display,
-                value=role_names.get(role, role),
-                inline=True
-            )
-        await interaction.edit_original_response(embed=embed, view=self)
+        await open_clan_members(interaction, self.author_id, self.clan_id)
 
     @discord.ui.button(label="Управление", emoji=get_emoji("_settings"), style=discord.ButtonStyle.danger, row=2)
     async def btn_manage(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7887,11 +10661,226 @@ class ClanMenuView(BaseView):
             view=ClanInventoryView(self.author_id, self.clan_id),
         )
 
+    @discord.ui.button(label="Покинуть клан", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.danger, row=4)
+    async def btn_leave(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        members = await get_clan_members(self.clan_id)
+        is_leader = any(uid == self.author_id and role == "leader" for uid, role in members)
+        warning = (
+            "Ты лидер. Если в клане есть другие участники, сначала передай лидерство."
+            if is_leader and len(members) > 1
+            else "Покинуть клан? Это действие нельзя отменить."
+        )
+        embed = BotEmbed(
+            title="🚪 Покинуть клан",
+            description=warning,
+            color=0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClanLeaveConfirmView(self.author_id, self.clan_id),
+        )
+
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="⚔️ Социум", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+
+class ClanQuestsView(BaseView):
+    def __init__(self, author_id: int, clan_id: int):
+        super().__init__(author_id)
+        self.clan_id = clan_id
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            await interaction.edit_original_response(
+                embed=BotEmbed(title="⚔️ Социум", color=0xe74c3c),
+                view=SocialView(self.author_id),
+            )
+            return
+        embed = await build_clan_embed(interaction, clan)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+        )
+
+
+async def build_clan_members_embed(clan_id: int, page: int = 0):
+    members = await get_clan_members(clan_id)
+    page_size = 20
+    total_pages = max(1, (len(members) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = members[page * page_size:(page + 1) * page_size]
+
+    role_names = {
+        "leader": "👑 Лидер",
+        "deputy": "🥈 Заместитель",
+        "officer": "🥉 Офицер",
+        "veteran": "🎖️ Ветеран",
+        "member": "👤 Участник",
+    }
+    embed = BotEmbed(
+        title="👥 Участники клана",
+        description=f"Страница {page + 1}/{total_pages} · всего {len(members)}",
+        color=0x9b59b6,
+    )
+    for uid, role in chunk:
+        user = bot.get_user(uid)
+        if user is None:
+            try:
+                user = await bot.fetch_user(uid)
+            except (discord.NotFound, discord.HTTPException):
+                user = None
+        display = f"**{user.name}**" if user else f"`{uid}`"
+        embed.add_field(name=display, value=role_names.get(role, role), inline=True)
+    return embed, page, total_pages
+
+
+async def open_clan_members(
+    interaction: discord.Interaction,
+    author_id: int,
+    clan_id: int,
+    page: int = 0,
+):
+    embed, page, total_pages = await build_clan_members_embed(clan_id, page)
+    await interaction.edit_original_response(
+        embed=embed,
+        view=ClanMembersView(author_id, clan_id, page, total_pages),
+    )
+
+
+class ClanMembersView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        clan_id: int,
+        page: int,
+        total_pages: int,
+        timeout: int = 300,
+    ):
+        super().__init__(author_id, timeout)
+        self.clan_id = clan_id
+        self.page = page
+        self.total_pages = total_pages
+        self.btn_prev.disabled = page <= 0
+        self.btn_next.disabled = page >= total_pages - 1
+
+    @discord.ui.button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_clan_members(
+            interaction, self.author_id, self.clan_id, self.page - 1
+        )
+
+    @discord.ui.button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_clan_members(
+            interaction, self.author_id, self.clan_id, self.page + 1
+        )
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            embed = BotEmbed(title="⚔️ Социум", color=0xe74c3c)
+            await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+            return
+        embed = await build_clan_embed(interaction, clan)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+        )
+
+
+class ClanLeaveConfirmView(BaseView):
+    def __init__(self, author_id: int, clan_id: int, timeout: int = 120):
+        super().__init__(author_id, timeout)
+        self.clan_id = clan_id
+
+    @discord.ui.button(label="Покинуть", emoji=get_emoji("_approve"), style=discord.ButtonStyle.danger)
+    async def btn_confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT treasury FROM clans WHERE id = ?", (self.clan_id,)
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("Клан уже не существует.")
+                treasury = row[0] or 0
+                members = await get_clan_members(self.clan_id)
+                is_leader = any(
+                    uid == self.author_id and role == "leader"
+                    for uid, role in members
+                )
+                if is_leader and len(members) > 1:
+                    raise ValueError("Сначала передай лидерство другому участнику.")
+
+                if is_leader:
+                    if treasury > 0:
+                        await bot.db.execute(
+                            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                            (treasury, self.author_id),
+                        )
+                    for table in (
+                        "clan_inventory",
+                        "clan_members",
+                        "clan_invites",
+                        "clan_quests",
+                        "clan_wars",
+                    ):
+                        column = "clan_id" if table != "clan_wars" else "clan1_id"
+                        if table == "clan_wars":
+                            await bot.db.execute(
+                                "DELETE FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?",
+                                (self.clan_id, self.clan_id),
+                            )
+                        else:
+                            await bot.db.execute(
+                                f"DELETE FROM {table} WHERE {column} = ?",
+                                (self.clan_id,),
+                            )
+                    await bot.db.execute(
+                        "DELETE FROM clans WHERE id = ?", (self.clan_id,)
+                    )
+                    await log_clan(self.clan_id, "disband", "leader left")
+                    result = "Клан распущен."
+                else:
+                    await bot.db.execute(
+                        "DELETE FROM clan_members WHERE user_id = ? AND clan_id = ?",
+                        (self.author_id, self.clan_id),
+                    )
+                    await bot.db.execute(
+                        "DELETE FROM clan_invites WHERE target_id = ? OR inviter_id = ?",
+                        (self.author_id, self.author_id),
+                    )
+                    await log_clan(self.clan_id, "leave", f"<@{self.author_id}>")
+                    result = "Ты покинул клан."
+        except ValueError as e:
+            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
+
+        await interaction.followup.send(f"✅ {result}", ephemeral=True)
+        embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+
+    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            embed = BotEmbed(title="⚔️ Социум", color=0xe74c3c)
+            await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+            return
+        embed = await build_clan_embed(interaction, clan)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+        )
 
 
 class ClanInventoryView(BaseView):
@@ -7992,29 +10981,41 @@ class ClanManageView(BaseView):
             return None
         return role
 
+    async def _open_target(self, interaction: discord.Interaction, action: str):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="👥 Выбери игрока",
+            description="Выбери участника клана в списке.",
+            color=0x3498db,
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClanTargetSelectView(self.author_id, self.clan_id, action),
+        )
+
     @discord.ui.button(label="Повысить", emoji=get_emoji("_upgrades"), style=discord.ButtonStyle.primary, row=0)
     async def btn_promote(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check(interaction, "promote"):
             return
-        await interaction.response.send_modal(ClanRoleModal(self.author_id, self.clan_id, "promote"))
+        await self._open_target(interaction, "promote")
 
     @discord.ui.button(label="Понизить", emoji=get_emoji("_sorting"), style=discord.ButtonStyle.secondary, row=0)
     async def btn_demote(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check(interaction, "promote"):
             return
-        await interaction.response.send_modal(ClanRoleModal(self.author_id, self.clan_id, "demote"))
+        await self._open_target(interaction, "demote")
 
     @discord.ui.button(label="Исключить", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=0)
     async def btn_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check(interaction, "kick"):
             return
-        await interaction.response.send_modal(ClanKickModal(self.author_id, self.clan_id))
+        await self._open_target(interaction, "kick")
 
     @discord.ui.button(label="Передать лидерство", emoji=get_emoji("_title"), style=discord.ButtonStyle.danger, row=1)
     async def btn_transfer(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check(interaction, "disband"):
             return
-        await interaction.response.send_modal(ClanTransferModal(self.author_id, self.clan_id))
+        await self._open_target(interaction, "transfer")
 
     @discord.ui.button(label="Распустить клан", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=1)
     async def btn_disband(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -8028,6 +11029,180 @@ class ClanManageView(BaseView):
         clan = await get_clan(self.author_id)
         embed = await build_clan_embed(interaction, clan)
         await interaction.edit_original_response(embed=embed, view=ClanMenuView(self.author_id, self.clan_id))
+
+class ClanTargetSelectView(BaseView):
+    home_row = 2
+
+    def __init__(self, author_id: int, clan_id: int, action: str):
+        super().__init__(author_id, timeout=300)
+        self.clan_id = clan_id
+        self.action = action
+        select = discord.ui.UserSelect(
+            placeholder="Найди игрока по имени...",
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        select.callback = self.select_target
+        self.add_item(select)
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select_target(self, interaction: discord.Interaction):
+        target_id = int(interaction.data["values"][0])
+        if target_id == interaction.user.id and self.action != "invite":
+            return await interaction.response.send_message(
+                "❌ Нельзя выбрать себя.", ephemeral=True
+            )
+        if self.action == "invite":
+            await interaction.response.defer()
+            await self._invite(interaction, target_id)
+            return
+        await interaction.response.send_modal(
+            ClanTargetConfirmModal(
+                self.author_id, self.clan_id, self.action, target_id
+            )
+        )
+
+    async def _invite(self, interaction: discord.Interaction, target_id: int):
+        if await get_clan(target_id):
+            return await interaction.followup.send(
+                "❌ Игрок уже в клане.", ephemeral=True
+            )
+        async with bot.db.execute(
+            "SELECT 1 FROM clan_invites WHERE clan_id = ? AND target_id = ?",
+            (self.clan_id, target_id),
+        ) as c:
+            if await c.fetchone():
+                return await interaction.followup.send(
+                    "❌ Приглашение уже отправлено.", ephemeral=True
+                )
+        await bot.db.execute(
+            "INSERT INTO clan_invites (clan_id, inviter_id, target_id) "
+            "VALUES (?, ?, ?)",
+            (self.clan_id, self.author_id, target_id),
+        )
+        await commit_if_needed()
+        await log_clan(self.clan_id, "invite", f"<@{target_id}>")
+        await interaction.followup.send(
+            f"✅ Приглашение отправлено <@{target_id}>.", ephemeral=True
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        clan = await get_clan(self.author_id)
+        if not clan:
+            return await interaction.followup.send("❌ Ты не в клане.", ephemeral=True)
+        embed = await build_clan_embed(interaction, clan)
+        await interaction.edit_original_response(
+            embed=embed, view=ClanMenuView(self.author_id, self.clan_id)
+        )
+
+
+class ClanTargetConfirmModal(discord.ui.Modal, title="Подтвердить действие"):
+    confirm = discord.ui.TextInput(label="Введите ДА", required=True)
+
+    def __init__(self, author_id: int, clan_id: int, action: str, target_id: int):
+        super().__init__()
+        self.author_id = author_id
+        self.clan_id = clan_id
+        self.action = action
+        self.target_id = target_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if self.confirm.value.strip().upper() != "ДА":
+            return await interaction.followup.send("❌ Отменено.", ephemeral=True)
+
+        permission = {
+            "promote": "promote",
+            "demote": "promote",
+            "kick": "kick",
+            "transfer": "disband",
+        }.get(self.action)
+        role = await get_clan_role(self.author_id, self.clan_id)
+        if not permission or not has_clan_permission(role, permission):
+            return await interaction.followup.send(
+                "❌ Недостаточно прав.", ephemeral=True
+            )
+        if self.target_id == self.author_id:
+            return await interaction.followup.send(
+                "❌ Нельзя применить действие к себе.", ephemeral=True
+            )
+
+        target_role = await get_clan_role(self.target_id, self.clan_id)
+        if target_role == "none":
+            return await interaction.followup.send(
+                "❌ Игрок не в клане.", ephemeral=True
+            )
+
+        if self.action in ("promote", "demote"):
+            if target_role == "leader":
+                return await interaction.followup.send(
+                    "❌ Нельзя менять роль лидера.", ephemeral=True
+                )
+            order = ["member", "veteran", "officer", "deputy"]
+            if self.action == "promote":
+                if target_role not in order or target_role == "deputy":
+                    return await interaction.followup.send(
+                        "❌ Нельзя повысить.", ephemeral=True
+                    )
+                new_role = order[order.index(target_role) + 1]
+            else:
+                if target_role not in order or target_role == "member":
+                    return await interaction.followup.send(
+                        "❌ Нельзя понизить.", ephemeral=True
+                    )
+                new_role = order[order.index(target_role) - 1]
+            await bot.db.execute(
+                "UPDATE clan_members SET role = ? "
+                "WHERE user_id = ? AND clan_id = ?",
+                (new_role, self.target_id, self.clan_id),
+            )
+            details = f"<@{self.target_id}>: {target_role} → {new_role}"
+            message = (
+                f"✅ Роль <@{self.target_id}> изменена: "
+                f"{target_role} → {new_role}."
+            )
+        elif self.action == "kick":
+            if target_role == "leader":
+                return await interaction.followup.send(
+                    "❌ Нельзя исключить лидера.", ephemeral=True
+                )
+            await bot.db.execute(
+                "DELETE FROM clan_members WHERE user_id = ? AND clan_id = ?",
+                (self.target_id, self.clan_id),
+            )
+            details = f"<@{self.target_id}>"
+            message = f"✅ <@{self.target_id}> исключён из клана."
+        else:
+            await bot.db.execute(
+                "UPDATE clan_members SET role = 'member' "
+                "WHERE user_id = ? AND clan_id = ?",
+                (self.author_id, self.clan_id),
+            )
+            await bot.db.execute(
+                "UPDATE clan_members SET role = 'leader' "
+                "WHERE user_id = ? AND clan_id = ?",
+                (self.target_id, self.clan_id),
+            )
+            await bot.db.execute(
+                "UPDATE clans SET leader_id = ? WHERE id = ?",
+                (self.target_id, self.clan_id),
+            )
+            details = f"Лидерство → <@{self.target_id}>"
+            message = f"👑 Лидерство передано <@{self.target_id}>."
+
+        await commit_if_needed()
+        await log_clan(self.clan_id, self.action, details)
+        await interaction.followup.send(message, ephemeral=True)
+
 
 class ClanInviteModal(discord.ui.Modal, title="Пригласить в клан"):
     user_id = discord.ui.TextInput(label="ID игрока", required=True)
@@ -8046,7 +11221,7 @@ class ClanInviteModal(discord.ui.Modal, title="Пригласить в клан"
             if await c.fetchone():
                 return await interaction.followup.send("❌ Приглашение уже отправлено.", ephemeral=True)
         await bot.db.execute("INSERT INTO clan_invites (clan_id, inviter_id, target_id) VALUES (?, ?, ?)", (self.clan_id, self.author_id, target))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_clan(self.clan_id, "invite", f"<@{target}>")
         await interaction.followup.send(f"✅ Приглашение отправлено <@{target}>.", ephemeral=True)
 
@@ -8078,7 +11253,7 @@ class ClanRoleModal(discord.ui.Modal, title="Изменить роль"):
                 return await interaction.followup.send("❌ Нельзя понизить.", ephemeral=True)
             new = order[order.index(old) - 1]
         await bot.db.execute("UPDATE clan_members SET role = ? WHERE user_id = ? AND clan_id = ?", (new, target, self.clan_id))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_clan(self.clan_id, self.action, f"<@{target}>: {old} → {new}")
         await interaction.followup.send(f"✅ Роль <@{target}> изменена: {old} → {new}.", ephemeral=True)
 
@@ -8097,7 +11272,7 @@ class ClanKickModal(discord.ui.Modal, title="Исключить из клана"
         if role == "leader":
             return await interaction.followup.send("❌ Нельзя исключить лидера.", ephemeral=True)
         await bot.db.execute("DELETE FROM clan_members WHERE user_id = ? AND clan_id = ?", (target, self.clan_id))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_clan(self.clan_id, "kick", f"<@{target}>")
         await interaction.followup.send(f"✅ <@{target}> исключён из клана.", ephemeral=True)
 
@@ -8120,7 +11295,7 @@ class ClanTransferModal(discord.ui.Modal, title="Передать лидерст
         await bot.db.execute("UPDATE clan_members SET role = 'member' WHERE user_id = ? AND clan_id = ?", (self.author_id, self.clan_id))
         await bot.db.execute("UPDATE clan_members SET role = 'leader' WHERE user_id = ? AND clan_id = ?", (target, self.clan_id))
         await bot.db.execute("UPDATE clans SET leader_id = ? WHERE id = ?", (target, self.clan_id))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_clan(self.clan_id, "transfer", f"Лидерство → <@{target}>")
         await interaction.followup.send(f"👑 Лидерство передано <@{target}>.", ephemeral=True)
 
@@ -8166,7 +11341,7 @@ class ClanDisbandModal(discord.ui.Modal, title="Распустить клан"):
         await bot.db.execute("DELETE FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?", (self.clan_id, self.clan_id))
         await bot.db.execute("DELETE FROM clans WHERE id = ?", (self.clan_id,))
 
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send("💀 Клан распущен.", ephemeral=True)
 
 async def open_clan_buy_select(interaction: discord.Interaction, author_id: int, clan_id: int, page: int = 0):
@@ -8186,7 +11361,7 @@ async def open_clan_buy_select(interaction: discord.Interaction, author_id: int,
     embed = BotEmbed(title="🛒 Купить для клана", description=f"Страница {page+1}/{total_pages}", color=0xf1c40f)
     await interaction.edit_original_response(embed=embed, view=ClanBuySelectView(author_id, clan_id, options, page, total_pages))
 
-class ClanBuySelectView(discord.ui.View):
+class ClanBuySelectView(SafeView):
     def __init__(self, author_id: int, clan_id: int, options, page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id, self.clan_id, self.page, self.total_pages = author_id, clan_id, page, total_pages
@@ -8195,7 +11370,8 @@ class ClanBuySelectView(discord.ui.View):
             p = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1); p.callback = self.prev; self.add_item(p)
             n = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1); n.callback = self.next; self.add_item(n)
         b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2); b.callback = self.back; self.add_item(b)
-    async def interaction_check(self, i): return i.user.id == self.author_id
+    async def interaction_check(self, i):
+        return await self.check_owner(i)
     async def item_select(self, interaction):
         item_id = interaction.data["values"][0]
         await interaction.response.defer()
@@ -8284,7 +11460,7 @@ async def get_or_create_clan_quests(clan_id: int):
             "VALUES (?, ?, ?, ?, ?)",
             (clan_id, qt, target, reward, week_key),
         )
-    await bot.db.commit()
+    await commit_if_needed()
 
     async with bot.db.execute(
         "SELECT id, quest_type, progress, target, reward, completed, week_start "
@@ -8316,7 +11492,7 @@ async def update_clan_quest(clan_id: int, quest_type: str, amount: int = 1):
         await bot.db.execute("UPDATE clans SET treasury = treasury + ? WHERE id = ?", (reward, clan_id))
         await log_clan(clan_id, "quest_complete", f"Тип: {quest_type}, +{reward} в сундук")
         await add_clan_xp(clan_id, 50)
-    await bot.db.commit()
+    await commit_if_needed()
 
 class CreateClanModal(discord.ui.Modal, title="Создание клана"):
     name = discord.ui.TextInput(label="Название клана", required=True)
@@ -8348,26 +11524,34 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
 
         # Создание клана
         try:
-            cursor = await bot.db.execute(
-                "INSERT INTO clans (name, leader_id, treasury) VALUES (?, ?, 0)",
-                (clan_name, self.author_id)
-            )
-            clan_id = cursor.lastrowid
-            await bot.db.execute(
-                "INSERT INTO clan_members (user_id, clan_id, role) VALUES (?, ?, 'leader')",
-                (self.author_id, clan_id)
-            )
-            await bot.db.execute(
-                "UPDATE players SET coins = coins - ? WHERE user_id = ?",
-                (cost, self.author_id)
-            )
-            await bot.db.commit()
+            async with db_transaction():
+                if await get_clan(self.author_id):
+                    raise ValueError("Ты уже в клане.")
+                cur = await bot.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (cost, self.author_id, cost),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"Нужно {cost} монет для создания клана.")
+                cursor = await bot.db.execute(
+                    "INSERT INTO clans (name, leader_id, treasury) "
+                    "VALUES (?, ?, 0)",
+                    (clan_name, self.author_id),
+                )
+                clan_id = cursor.lastrowid
+                await bot.db.execute(
+                    "INSERT INTO clan_members (user_id, clan_id, role) "
+                    "VALUES (?, ?, 'leader')",
+                    (self.author_id, clan_id),
+                )
             await interaction.followup.send(
                 f"✅ Клан **{clan_name}** создан за {cost} монет!", ephemeral=True
             )
             await update_story_quests(self.author_id, "clan_join", 1)
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
         except Exception as e:
-            await bot.db.rollback()
             await interaction.followup.send(f"❌ Ошибка: `{e}`", ephemeral=True)
 
 
@@ -8510,7 +11694,7 @@ async def cleanup_expired_raid_parties():
     await bot.db.execute(
         f"DELETE FROM raid_parties WHERE id IN ({placeholders})", expired
     )
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 async def cleanup_expired_raid_invites():
@@ -8533,7 +11717,7 @@ async def cleanup_expired_raid_invites():
     await bot.db.execute(
         f"DELETE FROM raid_party_invites WHERE id IN ({placeholders})", expired
     )
-    await bot.db.commit()
+    await commit_if_needed()
 
 
 async def get_raid_party(user_id: int):
@@ -8740,6 +11924,7 @@ async def perform_raid(attacker_ids: list[int], target_id: int):
         "success": False,
         "loot": {},
         "capped": [],
+        "target_capped": False,
         "daily": {},
         "synergy_pct": int(round(RAID_GROUP_SYNERGY * 100 * (len(members) - 1))),
     }
@@ -8754,6 +11939,13 @@ async def perform_raid(attacker_ids: list[int], target_id: int):
             if not target_row:
                 raise ValueError("❌ Цель не найдена.")
             target_coins = max(0, target_row[0] or 0)
+            today = today_str()
+            async with bot.db.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log "
+                "WHERE target_id = ? AND date = ?",
+                (target_id, today),
+            ) as c:
+                target_lost_today = (await c.fetchone())[0] or 0
 
             # --- Кулдауны атакующих ---
             placeholders = ",".join("?" for _ in members)
@@ -8815,6 +12007,11 @@ async def perform_raid(attacker_ids: list[int], target_id: int):
                 team_power = int(
                     team_power * (1 + RAID_GROUP_SYNERGY * (len(members) - 1))
                 )
+            if def_power < team_power * RAID_MIN_TARGET_POWER_RATIO:
+                raise ValueError(
+                    "❌ Цель слишком слабая для твоего отряда. "
+                    "Выбери противника, сопоставимого по силе."
+                )
 
             roll_atk = random.randint(1, team_power)
             roll_def = random.randint(1, def_power)
@@ -8840,18 +12037,32 @@ async def perform_raid(attacker_ids: list[int], target_id: int):
             loot = {}
             capped = []
             daily = {}
+            target_capped = False
             if success and target_coins > 0:
-                today = today_str()
                 total_loot = 0
-
+                target_budget = max(
+                    0,
+                    int(target_coins * RAID_DAILY_LOSS_CAP) - target_lost_today,
+                )
+                wanted_by_uid = {}
                 for uid in members:
                     bonus = (
                         await get_pet_bonus(uid, "raid_loot")
                         + await get_title_bonus(uid, "raid_loot")
                     )
-                    wanted = int(
-                        target_coins * (RAID_LOOT_RATE + bonus)
-                    ) // len(members)
+                    wanted_by_uid[uid] = (
+                        int(target_coins * (RAID_LOOT_RATE + bonus))
+                        // len(members)
+                    )
+
+                total_wanted = sum(wanted_by_uid.values())
+                scale = 1.0
+                if total_wanted > target_budget:
+                    scale = (target_budget / total_wanted) if total_wanted else 0.0
+                    target_capped = True
+
+                for uid, base_wanted in wanted_by_uid.items():
+                    wanted = int(base_wanted * scale)
 
                     async with bot.db.execute(
                         "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log "
@@ -8909,6 +12120,7 @@ async def perform_raid(attacker_ids: list[int], target_id: int):
                 "success": success,
                 "loot": loot,
                 "capped": capped,
+                "target_capped": target_capped,
                 "daily": daily,
             })
     except ValueError as e:
@@ -8933,7 +12145,7 @@ async def finalize_raid(result: dict):
                     "UPDATE players SET raid_wins = raid_wins + 1 WHERE user_id = ?",
                     (uid,),
                 )
-                await bot.db.commit()
+                await commit_if_needed()
                 await check_achievements(uid)
             await add_season_xp(uid, 40 if result["success"] else 10)
         except Exception:
@@ -8971,6 +12183,10 @@ def build_raid_result_embed(result: dict) -> discord.Embed:
                 lines.append(
                     "⏳ Дневной лимит срезал добычу: "
                     + ", ".join(f"<@{uid}>" for uid in result["capped"])
+                )
+            if result.get("target_capped"):
+                lines.append(
+                    "🛡 Дневной лимит потерь цели ограничил добычу."
                 )
         else:
             lines.append(
@@ -9103,7 +12319,7 @@ async def open_raid_party(interaction: discord.Interaction, author_id: int, crea
         )
 
     await touch_raid_party(party[0])
-    await bot.db.commit()
+    await commit_if_needed()
 
     embed = await build_raid_party_embed(party[0], author_id)
     if embed is None:
@@ -9122,6 +12338,7 @@ async def open_raid_party(interaction: discord.Interaction, author_id: int, crea
 
 
 class RaidMenuView(BaseView):
+    home_row = 2
     @discord.ui.button(label="В одиночку", emoji=get_emoji("_raid"), style=discord.ButtonStyle.secondary, row=0)
     async def btn_solo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RaidTargetModal(self.author_id))
@@ -9139,6 +12356,7 @@ class RaidMenuView(BaseView):
 
 
 class RaidPartyView(BaseView):
+    home_row = 3
     def __init__(self, author_id: int, party_id: int):
         super().__init__(author_id, timeout=900)
         self.party_id = party_id
@@ -9204,8 +12422,7 @@ class RaidPartyView(BaseView):
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
-        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+        await open_raid_menu(interaction, self.author_id)
 
 
 class RaidInviteModal(discord.ui.Modal, title="Пригласить в отряд"):
@@ -9282,16 +12499,16 @@ class RaidInviteModal(discord.ui.Modal, title="Пригласить в отря�
                 datetime.datetime.now().isoformat(),
             ),
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await touch_raid_party(self.party_id)
-        await bot.db.commit()
+        await commit_if_needed()
 
         if not isinstance(interaction.channel, discord.abc.Messageable):
             await bot.db.execute(
                 "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
                 (self.party_id, target),
             )
-            await bot.db.commit()
+            await commit_if_needed()
             return await interaction.followup.send(
                 "❌ Не удалось отправить приглашение в канал.", ephemeral=True
             )
@@ -9314,7 +12531,7 @@ class RaidInviteModal(discord.ui.Modal, title="Пригласить в отря�
                 "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
                 (self.party_id, target),
             )
-            await bot.db.commit()
+            await commit_if_needed()
             return await interaction.followup.send(
                 "❌ Не удалось отправить приглашение в канал.", ephemeral=True
             )
@@ -9324,7 +12541,7 @@ class RaidInviteModal(discord.ui.Modal, title="Пригласить в отря�
         )
 
 
-class RaidInviteView(discord.ui.View):
+class RaidInviteView(SafeView):
     def __init__(self, party_id: int, inviter_id: int, target_id: int):
         super().__init__(timeout=RAID_INVITE_TIMEOUT)
         self.party_id = party_id
@@ -9385,7 +12602,7 @@ class RaidInviteView(discord.ui.View):
                 "WHERE party_id = ? AND target_id = ?",
                 (self.party_id, self.target_id),
             )
-            await bot.db.commit()
+            await commit_if_needed()
             embed = BotEmbed(
                 title="Приглашение не принято",
                 description=f"❌ {e}",
@@ -9423,7 +12640,7 @@ class RaidInviteView(discord.ui.View):
             "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
             (self.party_id, self.target_id),
         )
-        await bot.db.commit()
+        await commit_if_needed()
 
         embed = BotEmbed(
             title="Приглашение отклонено",
@@ -9444,7 +12661,7 @@ class RaidInviteView(discord.ui.View):
             "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
             (self.party_id, self.target_id),
         )
-        await bot.db.commit()
+        await commit_if_needed()
         if not self.message:
             return
         try:
@@ -9496,6 +12713,155 @@ class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
 
         await send_raid_result(interaction, result)
 
+async def get_duel_cooldown_seconds(user_id: int) -> int:
+    """Сколько секунд осталось до следующей дуэли."""
+    async with bot.db.execute(
+        "SELECT last_duel_time FROM duel_cooldowns WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    last = _parse_db_time(row[0]) if row else None
+    if not last:
+        return 0
+    return max(
+        0,
+        int(DUEL_COOLDOWN_SECONDS - (datetime.datetime.now() - last).total_seconds()),
+    )
+
+
+async def set_duel_cooldown(user_id: int, when: datetime.datetime | None = None):
+    stamp = (when or datetime.datetime.now()).isoformat()
+    await bot.db.execute(
+        "INSERT INTO duel_cooldowns (user_id, last_duel_time) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET last_duel_time = ?",
+        (user_id, stamp, stamp),
+    )
+
+
+async def create_duel_challenge(
+    interaction: discord.Interaction,
+    author_id: int,
+    target: int,
+    bet: int,
+    mode: str,
+):
+    """Общая логика создания вызова после выбора цели и ставки."""
+    if bet <= 0 or target == author_id:
+        return await interaction.followup.send(
+            "❌ Неверные данные.", ephemeral=True
+        )
+
+    for uid in (author_id, target):
+        cooldown = await get_duel_cooldown_seconds(uid)
+        if cooldown > 0:
+            minutes = max(1, int(cooldown // 60) + 1)
+            who = "У тебя" if uid == author_id else "У противника"
+            return await interaction.followup.send(
+                f"❌ {who} ещё кулдаун дуэли (~{minutes} мин.).",
+                ephemeral=True,
+            )
+
+    async with bot.db.execute(
+        "SELECT coins FROM players WHERE user_id = ?", (author_id,)
+    ) as c:
+        c1_row = await c.fetchone()
+    async with bot.db.execute(
+        "SELECT coins FROM players WHERE user_id = ?", (target,)
+    ) as c:
+        c2_row = await c.fetchone()
+
+    c1 = (c1_row[0] if c1_row else 0) or 0
+    c2 = (c2_row[0] if c2_row else 0) or 0
+    if c1 < bet or c2 < bet:
+        return await interaction.followup.send(
+            "❌ У кого-то не хватает монет на ставку.", ephemeral=True
+        )
+    max_bet = max(1, int(min(c1, c2) * DUEL_MAX_BET_PCT))
+    if bet > max_bet:
+        return await interaction.followup.send(
+            f"❌ Ставка не больше {int(DUEL_MAX_BET_PCT * 100)}% "
+            f"баланса (максимум {max_bet}).",
+            ephemeral=True,
+        )
+
+    view = DuelChallengeView(author_id, target, bet, mode)
+    embed = BotEmbed(
+        title=f"{get_emoji('_duel')} Вызов на дуэль",
+        description=(
+            f"<@{author_id}> вызывает <@{target}> на дуэль.\n\n"
+            f"Ставка: 🪙 **{bet}**\n"
+            f"Режим: **{mode}**\n"
+            f"Лимит: {int(DUEL_MAX_BET_PCT * 100)}% баланса, "
+            f"КД после дуэли {DUEL_COOLDOWN_SECONDS // 60} мин.\n\n"
+            f"<@{target}>, у тебя есть 2 минуты, чтобы принять вызов."
+        ),
+        color=0xf1c40f,
+    )
+
+    sent = False
+    if interaction.channel:
+        try:
+            view.message = await interaction.channel.send(
+                content=f"<@{target}>", embed=embed, view=view
+            )
+            sent = True
+        except discord.HTTPException:
+            sent = False
+
+    if not sent:
+        return await interaction.followup.send(
+            "❌ Не удалось отправить вызов в канал. "
+            "Проверь права бота на отправку сообщений.",
+            ephemeral=True,
+        )
+
+    await interaction.followup.send(
+        "✅ Вызов отправлен. Ждём согласия противника.", ephemeral=True
+    )
+
+
+class DuelTargetSelectView(SafeView):
+    home_row = 2
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=300)
+        self.author_id = author_id
+        select = discord.ui.UserSelect(
+            placeholder="Найди противника по имени...",
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        select.callback = self.select_target
+        self.add_item(select)
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select_target(self, interaction: discord.Interaction):
+        target_id = int(interaction.data["values"][0])
+        if target_id == self.author_id:
+            return await interaction.response.send_message(
+                "❌ Нельзя вызвать самого себя.", ephemeral=True
+            )
+        await interaction.response.send_modal(
+            DuelBetModal(self.author_id, target_id)
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=SocialView(self.author_id)
+        )
+
+
 class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
     opponent_id = discord.ui.TextInput(label="ID противника", required=True)
     bet = discord.ui.TextInput(label="Ставка (монеты)", default="100", required=True)
@@ -9510,68 +12876,42 @@ class DuelModal(discord.ui.Modal, title="Вызов на дуэль"):
         try:
             target = int(self.opponent_id.value)
             bet = int(self.bet.value)
-            if bet <= 0 or target == self.author_id:
-                raise ValueError
         except ValueError:
             return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
-
         mode = self.mode.value.strip().lower()
         if mode not in ("dice", "power"):
             return await interaction.followup.send("❌ Режим: dice или power.", ephemeral=True)
+        await create_duel_challenge(interaction, self.author_id, target, bet, mode)
 
-        async with bot.db.execute(
-            "SELECT coins FROM players WHERE user_id = ?", (self.author_id,)
-        ) as c:
-            c1_row = await c.fetchone()
-        async with bot.db.execute(
-            "SELECT coins FROM players WHERE user_id = ?", (target,)
-        ) as c:
-            c2_row = await c.fetchone()
 
-        c1 = (c1_row[0] if c1_row else 0) or 0
-        c2 = (c2_row[0] if c2_row else 0) or 0
-        if c1 < bet or c2 < bet:
+class DuelBetModal(discord.ui.Modal, title="Параметры дуэли"):
+    bet = discord.ui.TextInput(label="Ставка (монеты)", default="100", required=True)
+    mode = discord.ui.TextInput(label="Режим (dice/power)", default="dice", required=True)
+
+    def __init__(self, author_id: int, target_id: int):
+        super().__init__()
+        self.author_id = author_id
+        self.target_id = target_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            bet = int(self.bet.value)
+        except ValueError:
             return await interaction.followup.send(
-                "❌ У кого-то не хватает монет на ставку.", ephemeral=True
+                "❌ Ставка — число.", ephemeral=True
             )
-
-        view = DuelChallengeView(self.author_id, target, bet, mode)
-        embed = BotEmbed(
-            title=f"{get_emoji('_duel')} Вызов на дуэль",
-            description=(
-                f"<@{self.author_id}> вызывает <@{target}> на дуэль.\n\n"
-                f"Ставка: 🪙 **{bet}**\n"
-                f"Режим: **{mode}**\n\n"
-                f"<@{target}>, у тебя есть 2 минуты, чтобы принять вызов."
-            ),
-            color=0xf1c40f,
-        )
-
-        sent = False
-
-        # Вызов всегда публикуется в канал. ЛС не используем.
-        if interaction.channel:
-            try:
-                view.message = await interaction.channel.send(
-                    content=f"<@{target}>", embed=embed, view=view
-                )
-                sent = True
-            except discord.HTTPException:
-                sent = False
-
-        if not sent:
+        mode = self.mode.value.strip().lower()
+        if mode not in ("dice", "power"):
             return await interaction.followup.send(
-                "❌ Не удалось отправить вызов в канал. "
-                "Проверь права бота на отправку сообщений.",
-                ephemeral=True,
+                "❌ Режим: dice или power.", ephemeral=True
             )
-
-        await interaction.followup.send(
-            "✅ Вызов отправлен. Ждём согласия противника.", ephemeral=True
+        await create_duel_challenge(
+            interaction, self.author_id, self.target_id, bet, mode
         )
 
 
-class DuelChallengeView(discord.ui.View):
+class DuelChallengeView(SafeView):
     def __init__(self, challenger_id: int, opponent_id: int, bet: int, mode: str):
         super().__init__(timeout=DUEL_CHALLENGE_TIMEOUT)
         self.challenger_id = challenger_id
@@ -9612,7 +12952,11 @@ class DuelChallengeView(discord.ui.View):
         self.resolved = True
 
         ok, msg = await resolve_duel(
-            self.challenger_id, self.opponent_id, self.bet, self.mode
+            self.challenger_id,
+            self.opponent_id,
+            self.bet,
+            self.mode,
+            interaction.guild_id,
         )
         embed = BotEmbed(
             title="Результат дуэли",
@@ -9659,10 +13003,22 @@ class DuelChallengeView(discord.ui.View):
                 pass
 
 
-async def resolve_duel(challenger_id: int, opponent_id: int, bet: int, mode: str) -> tuple[bool, str]:
+async def resolve_duel(
+    challenger_id: int,
+    opponent_id: int,
+    bet: int,
+    mode: str,
+    guild_id: int | None = None,
+) -> tuple[bool, str]:
     """Проводит дуэль после согласия обеих сторон."""
     try:
         async with db_transaction():
+            for uid in (challenger_id, opponent_id):
+                cooldown = await get_duel_cooldown_seconds(uid)
+                if cooldown > 0:
+                    minutes = max(1, int(cooldown // 60) + 1)
+                    raise ValueError(f"Кулдаун дуэли ещё ~{minutes} мин.")
+
             async with bot.db.execute(
                 "SELECT coins FROM players WHERE user_id = ?", (challenger_id,)
             ) as c:
@@ -9676,6 +13032,12 @@ async def resolve_duel(challenger_id: int, opponent_id: int, bet: int, mode: str
             c2 = (c2_row[0] if c2_row else 0) or 0
             if c1 < bet or c2 < bet:
                 raise ValueError("У кого-то не хватает монет на ставку.")
+            max_bet = max(1, int(min(c1, c2) * DUEL_MAX_BET_PCT))
+            if bet > max_bet:
+                raise ValueError(
+                    f"Ставка не больше {int(DUEL_MAX_BET_PCT * 100)}% "
+                    f"баланса (максимум {max_bet})."
+                )
 
             if mode == "dice":
                 r1, r2 = random.randint(1, 100), random.randint(1, 100)
@@ -9686,8 +13048,14 @@ async def resolve_duel(challenger_id: int, opponent_id: int, bet: int, mode: str
                 p2 = await get_combat_power(opponent_id)
                 if p1 <= 0 or p2 <= 0:
                     raise ValueError("У одного из игроков нет генераторов для дуэли.")
-                winner = challenger_id if p1 > p2 else opponent_id
-                text = f"⚔️ Мощь: {p1} против {p2}"
+                r1 = int(p1 * random.uniform(
+                    1 - DUEL_POWER_VARIANCE, 1 + DUEL_POWER_VARIANCE
+                ))
+                r2 = int(p2 * random.uniform(
+                    1 - DUEL_POWER_VARIANCE, 1 + DUEL_POWER_VARIANCE
+                ))
+                winner = challenger_id if r1 > r2 else opponent_id
+                text = f"⚔️ Мощь: {p1}→{r1} против {p2}→{r2}"
 
             cur1 = await bot.db.execute(
                 "UPDATE players SET coins = coins - ? "
@@ -9712,6 +13080,8 @@ async def resolve_duel(challenger_id: int, opponent_id: int, bet: int, mode: str
                 "VALUES (?, ?, ?, ?)",
                 (winner, loser, bet, mode),
             )
+            await set_duel_cooldown(challenger_id, datetime.datetime.now())
+            await set_duel_cooldown(opponent_id, datetime.datetime.now())
     except ValueError as e:
         return False, f"❌ {e}"
 
@@ -9726,121 +13096,35 @@ async def resolve_duel(challenger_id: int, opponent_id: int, bet: int, mode: str
     await check_achievements(opponent_id)
 
     loser = opponent_id if winner == challenger_id else challenger_id
-    await add_season_xp(winner, 40)
-    await add_season_xp(loser, 10)
+    await add_season_xp(winner, 40, guild_id)
+    await add_season_xp(loser, 10, guild_id)
 
     winner_name = f"<@{winner}>"
     msg = (
         f"{text}\n\n"
         f"🏆 Победитель: {winner_name}\n"
-        f"Банк: 🪙 **{bet * 2}**"
+        f"Банк: 🪙 **{bet * 2}**\n"
+        f"⏳ Следующая дуэль через {DUEL_COOLDOWN_SECONDS // 60} мин."
     )
     return True, msg
 
 async def open_duel_setup(interaction: discord.Interaction, author_id: int):
-    """Открывает модальное окно для вызова на дуэль."""
-    await interaction.response.send_modal(DuelModal(author_id))
-
-
-class BackOnlyView(BaseView):
-    @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.back_to_main(interaction)
-
-class EconomyView(BaseView):
-    @discord.ui.button(label="Банк", emoji=get_emoji("_bank"), style=discord.ButtonStyle.primary, row=0)
-    async def btn_bank(self, interaction: discord.Interaction, button: discord.ui.Button):
+    """Открывает выбор противника и параметры дуэли."""
+    if not interaction.response.is_done():
         await interaction.response.defer()
-        deposit = await get_deposit(self.author_id)
-        embed = BotEmbed(title="🏦 Банк", color=0x2ecc71)
-        if deposit:
-            amount, rate, start, end = deposit
-            embed.description = (
-                f"Вклад: {COIN} {amount}\n"
-                f"Процент: {int(rate * 100)}%\n"
-                f"Срок: до {datetime.datetime.fromisoformat(end).strftime('%d.%m %H:%M')}"
-            )
-            view = discord.ui.View()
-            w = discord.ui.Button(label="Забрать вклад", emoji=get_emoji("_coin"), style=discord.ButtonStyle.success)
-            w.callback = lambda i: i.response.send_modal(BankWithdrawModal(self.author_id))
-            view.add_item(w)
-        else:
-            embed.description = "У тебя нет вклада. Открой его, чтобы получать проценты."
-            view = discord.ui.View()
-            d = discord.ui.Button(label="Открыть вклад", emoji=get_emoji("_bank"), style=discord.ButtonStyle.success)
-            d.callback = lambda i: i.response.send_modal(BankDepositModal(self.author_id))
-            view.add_item(d)
-        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
-        b.callback = lambda i: self._back(i)
-        view.add_item(b)
-        await interaction.edit_original_response(embed=embed, view=view)
+    embed = BotEmbed(
+        title=f"{get_emoji('_duel')} Вызов на дуэль",
+        description=(
+            "Выбери противника в списке, затем укажи ставку и режим.\n\n"
+            f"Ставка — не больше {int(DUEL_MAX_BET_PCT * 100)}% баланса, "
+            f"КД после дуэли {DUEL_COOLDOWN_SECONDS // 60} мин."
+        ),
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed, view=DuelTargetSelectView(author_id)
+    )
 
-    @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=0)
-    async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT a.id, a.item_id, a.stars, a.current_bid, a.end_time, i.name, i.emoji "
-            "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
-            "WHERE a.status = 'active' ORDER BY a.end_time ASC LIMIT 10"
-        ) as c:
-            lots = await c.fetchall()
-        embed = BotEmbed(title="🏛️ Аукцион", color=0xf1c40f)
-        if lots:
-            for aid, item_id, stars, bid, end, item_name, item_emoji in lots:
-                embed.add_field(
-                    name=f"Лот #{aid}: {item_emoji or '📦'} {item_name or item_id} ({stars}★)",
-                    value=f"Текущая ставка: 🪙 {bid}\nДо: {datetime.datetime.fromisoformat(end).strftime('%d.%m %H:%M')}",
-                    inline=False
-                )
-        else:
-            embed.description = "Активных лотов нет."
-        view = discord.ui.View()
-        s = discord.ui.Button(label="Выставить лот", emoji=get_emoji("_market"), style=discord.ButtonStyle.success)
-        s.callback = lambda i: open_auction_sell_from_button(i, self.author_id)
-        view.add_item(s)
-        b = discord.ui.Button(label="Ставка", emoji=get_emoji("_sell"), style=discord.ButtonStyle.primary)
-        b.callback = lambda i: i.response.send_modal(AuctionBidModal(self.author_id))
-        view.add_item(b)
-        c = discord.ui.Button(label="Мои лоты", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary)
-        c.callback = lambda i: open_auction_cancel_from_button(i, self.author_id)
-        view.add_item(c)
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
-        back.callback = lambda i: self._back(i)
-        view.add_item(back)
-        await interaction.edit_original_response(embed=embed, view=view)
-
-    @discord.ui.button(label="Биржа", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
-    async def btn_market(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_market_embed(interaction)
-        await interaction.edit_original_response(
-            embed=embed, view=MarketView(self.author_id)
-        )
-
-    @discord.ui.button(label="Налоги", emoji=get_emoji("_bank"), style=discord.ButtonStyle.danger, row=1)
-    async def btn_taxes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        async with bot.db.execute(
-            "SELECT amount, tax_type, timestamp FROM tax_log WHERE user_id = ? ORDER BY id DESC LIMIT 10",
-            (self.author_id,)
-        ) as c:
-            rows = await c.fetchall()
-        embed = BotEmbed(title="🏦 Налоги", description="Твои последние списания:", color=0xe74c3c)
-        if rows:
-            for amt, ttype, ts in rows:
-                embed.add_field(name=f"`{ttype}`", value=f"🪙 {amt} | {ts}", inline=False)
-        else:
-            embed.description = "Налогов пока не было."
-        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
-        b.callback = lambda i: self._back(i)
-        view = discord.ui.View()
-        view.add_item(b)
-        await interaction.edit_original_response(embed=embed, view=view)
-
-    async def _back(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
 async def open_titles_view(interaction: discord.Interaction, author_id: int, page: int = 0, return_to: str = "main"):
     user_id = interaction.user.id
@@ -9889,6 +13173,7 @@ async def open_titles_view(interaction: discord.Interaction, author_id: int, pag
     )
 
 class PetsView(BaseView):
+    home_row = 4
     def __init__(self, author_id: int, return_to: str = "shop", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
@@ -9896,7 +13181,7 @@ class PetsView(BaseView):
     @discord.ui.button(label="Магазин", emoji=get_emoji("_shop"), style=discord.ButtonStyle.success, row=0)
     async def btn_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await open_pets_shop(interaction, self.author_id)
+        await open_pets_shop(interaction, self.author_id, self.return_to)
 
     @discord.ui.button(label="Покормить", emoji=get_emoji("_pets"), style=discord.ButtonStyle.primary, row=0)
     async def btn_feed(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -9952,7 +13237,7 @@ class PetsView(BaseView):
             "WHERE user_id = ? AND pet_id = ?",
             (PET_FEED_XP, now.isoformat(), self.author_id, pet_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await update_quest_progress(self.author_id, "feed_pet")
         await interaction.followup.send(
             f"🍖 {ptype['emoji']} {ptype['name']} покормлен! "
@@ -9990,7 +13275,8 @@ class PetsView(BaseView):
             ))
         embed = BotEmbed(title="🔄 Выбери активного питомца", color=0x9b59b6)
         await interaction.edit_original_response(
-            embed=embed, view=PetSwitchView(self.author_id, options)
+            embed=embed,
+            view=PetSwitchView(self.author_id, options, self.return_to),
         )
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
@@ -10011,17 +13297,18 @@ class PetsView(BaseView):
                 embed=embed, view=ShopHubView(self.author_id)
             )
 
-class PetSwitchView(discord.ui.View):
-    def __init__(self, author_id: int, options: list):
+class PetSwitchView(SafeView):
+    def __init__(self, author_id: int, options: list, return_to: str = "shop"):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.return_to = return_to
         self.add_item(make_select("Выбери питомца", options, self.select, row=0))
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         pet_id = interaction.data["values"][0]
@@ -10030,25 +13317,33 @@ class PetSwitchView(discord.ui.View):
             await bot.db.execute(
                 "UPDATE players SET active_pet = NULL WHERE user_id = ?", (self.author_id,)
             )
-            await bot.db.commit()
+            await commit_if_needed()
             await interaction.followup.send("✅ Активный питомец снят.", ephemeral=True)
-            return
-        await bot.db.execute(
-            "UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, self.author_id)
-        )
-        await bot.db.commit()
-        ptype = PET_TYPES[pet_id]
-        await interaction.followup.send(
-            f"✅ Активный питомец: {ptype['emoji']} {ptype['name']}.", ephemeral=True
+        else:
+            await bot.db.execute(
+                "UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, self.author_id)
+            )
+            await commit_if_needed()
+            ptype = PET_TYPES[pet_id]
+            await interaction.followup.send(
+                f"✅ Активный питомец: {ptype['emoji']} {ptype['name']}.", ephemeral=True
+            )
+        embed = await build_pets_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=PetsView(self.author_id, self.return_to)
         )
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_pets_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=PetsView(self.author_id, self.return_to)
+        )
 
 
-async def open_pets_shop(interaction: discord.Interaction, author_id: int):
+async def open_pets_shop(
+    interaction: discord.Interaction, author_id: int, return_to: str = "shop"
+):
     async with bot.db.execute("SELECT gems FROM players WHERE user_id = ?", (author_id,)) as c:
         gems = (await c.fetchone())[0]
 
@@ -10082,9 +13377,11 @@ async def open_pets_shop(interaction: discord.Interaction, author_id: int):
         async def _back(i: discord.Interaction):
             await i.response.defer()
             embed2 = await build_pets_embed(i)
-            await i.edit_original_response(embed=embed2, view=PetsView(author_id, return_to="shop"))
+            await i.edit_original_response(
+                embed=embed2, view=PetsView(author_id, return_to=return_to)
+            )
         back.callback = _back
-        view = discord.ui.View()
+        view = SafeView()
         view.add_item(back)
         await interaction.edit_original_response(embed=embed, view=view)
         return
@@ -10094,20 +13391,24 @@ async def open_pets_shop(interaction: discord.Interaction, author_id: int):
         description=f"У тебя {BOT_BTN_EMOJIS.get('_gem', '💎')} {gems}. Выбери питомца:",
         color=0x9b59b6
     )
-    await interaction.edit_original_response(embed=embed, view=PetsShopView(author_id, options))
+    await interaction.edit_original_response(
+        embed=embed, view=PetsShopView(author_id, options, return_to)
+    )
 
 
-class PetsShopView(discord.ui.View):
-    def __init__(self, author_id: int, options: list):
+class PetsShopView(SafeView):
+    home_row = 4
+    def __init__(self, author_id: int, options: list, return_to: str = "shop"):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.return_to = return_to
         self.add_item(make_select("Выбери питомца", options, self.select, row=0))
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         pet_id = interaction.data["values"][0]
@@ -10168,10 +13469,13 @@ class PetsShopView(discord.ui.View):
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_pets_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=PetsView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=PetsView(self.author_id, self.return_to)
+        )
 
 
-class TitlesView(discord.ui.View):
+class TitlesView(SafeView):
+    home_row = 4
     def __init__(self, author_id: int, options, page: int, total_pages: int, return_to: str = "main"):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -10188,7 +13492,7 @@ class TitlesView(discord.ui.View):
         b.callback = self.back; self.add_item(b)
 
     async def interaction_check(self, interaction):
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         tid = interaction.data["values"][0]
@@ -10199,7 +13503,7 @@ class TitlesView(discord.ui.View):
             return
         name = TITLES[tid][0]
         await bot.db.execute("UPDATE players SET title = ? WHERE user_id = ?", (name, self.author_id))
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(f"✅ Титул изменён на **{name}**.", ephemeral=True)
 
     async def prev(self, i):
@@ -10212,7 +13516,12 @@ class TitlesView(discord.ui.View):
 
     async def back(self, i):
         await i.response.defer()
-        if self.return_to == "hub":
+        if self.return_to == "profile":
+            embed = await build_user_profile_embed(i)
+            await i.edit_original_response(
+                embed=embed, view=UserProfileView(self.author_id)
+            )
+        elif self.return_to == "hub":
             embed = BotEmbed(
                 title="🎨 Кастомизация",
                 description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
@@ -10224,6 +13533,7 @@ class TitlesView(discord.ui.View):
             await i.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
 
 class DailyView(BaseView):
+    home_row = 1
     def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
@@ -10238,6 +13548,12 @@ class DailyView(BaseView):
         msg = f"🎉 День **{res['day']}**! Получено 🪙 {res['coins']} и 💎 {res['gems']}."
         if res["item"]:
             msg += f"\n🎁 Предмет: **{res['item']}**"
+        onboarding = res.get("onboarding")
+        if onboarding:
+            msg += (
+                f"\n🚀 Первый шаг: **{ONBOARDING_STEPS['claim_daily'][0]}** "
+                f"+🪙 {onboarding['coins']} +💎 {onboarding['gems']}."
+            )
         embed = BotEmbed(title="📅 Награда получена", description=msg, color=0x2ecc71)
         await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, self.return_to))
 
@@ -10256,6 +13572,7 @@ class DailyView(BaseView):
 
 
 class StoryQuestsView(BaseView):
+    home_row = 1
     def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
@@ -10263,7 +13580,16 @@ class StoryQuestsView(BaseView):
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        if self.return_to == "hub":
+        if self.return_to == "quests":
+            embed = BotEmbed(
+                title=f"{get_emoji('_quests')} Квесты",
+                description="Выбери раздел: сюжетные квесты или ежедневные задания.",
+                color=0x3498db,
+            )
+            await interaction.edit_original_response(
+                embed=embed, view=QuestsHubView(self.author_id)
+            )
+        elif self.return_to == "hub":
             embed = BotEmbed(
                 title="🎨 Кастомизация",
                 description="Выбери раздел: титулы, дейли, косметика, сюжетные квесты.",
@@ -10281,15 +13607,21 @@ class CosmeticsView(BaseView):
 
     @discord.ui.button(label="Цвет", emoji=get_emoji("_customization"), style=discord.ButtonStyle.primary, row=0)
     async def set_color(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CosmeticColorModal(self.author_id))
+        await interaction.response.send_modal(
+            CosmeticColorModal(self.author_id, self.return_to, interaction.message)
+        )
 
     @discord.ui.button(label="Фон", emoji=get_emoji("_customization"), style=discord.ButtonStyle.primary, row=0)
     async def set_bg(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CosmeticBgModal(self.author_id))
+        await interaction.response.send_modal(
+            CosmeticBgModal(self.author_id, self.return_to, interaction.message)
+        )
 
     @discord.ui.button(label="Иконка", emoji=get_emoji("_castle"), style=discord.ButtonStyle.primary, row=0)
     async def set_icon(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CosmeticIconModal(self.author_id))
+        await interaction.response.send_modal(
+            CosmeticIconModal(self.author_id, self.return_to, interaction.message)
+        )
 
     @discord.ui.button(label="Сбросить всё", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=1)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -10298,7 +13630,7 @@ class CosmeticsView(BaseView):
             "UPDATE user_cosmetics SET embed_color = 65280, bg_url = NULL, castle_icon = NULL WHERE user_id = ?",
             (self.author_id,)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         embed = await build_cosmetics_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=CosmeticsView(self.author_id, self.return_to))
 
@@ -10319,9 +13651,11 @@ class CosmeticsView(BaseView):
 class CosmeticColorModal(discord.ui.Modal, title="Цвет эмбеда"):
     hex_code = discord.ui.TextInput(label="HEX (например, FF0000)", required=True, max_length=7)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, return_to: str = "main", main_message=None):
         super().__init__()
         self.author_id = author_id
+        self.return_to = return_to
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -10336,16 +13670,31 @@ class CosmeticColorModal(discord.ui.Modal, title="Цвет эмбеда"):
         await bot.db.execute(
             "UPDATE user_cosmetics SET embed_color = ? WHERE user_id = ?", (color, self.author_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(f"✅ Цвет `#{color:06X}` сохранён.", ephemeral=True)
+        await self._refresh_main(interaction)
+
+    async def _refresh_main(self, interaction: discord.Interaction):
+        if not self.main_message:
+            return
+        embed = await build_cosmetics_embed(interaction)
+        try:
+            await self.main_message.edit(
+                embed=embed,
+                view=CosmeticsView(self.author_id, self.return_to),
+            )
+        except discord.HTTPException:
+            pass
 
 
 class CosmeticBgModal(discord.ui.Modal, title="Фон профиля"):
     url = discord.ui.TextInput(label="URL картинки", required=True, max_length=300)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, return_to: str = "main", main_message=None):
         super().__init__()
         self.author_id = author_id
+        self.return_to = return_to
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -10356,17 +13705,32 @@ class CosmeticBgModal(discord.ui.Modal, title="Фон профиля"):
         await bot.db.execute(
             "UPDATE user_cosmetics SET bg_url = ? WHERE user_id = ?", (url, self.author_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send("✅ Фон сохранён.", ephemeral=True)
+        await self._refresh_main(interaction)
+
+    async def _refresh_main(self, interaction: discord.Interaction):
+        if not self.main_message:
+            return
+        embed = await build_cosmetics_embed(interaction)
+        try:
+            await self.main_message.edit(
+                embed=embed,
+                view=CosmeticsView(self.author_id, self.return_to),
+            )
+        except discord.HTTPException:
+            pass
 
 
 class CosmeticIconModal(discord.ui.Modal, title="Иконка замка"):
     emoji = discord.ui.TextInput(label="Эмодзи или <:name:id>", required=True, max_length=100)
     note = discord.ui.TextInput(label="Комментарий (необязательно)", required=False, max_length=100)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, return_to: str = "main", main_message=None):
         super().__init__()
         self.author_id = author_id
+        self.return_to = return_to
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -10377,15 +13741,28 @@ class CosmeticIconModal(discord.ui.Modal, title="Иконка замка"):
         await bot.db.execute(
             "UPDATE user_cosmetics SET castle_icon = ? WHERE user_id = ?", (val, self.author_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send("✅ Иконка сохранена.", ephemeral=True)
+        await self._refresh_main(interaction)
+
+    async def _refresh_main(self, interaction: discord.Interaction):
+        if not self.main_message:
+            return
+        embed = await build_cosmetics_embed(interaction)
+        try:
+            await self.main_message.edit(
+                embed=embed,
+                view=CosmeticsView(self.author_id, self.return_to),
+            )
+        except discord.HTTPException:
+            pass
 
 
 # ============================================================
 #  💱 ОБМЕН ВАЛЮТ
 # ============================================================
 
-class ExchangeView(discord.ui.View):
+class ExchangeView(SafeView):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -10457,7 +13834,7 @@ class CoinsToGemsModal(discord.ui.Modal, title="Обмен монет на ге�
                 f"❌ Не хватает монет (нужно 🪙 {spent_coins}).", ephemeral=True
             )
             return
-        await bot.db.commit()
+        await commit_if_needed()
 
         msg = f"✅ Обменяно 🪙 {spent_coins} → 💎 {gems}."
         if remainder > 0:
@@ -10506,7 +13883,7 @@ class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на мо�
                 f"❌ Нужно 💎 {gems}, у тебя {balance}.", ephemeral=True
             )
             return
-        await bot.db.commit()
+        await commit_if_needed()
 
         await interaction.followup.send(
             f"✅ Обменяно 💎 {gems} → 🪙 {coins}.", ephemeral=True
@@ -10516,6 +13893,79 @@ class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на мо�
 # ============================================================
 #  🏰 ЗАМОК
 # ============================================================
+
+async def build_sets_embed(user_id: int) -> discord.Embed:
+    details = await get_set_synergy_details(user_id)
+    embed = BotEmbed(
+        title=f"{get_emoji('_inventory')} Сеты генераторов",
+        description=(
+            "Сеты дают бонус за разные генераторы одного набора, "
+            "соседство и полностью заполненные ряды."
+        ),
+        color=0x9b59b6,
+    )
+
+    set_lines = []
+    for set_id, set_def in SET_DEFINITIONS.items():
+        count = details["set_counts"].get(set_id, 0)
+        total = len(set_def["items"])
+        _, current_bonus = details["set_tiers"].get(set_id, (0, 0.0))
+        line = (
+            f"{set_def['emoji']} **{set_def['name']}** — "
+            f"{count}/{total} (+{int(current_bonus * 100)}%)"
+        )
+        if count < total:
+            next_tier = None
+            for threshold, bonus in reversed(set_def["tiers"]):
+                if count < threshold:
+                    next_tier = (threshold, bonus)
+                    break
+            if next_tier:
+                line += (
+                    f" · след. {next_tier[0]} → "
+                    f"+{int(next_tier[1] * 100)}%"
+                )
+        set_lines.append(line)
+
+    embed.add_field(name="Наборы", value="\n".join(set_lines), inline=False)
+    embed.add_field(
+        name="Синергия",
+        value=(
+            f"Сеты: **+{int(details['set_bonus'] * 100)}%**\n"
+            f"Соседство: **{details['adjacency_pairs']}** пар → "
+            f"+{int(details['adjacency_bonus'] * 100)}%\n"
+            f"Этажи: **{details['full_rows']}** рядов → "
+            f"+{int(details['floor_bonus'] * 100)}%\n"
+            f"**Итого: +{int(details['total'] * 100)}%**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Как усилить",
+        value=(
+            "Собери 2/4/6 разных генераторов одного сета, "
+            "ставь их соседними слотами и заполняй целые ряды."
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text=(
+            f"Соседство: +{int(SET_ADJACENCY_BONUS * 1000)}‰ за пару · "
+            f"ряд: +{int(SET_FLOOR_BONUS * 100)}%"
+        )
+    )
+    return embed
+
+
+class SetsView(BaseView):
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=ProfileView(self.author_id)
+        )
+
 
 class ProfileView(BaseView):
     @discord.ui.button(label="Хранилище", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=0)
@@ -10566,12 +14016,115 @@ class ProfileView(BaseView):
             embed=embed, view=GeneratorDetailView(self.author_id, 0, total_pages)
         )
 
+    @discord.ui.button(label="Сеты", emoji=get_emoji("_inventory"), style=discord.ButtonStyle.primary, row=3)
+    async def sets_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_sets_embed(self.author_id)
+        await interaction.edit_original_response(embed=embed, view=SetsView(self.author_id))
+
+    @discord.ui.button(label="Почта", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=4)
+    async def mailbox_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_mailbox_view(interaction, self.author_id)
+
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
         
+async def build_mailbox_embed(user_id: int):
+    async with bot.db.execute(
+        "SELECT m.id, m.item_id, m.quantity, m.stars, i.name, i.emoji "
+        "FROM mailbox m LEFT JOIN items i ON i.id = m.item_id "
+        "WHERE m.user_id = ? ORDER BY m.id ASC",
+        (user_id,),
+    ) as c:
+        rows = await c.fetchall()
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_storage')} Почта",
+        color=0x3498db,
+    )
+    if not rows:
+        embed.description = "Почта пуста."
+        return embed, 0
+
+    lines = []
+    for _mid, item_id, quantity, stars, name, emoji in rows[:15]:
+        stars_str = f" {stars}★" if stars else ""
+        lines.append(
+            f"{parse_emoji_safe(emoji or '📦')} **{name or item_id}** "
+            f"×{quantity}{stars_str}"
+        )
+    embed.description = (
+        "Предметы, которым не хватило места в замке, хранилище и временном "
+        "хранилище.\n\n" + "\n".join(lines)
+    )
+    if len(rows) > 15:
+        embed.set_footer(text=f"Показаны первые 15 из {len(rows)}.")
+    else:
+        embed.set_footer(text=f"Всего: {len(rows)}.")
+    return embed, len(rows)
+
+
+async def open_mailbox_view(interaction: discord.Interaction, author_id: int):
+    embed, count = await build_mailbox_embed(author_id)
+    await interaction.edit_original_response(
+        embed=embed, view=MailboxView(author_id, count)
+    )
+
+
+class MailboxView(BaseView):
+    def __init__(self, author_id: int, count: int, timeout: int = 300):
+        super().__init__(author_id, timeout)
+        self.btn_claim.disabled = count == 0
+
+    @discord.ui.button(label="Забрать всё", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
+    async def btn_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        claimed = 0
+        failed = 0
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT id, item_id, quantity, stars FROM mailbox "
+                "WHERE user_id = ? ORDER BY id ASC",
+                (self.author_id,),
+            ) as c:
+                rows = await c.fetchall()
+            for mid, item_id, quantity, stars in rows:
+                try:
+                    await place_items(
+                        self.author_id,
+                        item_id,
+                        quantity,
+                        commit=False,
+                        stars=stars,
+                    )
+                    await bot.db.execute("DELETE FROM mailbox WHERE id = ?", (mid,))
+                    claimed += 1
+                except ValueError:
+                    failed += 1
+
+        embed, count = await build_mailbox_embed(self.author_id)
+        await interaction.edit_original_response(
+            embed=embed, view=MailboxView(self.author_id, count)
+        )
+        if claimed or failed:
+            await interaction.followup.send(
+                f"📬 Получено: **{claimed}**. Не поместилось: **{failed}**.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=ProfileView(self.author_id)
+        )
+
+
 class SortMenuView(BaseView):
     def __init__(self, author_id: int):
         super().__init__(author_id)
@@ -10752,12 +14305,12 @@ async def open_sell_view(interaction: discord.Interaction, author_id: int, page:
     options = []
     for slot, item_id, name, default_emoji, price, stars, rarity in chunk:
         emoji_obj = parse_emoji_safe(custom.get(item_id, default_emoji))
-        sell_price = max(1, int(price * SELL_RATE))
-        stars_str = f"({stars}⭐)" if stars > 0 else ""
+        sell_price = calculate_sell_price(price, stars)
+        stars_str = f" {stars}★" if stars > 0 else ""
         options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name}...",
-            value=f"{slot}:{item_id}",
-            emoji=parse_emoji_safe(custom.get(item_id, default_emoji)) # Новая функция
+            label=f"Слот {slot}: {name}{stars_str} — 🪙 {sell_price}"[:100],
+            value=f"{slot}:{item_id}:{stars}",
+            emoji=emoji_obj,
         ))
 
     embed = BotEmbed(
@@ -10774,7 +14327,7 @@ async def open_sell_view(interaction: discord.Interaction, author_id: int, page:
     )
 
 
-class SellSelectView(discord.ui.View):
+class SellSelectView(SafeView):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -10795,19 +14348,22 @@ class SellSelectView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def item_select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
-        slot_str, item_id = value.split(":", 1)
-        slot = int(slot_str)
+        parts = value.split(":", 2)
+        slot = int(parts[0])
+        item_id = parts[1]
+        stars = int(parts[2]) if len(parts) > 2 else 0
         await interaction.response.defer()
 
         async with bot.db.execute(
             "SELECT i.name, i.price, inv.stars, i.rarity FROM inventory inv "
             "JOIN items i ON inv.item_id = i.id "
-            "WHERE inv.user_id = ? AND inv.location = 'storage' AND inv.slot = ?",
-            (interaction.user.id, slot)
+            "WHERE inv.user_id = ? AND inv.location = 'storage' "
+            "AND inv.slot = ? AND inv.item_id = ? AND inv.stars = ?",
+            (interaction.user.id, slot, item_id, stars)
         ) as c:
             row = await c.fetchone()
         if not row:
@@ -10823,21 +14379,24 @@ class SellSelectView(discord.ui.View):
             )
             return
 
-        sell_price = max(1, int(price * SELL_RATE))
+        sell_price = calculate_sell_price(price, stars)
 
         embed = BotEmbed(
             title=f"{get_emoji('_sell')} Подтверждение продажи",
             description=(
                 f"**{name}** {'⭐' * stars if stars > 0 else ''}\n"
                 f"Редкость: {RARITY_NAMES.get(rarity, rarity)}\n"
-                f"Цена продажи: 🪙 {sell_price} ({int(SELL_RATE*100)}% от магазина)\n\n"
+                f"Цена продажи: 🪙 {sell_price} "
+                f"({int(SELL_RATE*100)}% от магазина + бонус звёзд)\n\n"
                 f"Продать этот предмет?"
             ),
             color=0x2ecc71
         )
         await interaction.edit_original_response(
             embed=embed,
-            view=SellConfirmView(self.author_id, slot, item_id, sell_price, self.page)
+            view=SellConfirmView(
+                self.author_id, slot, item_id, stars, sell_price, self.page
+            )
         )
 
     async def prev_page(self, interaction: discord.Interaction):
@@ -10855,17 +14414,26 @@ class SellSelectView(discord.ui.View):
             embed=embed, view=StorageView(self.author_id, return_to="profile")
         )
 
-class SellConfirmView(discord.ui.View):
-    def __init__(self, author_id: int, slot: int, item_id: str, price: int, page: int):
+class SellConfirmView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        slot: int,
+        item_id: str,
+        stars: int,
+        price: int,
+        page: int,
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.slot = slot
         self.item_id = item_id
-        self.price = price  # уже посчитанная цена продажи (10%)
+        self.stars = stars
+        self.price = price  # уже посчитанная цена продажи
         self.page = page
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     @discord.ui.button(label="Продать", emoji=get_emoji("_sell"), style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -10876,36 +14444,37 @@ class SellConfirmView(discord.ui.View):
             async with db_transaction():
                 # повторная проверка: предмет ещё есть, редкость разрешена
                 async with bot.db.execute(
-                    "SELECT i.price, i.rarity FROM inventory inv "
+                    "SELECT i.price, i.rarity, inv.stars FROM inventory inv "
                     "JOIN items i ON inv.item_id = i.id "
-                    "WHERE inv.user_id = ? AND inv.location = 'storage' AND inv.slot = ?",
-                    (user_id, self.slot),
+                    "WHERE inv.user_id = ? AND inv.location = 'storage' "
+                    "AND inv.slot = ? AND inv.item_id = ? AND inv.stars = ?",
+                    (user_id, self.slot, self.item_id, self.stars),
                 ) as c:
                     row = await c.fetchone()
 
                 if not row:
                     raise ValueError("Предмета уже нет.")
 
-                price, rarity = row
+                price, rarity, stars = row
                 if rarity not in SELL_ALLOWED_RARITIES:
                     raise ValueError(
                         f"Предметы редкости **{RARITY_NAMES.get(rarity, rarity)}** не продаются."
                     )
 
-                sell_price = max(1, int(price * SELL_RATE))
+                sell_price = calculate_sell_price(price, stars)
 
                 cursor = await bot.db.execute(
                     "DELETE FROM inventory "
-                    "WHERE user_id = ? AND location = 'storage' AND slot = ?",
-                    (user_id, self.slot),
+                    "WHERE user_id = ? AND location = 'storage' AND slot = ? "
+                    "AND item_id = ? AND stars = ?",
+                    (user_id, self.slot, self.item_id, self.stars),
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("Предмета уже нет.")
 
                 await bot.db.execute(
-                    "UPDATE players SET coins = coins + ?, "
-                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
-                    (sell_price, sell_price, user_id),
+                    "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                    (sell_price, user_id),
                 )
         except ValueError as e:
             await interaction.edit_original_response(
@@ -11051,7 +14620,7 @@ async def open_swap_view(interaction: discord.Interaction, location: str, author
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
-class SwapFirstView(discord.ui.View):
+class SwapFirstView(SafeView):
     def __init__(
         self,
         author_id: int,
@@ -11082,7 +14651,7 @@ class SwapFirstView(discord.ui.View):
         self.add_item(close)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def first_select(self, interaction: discord.Interaction):
         first_slot = int(interaction.data["values"][0].split(":", 1)[0])
@@ -11125,7 +14694,7 @@ class SwapFirstView(discord.ui.View):
         await interaction.delete_original_response()
 
 
-class SwapSecondView(discord.ui.View):
+class SwapSecondView(SafeView):
     def __init__(
         self,
         author_id: int,
@@ -11158,7 +14727,7 @@ class SwapSecondView(discord.ui.View):
         self.add_item(close)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def second_select(self, interaction: discord.Interaction):
         second_slot = int(interaction.data["values"][0])
@@ -11193,7 +14762,7 @@ class SwapSecondView(discord.ui.View):
             "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
             (self.author_id, second_slot, first[0], self.location, first[1])
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await update_quest_progress(self.author_id, "swap_1")
 
         embed = BotEmbed(
@@ -11265,7 +14834,11 @@ async def get_star_chance(user_id: int, item_id: str, target_star: int) -> tuple
     return final_chance, pity, guaranteed
 
 
-async def open_star_view(interaction: discord.Interaction, author_id: int):
+async def open_star_view(
+    interaction: discord.Interaction,
+    author_id: int,
+    page: int = 0,
+):
     user_id = interaction.user.id
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
@@ -11284,8 +14857,13 @@ async def open_star_view(interaction: discord.Interaction, author_id: int):
         await interaction.followup.send("❌ Нет генераторов для улучшения (все 5★ или пусто).", ephemeral=True)
         return
 
+    page_size = 25
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:(page + 1) * page_size]
+
     options = []
-    for slot, item_id, name, default_emoji, stars in rows[:25]:
+    for slot, item_id, name, default_emoji, stars in chunk:
         emoji_str = custom.get(item_id, default_emoji)
         emoji_obj = parse_emoji_safe(emoji_str)
         next_star = stars + 1
@@ -11304,27 +14882,62 @@ async def open_star_view(interaction: discord.Interaction, author_id: int):
     embed = BotEmbed(
         title="⭐ Улучшение звёзд",
         description=(
+            f"Страница {page + 1}/{total_pages}\n"
             f"Бонус к доходу за звёзды (суммарный):\n"
             f"1★ +{int(STAR_BONUS[1] * 100)}%, 2★ +{int(STAR_BONUS[2] * 100)}%, "
             f"3★ +{int(STAR_BONUS[3] * 100)}%, 4★ +{int(STAR_BONUS[4] * 100)}%, "
             f"5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
             f"Чтобы поднять звезду, нужно **несколько копий** того же генератора с такой же звёздностью.\n"
-            f"При провале копии сгорают, но звезда **не понижается**.\n\n"
+            f"При провале сгорает одна копия, но звезда **не понижается**.\n\n"
             f"Выбери генератор:"
         ),
         color=0xf1c40f
     )
-    await interaction.edit_original_response(embed=embed, view=StarSelectView(author_id, options))
+    await interaction.edit_original_response(
+        embed=embed,
+        view=StarSelectView(author_id, options, page, total_pages),
+    )
 
 
-class StarSelectView(discord.ui.View):
-    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+class StarSelectView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        options: list[discord.SelectOption],
+        page: int = 0,
+        total_pages: int = 1,
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
         self.add_item(make_select("Выбери генератор", options, self.item_select, row=0))
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary, row=1,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary, row=1,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_star_view(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_star_view(interaction, self.author_id, self.page + 1)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -11393,7 +15006,7 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
             f"Шанс успеха: **{chance_str}**{pity_str}\n"
             f"Стоимость: **💎 {settings_star['gems']}**\n"
             f"Новый суммарный бонус: **+{int(STAR_BONUS[next_star] * 100)}%** к доходу.\n\n"
-            f"При провале копии сгорают, но звезда **не понижается**."
+            f"При провале сгорает одна копия, но звезда **не понижается**."
         ),
         color=0xf1c40f if enough else 0xe74c3c
     )
@@ -11403,7 +15016,7 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
     )
 
 
-class StarConfirmView(discord.ui.View):
+class StarConfirmView(SafeView):
     def __init__(self, author_id: int, slot: int, item_id: str, current_stars: int, next_star: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -11513,7 +15126,7 @@ class StarConfirmView(discord.ui.View):
                 title="💥 Провал",
                 description=(
                     f"Улучшение до **{self.next_star}★** не удалось.\n"
-                    f"Копии сгорели, звезда не понизилась."
+                    f"Сгорело копий: **{len(to_delete)}**. Звезда не понизилась."
                 ),
                 color=0xe74c3c,
             )
@@ -11588,7 +15201,7 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
     )
 
 
-class MoveView(discord.ui.View):
+class MoveView(SafeView):
     def __init__(
         self,
         author_id: int,
@@ -11667,7 +15280,7 @@ class MoveView(discord.ui.View):
         new_slot = free[0]
         await bot.db.execute("DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?", (user_id, self.source, slot))
         await bot.db.execute("INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)", (user_id, new_slot, item_id, target, stars))
-        await bot.db.commit()
+        await commit_if_needed()
 
         await update_quest_progress(user_id, "move_2")
         await update_quest_progress(user_id, "move_5")
@@ -11809,7 +15422,7 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
         emoji_obj = parse_emoji_safe(emoji_str)  # Используем безопасную функцию
         
         options_all.append(discord.SelectOption(
-            label=f"{src[0]} ({count}/5) → {dst[0]}",
+            label=f"{src[0]} ({count}/{CRAFT_COST}) → {dst[0]}",
             value=item_id,
             emoji=emoji_obj
         ))
@@ -11833,7 +15446,7 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
     )
 
 
-class CraftSelectView(discord.ui.View):
+class CraftSelectView(SafeView):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -11906,7 +15519,7 @@ class CraftSelectView(discord.ui.View):
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
 
-class CraftConfirmView(discord.ui.View):
+class CraftConfirmView(SafeView):
     def __init__(self, author_id: int, item_id: str):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -12014,15 +15627,30 @@ class CraftConfirmView(discord.ui.View):
 
                 if success:
                     try:
-                        await place_items(user_id, next_id, 1, commit=False)
+                        await place_items(
+                            user_id, next_id, 1, commit=False, stars=1
+                        )
                     except ValueError:
-                        # Мы только что освободили 5 слотов — кладём результат
+                        # Мы только что освободили слоты — кладём результат
                         # в первый освободившийся слот, чтобы не потерять его.
                         loc, slot = owned[0]
                         await bot.db.execute(
-                            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
-                            "VALUES (?, ?, ?, ?, 0)",
+                            "INSERT INTO inventory "
+                            "(user_id, slot, item_id, location, stars) "
+                            "VALUES (?, ?, ?, ?, 1)",
                             (user_id, slot, next_id, loc),
+                        )
+                else:
+                    # При провале возвращаем одну исходную копию, чтобы
+                    # синтез не был слишком суровым.
+                    try:
+                        await place_items(
+                            user_id, item_id, 1, commit=False, stars=0
+                        )
+                    except ValueError:
+                        log.exception(
+                            "Не удалось вернуть копию после провала синтеза %s",
+                            user_id,
                         )
 
                 await bot.db.execute(
@@ -12062,7 +15690,10 @@ class CraftConfirmView(discord.ui.View):
             await update_clan_quest(clan[0], "synthesize", 1)
 
         unlocked = await check_achievements(user_id)
-        await add_season_xp(user_id, 25 if success else 8)
+        await add_season_xp(
+            user_id, 25 if success else 8, interaction.guild_id
+        )
+        onboarding = await complete_onboarding_step(user_id, "craft")
 
         if guaranteed:
             chance_str = "🎲 100% (гарантия pity)"
@@ -12076,12 +15707,20 @@ class CraftConfirmView(discord.ui.View):
         if success:
             msg = (
                 f"⚗️ Успех! {CRAFT_COST}×{src_emoji} {src_name} → "
-                f"1×{dst_emoji} {dst_name}\n{chance_str}{gem_str}"
+                f"1×{dst_emoji} {dst_name} 1★\n{chance_str}{gem_str}"
             )
         else:
-            msg = f"💥 Провал! {CRAFT_COST}×{src_emoji} {src_name} сгорели.\n{chance_str}{gem_str}"
+            msg = (
+                f"💥 Провал! Сгорело {CRAFT_COST - 1}×{src_emoji} "
+                f"{src_name}, 1 копия возвращена.\n{chance_str}{gem_str}"
+            )
         if unlocked:
             msg += "\n🏆 " + ", ".join(f"{e} {n}" for e, n, _ in unlocked)
+        if onboarding:
+            msg += (
+                f"\n🚀 Первый шаг: **{ONBOARDING_STEPS['craft'][0]}** "
+                f"+🪙 {onboarding['coins']} +💎 {onboarding['gems']}."
+            )
 
         embed = BotEmbed(title="⚗️ Результат синтеза", description=msg, color=0x9b59b6)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
@@ -12095,7 +15734,7 @@ class CraftConfirmView(discord.ui.View):
 #  🧪 КАТАЛИЗАТОР
 # ============================================================
 
-class CatalystSelectView(discord.ui.View):
+class CatalystSelectView(SafeView):
     def __init__(self, author_id: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -12167,6 +15806,19 @@ class CatalystSelectView(discord.ui.View):
 #  📅 Банк
 # ============================================================
 
+async def get_bank_limits(user_id: int) -> tuple[int, int]:
+    """Лимиты банка масштабируются от часового дохода игрока."""
+    try:
+        per_sec_coins, _ = await get_per_second_income(user_id)
+    except Exception:
+        # Банк не должен падать из-за неполной схемы/временной ошибки.
+        per_sec_coins = 0.0
+    income_hour = max(0.0, per_sec_coins) * 3600
+    max_deposit = max(BANK_MAX_DEPOSIT, int(income_hour * BANK_DEPOSIT_INCOME_HOURS))
+    max_loan = max(BANK_LOAN_MAX, int(income_hour * BANK_LOAN_INCOME_HOURS))
+    return max_deposit, max_loan
+
+
 async def get_deposit(user_id: int):
     async with bot.db.execute(
         "SELECT amount, interest_rate, start_time, end_time FROM bank_deposits WHERE user_id = ?",
@@ -12182,21 +15834,23 @@ async def calculate_deposit_interest(user_id: int) -> int:
     start_dt = datetime.datetime.fromisoformat(start)
     end_dt = datetime.datetime.fromisoformat(end)
     now = datetime.datetime.now()
-    if now >= end_dt:
-        return int(amount * (1 + rate))
-    days_passed = (now - start_dt).total_seconds() / 86400
     total_days = (end_dt - start_dt).total_seconds() / 86400
     if total_days <= 0:
-        return amount
-    return int(amount + amount * rate * (days_passed / total_days))
+        return int(amount)
+    daily_rate = rate / total_days
+    days_passed = max(0.0, (now - start_dt).total_seconds() / 86400)
+    if now >= end_dt:
+        days_passed = total_days
+    return int(amount * ((1 + daily_rate) ** days_passed))
 
 class BankDepositModal(discord.ui.Modal, title="Открыть вклад"):
     amount = discord.ui.TextInput(label="Сумма (монеты)", required=True)
     days = discord.ui.TextInput(label="Срок (дней, 1–30)", default="7", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, main_message=None):
         super().__init__()
         self.author_id = author_id
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -12210,9 +15864,13 @@ class BankDepositModal(discord.ui.Modal, title="Открыть вклад"):
                 f"❌ Сумма > 0, срок 1–{BANK_MAX_DAYS} дней.", ephemeral=True
             )
 
-        if amt > BANK_MAX_DEPOSIT:
+        max_deposit, _ = await get_bank_limits(self.author_id)
+        if amt > max_deposit:
             return await interaction.followup.send(
-                f"❌ Максимум {BANK_MAX_DEPOSIT} монет на вклад.", ephemeral=True
+                f"❌ Максимум {max_deposit} монет на вклад "
+                f"({BANK_DEPOSIT_INCOME_HOURS} ч дохода, но не меньше "
+                f"{BANK_MAX_DEPOSIT}).",
+                ephemeral=True,
             )
         # Проверка, что нет активного вклада
         if await get_deposit(self.author_id):
@@ -12252,18 +15910,34 @@ class BankDepositModal(discord.ui.Modal, title="Открыть вклад"):
             return await interaction.followup.send(f"❌ {msg}", ephemeral=True)
 
         await update_quest_progress(self.author_id, "open_deposit")
+        payout = int(amt * ((1 + BANK_DAILY_RATE) ** days))
         await interaction.followup.send(
             f"✅ Вклад открыт: 🪙 {amt} на {days} дней.\n"
-            f"Процент: {int(rate * 100)}% (вернёшь ~{int(amt * (1 + rate))} монет).",
+            f"Сложный процент: {int(BANK_DAILY_RATE * 100)}%/день "
+            f"(вернёшь ~{payout} монет).",
             ephemeral=True
         )
+        await self._refresh_main()
+
+    async def _refresh_main(self):
+        if not self.main_message:
+            return
+        embed, has_deposit, has_loan = await build_bank_embed(self.author_id)
+        try:
+            await self.main_message.edit(
+                embed=embed,
+                view=BankView(self.author_id, has_deposit, has_loan),
+            )
+        except discord.HTTPException:
+            pass
 
 class BankWithdrawModal(discord.ui.Modal, title="Забрать вклад"):
     confirm = discord.ui.TextInput(label="Введите ДА", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, main_message=None):
         super().__init__()
         self.author_id = author_id
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -12280,9 +15954,11 @@ class BankWithdrawModal(discord.ui.Modal, title="Забрать вклад"):
                 start_dt = datetime.datetime.fromisoformat(start)
                 end_dt = datetime.datetime.fromisoformat(end)
                 now = datetime.datetime.now()
+                total_days = (end_dt - start_dt).total_seconds() / 86400
+                daily_rate = rate / total_days if total_days > 0 else 0
 
                 if now >= end_dt:
-                    payout = int(amount * (1 + rate))
+                    payout = int(amount * ((1 + daily_rate) ** total_days))
                 else:
                     # Досрочное закрытие: возврат без процентов
                     payout = amount
@@ -12294,6 +15970,11 @@ class BankWithdrawModal(discord.ui.Modal, title="Забрать вклад"):
                 await bot.db.execute(
                     "DELETE FROM bank_deposits WHERE user_id = ?", (self.author_id,)
                 )
+                await bot.db.execute(
+                    "INSERT INTO bank_history (user_id, amount, kind) "
+                    "VALUES (?, ?, 'withdraw')",
+                    (self.author_id, payout),
+                )
         except ValueError as e:
             return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
@@ -12302,70 +15983,549 @@ class BankWithdrawModal(discord.ui.Modal, title="Забрать вклад"):
             f"✅ Вклад закрыт. Получено 🪙 {payout} (из {amount} вложенных).",
             ephemeral=True
         )
+        await self._refresh_main()
 
-# ============================================================
-#  Аукцион
-# ============================================================
+    async def _refresh_main(self):
+        if not self.main_message:
+            return
+        embed, has_deposit, has_loan = await build_bank_embed(self.author_id)
+        try:
+            await self.main_message.edit(
+                embed=embed,
+                view=BankView(self.author_id, has_deposit, has_loan),
+            )
+        except discord.HTTPException:
+            pass
 
-class AuctionSellModal(discord.ui.Modal, title="Выставить на аукцион"):
-    item_id = discord.ui.TextInput(label="ID предмета", required=True)
-    stars = discord.ui.TextInput(label="Звёзды (0–5)", default="0", required=True)
-    start_price = discord.ui.TextInput(label="Стартовая цена", required=True)
-    hours = discord.ui.TextInput(label="Длительность (часов)", default="24", required=True)
+async def get_loan(user_id: int):
+    async with bot.db.execute(
+        "SELECT amount, interest_rate, due_time, collateral_item, "
+        "collateral_stars, status FROM bank_loans "
+        "WHERE user_id = ? AND COALESCE(status, 'active') = 'active'",
+        (user_id,),
+    ) as c:
+        return await c.fetchone()
 
-    def __init__(self, author_id: int):
+
+def loan_total_due(loan) -> int:
+    if not loan:
+        return 0
+    amount, rate = loan[0], loan[1]
+    return int((amount or 0) * (1 + (rate or 0)))
+
+
+async def get_collateral_value(item_id: str, stars: int) -> int:
+    async with bot.db.execute(
+        "SELECT price FROM items WHERE id = ?", (item_id,)
+    ) as c:
+        row = await c.fetchone()
+    price = (row[0] if row else 0) or 0
+    return int(price * (1 + (stars or 0) * 0.5))
+
+
+async def take_bank_loan(
+    user_id: int, item_id: str, stars: int, amount: int
+) -> tuple[bool, str]:
+    if await get_loan(user_id):
+        return False, "❌ У тебя уже есть активный кредит."
+    collateral_value = await get_collateral_value(item_id, stars)
+    _, loan_cap = await get_bank_limits(user_id)
+    max_loan = min(loan_cap, int(collateral_value * BANK_LOAN_LTV))
+    if max_loan < BANK_LOAN_MIN:
+        return False, "❌ Залог слишком дешёвый для кредита."
+    if amount < BANK_LOAN_MIN or amount > max_loan:
+        return False, f"❌ Сумма кредита: {BANK_LOAN_MIN}–{max_loan}."
+
+    due = datetime.datetime.now() + datetime.timedelta(days=BANK_LOAN_TERM_DAYS)
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT slot FROM inventory WHERE user_id = ? "
+                "AND location = 'profile' AND item_id = ? AND stars = ? LIMIT 1",
+                (user_id, item_id, stars),
+            ) as c:
+                row = await c.fetchone()
+            if not row:
+                raise ValueError("Залоговый предмет не найден в замке.")
+            slot = row[0]
+
+            cur = await bot.db.execute(
+                "DELETE FROM inventory WHERE user_id = ? AND location = 'profile' "
+                "AND slot = ? AND item_id = ? AND stars = ?",
+                (user_id, slot, item_id, stars),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Залоговый предмет уже перемещён.")
+
+            await bot.db.execute(
+                "INSERT INTO bank_loans "
+                "(user_id, amount, interest_rate, due_time, collateral_item, "
+                "collateral_stars, issued_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+                (
+                    user_id, amount, BANK_LOAN_INTEREST, due.isoformat(),
+                    item_id, stars, datetime.datetime.now().isoformat(),
+                ),
+            )
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                (amount, user_id),
+            )
+            await bot.db.execute(
+                "INSERT INTO bank_history (user_id, amount, kind, details) "
+                "VALUES (?, ?, 'loan', ?)",
+                (user_id, amount, f"{item_id} {stars}★"),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+
+    return True, (
+        f"✅ Кредит 🪙 **{amount}** выдан под залог "
+        f"**{item_id}** ({stars}★).\n"
+        f"К возврату до {due.strftime('%d.%m %H:%M')}: "
+        f"🪙 {amount + int(amount * BANK_LOAN_INTEREST)}."
+    )
+
+
+async def repay_bank_loan(user_id: int) -> tuple[bool, str]:
+    try:
+        async with db_transaction():
+            loan = await get_loan(user_id)
+            if not loan:
+                raise ValueError("У тебя нет активного кредита.")
+            amount, _rate, _due, item_id, stars, _status = loan
+            total_due = loan_total_due(loan)
+
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                row = await c.fetchone()
+            coins = (row[0] if row else 0) or 0
+            if coins < total_due:
+                raise ValueError(f"Нужно 🪙 {total_due}, у тебя {coins}.")
+
+            cur = await bot.db.execute(
+                "UPDATE players SET coins = coins - ? "
+                "WHERE user_id = ? AND coins >= ?",
+                (total_due, user_id, total_due),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Недостаточно монет (баланс изменился).")
+
+            # Залог возвращается в замок/хранилище или в почту.
+            await grant_item_or_compensation(
+                user_id, item_id, 1, stars or 0
+            )
+
+            cur = await bot.db.execute(
+                "DELETE FROM bank_loans "
+                "WHERE user_id = ? AND COALESCE(status, 'active') = 'active'",
+                (user_id,),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Кредит уже погашен.")
+            await bot.db.execute(
+                "INSERT INTO bank_history (user_id, amount, kind) "
+                "VALUES (?, ?, 'loan_repay')",
+                (user_id, total_due),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+
+    message = (
+        f"✅ Кредит погашен: 🪙 **{total_due}**. "
+        f"Залог **{item_id}** возвращён в замок или почту."
+    )
+    return True, message
+
+
+async def expire_bank_loans():
+    now = datetime.datetime.now().isoformat()
+    async with bot.db.execute(
+        "SELECT user_id, amount, collateral_item, collateral_stars "
+        "FROM bank_loans WHERE COALESCE(status, 'active') = 'active' "
+        "AND due_time < ?",
+        (now,),
+    ) as c:
+        loans = await c.fetchall()
+
+    for user_id, amount, item_id, stars in loans:
+        await bot.db.execute(
+            "DELETE FROM bank_loans WHERE user_id = ?", (user_id,)
+        )
+        await bot.db.execute(
+            "INSERT INTO bank_history (user_id, amount, kind, details) "
+            "VALUES (?, ?, 'loan_default', ?)",
+            (user_id, amount, f"{item_id} {stars}★"),
+        )
+    await commit_if_needed()
+
+
+async def build_bank_embed(user_id: int) -> tuple[discord.Embed, bool, bool]:
+    deposit = await get_deposit(user_id)
+    loan = await get_loan(user_id)
+    max_deposit, max_loan = await get_bank_limits(user_id)
+    embed = BotEmbed(
+        title=f"{get_emoji('_bank')} Банк",
+        description=(
+            f"Вклад: **{int(BANK_DAILY_RATE * 100)}%/день** "
+            "(сложный процент).\n"
+            f"Кредит: до **{int(BANK_LOAN_LTV * 100)}%** стоимости залога, "
+            f"переплата **{int(BANK_LOAN_INTEREST * 100)}%** за "
+            f"{BANK_LOAN_TERM_DAYS} дней."
+        ),
+        color=0x2ecc71,
+    )
+    embed.add_field(
+        name="Лимиты",
+        value=(
+            f"Вклад: до {COIN} **{format_price(max_deposit)}** "
+            f"({BANK_DEPOSIT_INCOME_HOURS} ч дохода)\n"
+            f"Кредит: до {COIN} **{format_price(max_loan)}** "
+            f"({BANK_LOAN_INCOME_HOURS} ч дохода, но не больше "
+            f"{int(BANK_LOAN_LTV * 100)}% залога)"
+        ),
+        inline=False,
+    )
+
+    if deposit:
+        amount, rate, start, end = deposit
+        start_dt = datetime.datetime.fromisoformat(start)
+        end_dt = datetime.datetime.fromisoformat(end)
+        days = max(1, (end_dt - start_dt).total_seconds() / 86400)
+        daily_rate = rate / days if days > 0 else 0
+        total_value = int(amount * ((1 + daily_rate) ** days))
+        if datetime.datetime.now() >= end_dt:
+            value_line = (
+                f"К получению: {COIN} **{total_value}** "
+                f"(+{total_value - amount})"
+            )
+        else:
+            value_line = (
+                f"При завершении: {COIN} **{total_value}** "
+                f"(+{total_value - amount})\n"
+                f"Досрочно: {COIN} **{amount}** (без процентов)"
+            )
+        embed.add_field(
+            name="Вклад",
+            value=(
+                f"Сумма: {COIN} **{amount}**\n"
+                f"Срок: до `{end_dt.strftime('%d.%m %H:%M')}` "
+                f"({days:.0f} дн.)\n{value_line}"
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Вклад", value="Нет активного вклада.", inline=False)
+
+    if loan:
+        amount, _rate, due, item_id, stars, _status = loan
+        total_due = loan_total_due(loan)
+        async with bot.db.execute(
+            "SELECT name, emoji FROM items WHERE id = ?", (item_id,)
+        ) as c:
+            item_row = await c.fetchone()
+        item_name, item_emoji = item_row or (item_id, "📦")
+        embed.add_field(
+            name="Кредит",
+            value=(
+                f"Получено: {COIN} **{amount}**\n"
+                f"К возврату: {COIN} **{total_due}**\n"
+                f"Срок: до `{str(due)[:16]}`\n"
+                f"Залог: {item_emoji} **{item_name}** ({stars or 0}★)"
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Кредит", value="Нет активного кредита.", inline=False)
+
+    embed.set_footer(text="Досрочное закрытие вклада возвращает сумму без процентов.")
+    return embed, bool(deposit), bool(loan)
+
+
+async def build_bank_history_embed(user_id: int) -> discord.Embed:
+    async with bot.db.execute(
+        "SELECT amount, kind, details, opened_at FROM bank_history "
+        "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+        (user_id,),
+    ) as c:
+        rows = await c.fetchall()
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_bank')} История банка",
+        color=0x2ecc71,
+    )
+    if not rows:
+        embed.description = "Операций пока нет."
+        return embed
+
+    kind_names = {
+        "deposit": "вклад открыт",
+        "withdraw": "вклад закрыт",
+        "loan": "кредит получен",
+        "loan_repay": "кредит погашен",
+        "loan_default": "кредит просрочен",
+    }
+    lines = []
+    for amount, kind, details, opened_at in rows:
+        label = kind_names.get(kind or "deposit", kind or "операция")
+        extra = f" · {details}" if details else ""
+        lines.append(
+            f"🪙 **{amount}** — {label}{extra}\n`{str(opened_at)[:16]}`"
+        )
+    embed.description = "\n\n".join(lines)
+    return embed
+
+
+async def open_bank_view(interaction: discord.Interaction, author_id: int):
+    embed, has_deposit, has_loan = await build_bank_embed(author_id)
+    await interaction.edit_original_response(
+        embed=embed, view=BankView(author_id, has_deposit, has_loan)
+    )
+
+
+async def open_bank_history(interaction: discord.Interaction, author_id: int):
+    embed = await build_bank_history_embed(author_id)
+    await interaction.followup.send(
+        embed=embed,
+        view=BankHistoryView(author_id, interaction.message),
+        ephemeral=True,
+    )
+
+
+class BankHistoryView(BaseView):
+    def __init__(self, author_id: int, main_message=None, timeout: int = 300):
+        super().__init__(author_id, timeout)
+        self.main_message = main_message
+
+    @discord.ui.button(label="Закрыть", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    async def btn_close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+
+class BankView(BaseView):
+    def __init__(self, author_id: int, has_deposit: bool, has_loan: bool):
+        super().__init__(author_id)
+        self.has_deposit = has_deposit
+        self.has_loan = has_loan
+        self.btn_deposit.disabled = has_deposit
+        self.btn_withdraw.disabled = not has_deposit
+        self.btn_loan.disabled = has_loan
+        self.btn_repay.disabled = not has_loan
+
+    @discord.ui.button(label="Открыть вклад", emoji=get_emoji("_bank"), style=discord.ButtonStyle.success, row=0)
+    async def btn_deposit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            BankDepositModal(self.author_id, interaction.message)
+        )
+
+    @discord.ui.button(label="Забрать вклад", emoji=get_emoji("_coin"), style=discord.ButtonStyle.primary, row=0)
+    async def btn_withdraw(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            BankWithdrawModal(self.author_id, interaction.message)
+        )
+
+    @discord.ui.button(label="Взять кредит", emoji=get_emoji("_buy"), style=discord.ButtonStyle.success, row=1)
+    async def btn_loan(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_bank_loan_select(interaction, self.author_id)
+
+    @discord.ui.button(label="Погасить кредит", emoji=get_emoji("_approve"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_repay(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_bank_repay_confirm(interaction, self.author_id)
+
+    @discord.ui.button(label="История", emoji=get_emoji("_stats"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_bank_history(interaction, self.author_id)
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_bank_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(
+            embed=embed, view=SocialView(self.author_id)
+        )
+
+
+async def open_bank_loan_select(
+    interaction: discord.Interaction, author_id: int, page: int = 0
+):
+    async with bot.db.execute(
+        "SELECT inv.item_id, inv.stars, i.name, i.emoji, i.price "
+        "FROM inventory inv JOIN items i ON i.id = inv.item_id "
+        "WHERE inv.user_id = ? AND inv.location = 'profile' "
+        "ORDER BY i.price DESC, inv.stars DESC",
+        (author_id,),
+    ) as c:
+        rows = await c.fetchall()
+
+    eligible = []
+    _, loan_cap = await get_bank_limits(author_id)
+    for item_id, stars, name, emoji, price in rows:
+        value = int(price * (1 + (stars or 0) * 0.5))
+        max_loan = min(loan_cap, int(value * BANK_LOAN_LTV))
+        if max_loan >= BANK_LOAN_MIN:
+            eligible.append((item_id, stars, name, emoji, value, max_loan))
+
+    if not eligible:
+        return await interaction.followup.send(
+            "❌ Нет генераторов, подходящих под залог.", ephemeral=True
+        )
+
+    page_size = 10
+    total_pages = max(1, (len(eligible) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = eligible[page * page_size:page * page_size + page_size]
+    options = [
+        discord.SelectOption(
+            label=f"{name} ({stars}★) — залог до {max_loan}"[:100],
+            value=f"{item_id}:{stars}",
+            emoji=parse_emoji_safe(emoji),
+        )
+        for item_id, stars, name, emoji, value, max_loan in chunk
+    ]
+    embed = BotEmbed(
+        title=f"{get_emoji('_bank')} Кредит под залог",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            f"Кредит до {int(BANK_LOAN_LTV * 100)}% стоимости залога, "
+            f"максимум {loan_cap}."
+        ),
+        color=0x2ecc71,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=BankLoanSelectView(author_id, options, page, total_pages, loan_cap),
+    )
+
+
+class BankLoanSelectView(BaseView):
+    def __init__(
+        self, author_id: int, options: list, page: int, total_pages: int,
+        loan_cap: int = BANK_LOAN_MAX,
+    ):
+        super().__init__(author_id)
+        self.page = page
+        self.total_pages = total_pages
+        self.loan_cap = loan_cap
+        self.add_item(make_select("Выбери залог", options, self.select_item, row=0))
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary, row=1,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.", emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary, row=1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(
+            label="Назад", emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary, row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select_item(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        item_id, stars_str = value.rsplit(":", 1)
+        stars = int(stars_str)
+        value_coins = await get_collateral_value(item_id, stars)
+        max_loan = min(self.loan_cap, int(value_coins * BANK_LOAN_LTV))
+        await interaction.response.send_modal(
+            BankLoanAmountModal(self.author_id, item_id, stars, max_loan)
+        )
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_bank_loan_select(interaction, self.author_id, self.page - 1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_bank_loan_select(interaction, self.author_id, self.page + 1)
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_bank_view(interaction, self.author_id)
+
+
+class BankLoanAmountModal(discord.ui.Modal, title="Получить кредит"):
+    amount = discord.ui.TextInput(label="Сумма кредита", required=True)
+
+    def __init__(self, author_id: int, item_id: str, stars: int, max_loan: int):
         super().__init__()
         self.author_id = author_id
+        self.item_id = item_id
+        self.stars = stars
+        self.max_loan = max_loan
+        self.amount.default = str(max_loan)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            item_id = self.item_id.value.strip()
-            stars = int(self.stars.value)
-            start = int(self.start_price.value)
-            hours = int(self.hours.value)
-            if start <= 0 or hours < 1 or hours > 72 or stars < 0 or stars > 5:
-                raise ValueError
+            amount = int(self.amount.value)
         except ValueError:
-            return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
-
-        end = datetime.datetime.now() + datetime.timedelta(hours=hours)
-        try:
-            async with db_transaction():
-                async with bot.db.execute(
-                    "SELECT slot FROM inventory "
-                    "WHERE user_id = ? AND item_id = ? AND stars = ? AND location = 'profile' "
-                    "LIMIT 1",
-                    (self.author_id, item_id, stars),
-                ) as c:
-                    row = await c.fetchone()
-                if not row:
-                    raise ValueError("У тебя нет такого предмета.")
-
-                cur = await bot.db.execute(
-                    "DELETE FROM inventory "
-                    "WHERE user_id = ? AND location = 'profile' AND slot = ? "
-                    "AND item_id = ? AND stars = ?",
-                    (self.author_id, row[0], item_id, stars),
-                )
-                if cur.rowcount == 0:
-                    raise ValueError("Предмет уже продан или перемещён.")
-
-                await bot.db.execute(
-                    "INSERT INTO auctions "
-                    "(seller_id, item_id, stars, start_price, current_bid, end_time) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (self.author_id, item_id, stars, start, start, end.isoformat()),
-                )
-        except ValueError as e:
-            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
-
-        await update_quest_progress(self.author_id, "sell_auction")
-        await interaction.followup.send(
-            f"✅ Лот выставлен: **{item_id}** ({stars}★), стартовая цена 🪙 {start}, "
-            f"до {end.strftime('%H:%M %d.%m')}.",
-            ephemeral=True
+            return await interaction.followup.send(
+                "❌ Сумма — число.", ephemeral=True
+            )
+        ok, message = await take_bank_loan(
+            self.author_id, self.item_id, self.stars, amount
         )
+        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await open_bank_view(interaction, self.author_id)
+
+
+async def open_bank_repay_confirm(interaction: discord.Interaction, author_id: int):
+    loan = await get_loan(author_id)
+    if not loan:
+        return await interaction.followup.send(
+            "❌ У тебя нет активного кредита.", ephemeral=True
+        )
+    total_due = loan_total_due(loan)
+    embed = BotEmbed(
+        title=f"{get_emoji('_bank')} Погашение кредита",
+        description=(
+            f"К возврату: {COIN} **{total_due}**\n"
+            f"Залог: **{loan[3]}** ({loan[4] or 0}★)\n\n"
+            "Погасить кредит и вернуть залог?"
+        ),
+        color=0x2ecc71,
+    )
+    await interaction.edit_original_response(
+        embed=embed, view=BankRepayConfirmView(author_id)
+    )
+
+
+class BankRepayConfirmView(BaseView):
+    @discord.ui.button(label="Погасить", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
+    async def btn_confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, message = await repay_bank_loan(self.author_id)
+        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await open_bank_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_bank_view(interaction, self.author_id)
+
+
+# ============================================================
+#  Аукцион
+# ============================================================
 
 async def open_auction_sell_select(
     interaction: discord.Interaction,
@@ -12415,7 +16575,8 @@ async def open_auction_sell_from_button(interaction: discord.Interaction, author
     await open_auction_sell_select(interaction, author_id)
 
 
-class AuctionSellSelectView(discord.ui.View):
+class AuctionSellSelectView(SafeView):
+    home_row = 4
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -12436,7 +16597,7 @@ class AuctionSellSelectView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
@@ -12457,12 +16618,16 @@ class AuctionSellSelectView(discord.ui.View):
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
-        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+        await open_auction_view(interaction, self.author_id)
 
 
 class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на аукцион"):
     start_price = discord.ui.TextInput(label="Стартовая цена", required=True)
+    buyout_price = discord.ui.TextInput(
+        label="Buyout (0 — без выкупа)",
+        default="0",
+        required=False,
+    )
     hours = discord.ui.TextInput(label="Длительность (часов)", default="24", required=True)
 
     def __init__(self, author_id: int, slot: int, item_id: str, stars: int):
@@ -12476,9 +16641,15 @@ class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на �
         await interaction.response.defer(ephemeral=True)
         try:
             start = int(self.start_price.value)
+            buyout_raw = (self.buyout_price.value or "").strip()
+            buyout = int(buyout_raw) if buyout_raw else 0
             hours = int(self.hours.value)
-            if start <= 0 or hours < 1 or hours > 72:
+            if start <= 0 or hours < 1 or hours > 72 or buyout < 0:
                 raise ValueError
+            if buyout and buyout <= start:
+                return await interaction.followup.send(
+                    "❌ Buyout должен быть больше стартовой цены.", ephemeral=True
+                )
         except ValueError:
             return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
 
@@ -12506,17 +16677,22 @@ class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на �
 
                 await bot.db.execute(
                     "INSERT INTO auctions "
-                    "(seller_id, item_id, stars, start_price, current_bid, end_time) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (self.author_id, self.item_id, self.stars, start, start, end.isoformat()),
+                    "(seller_id, item_id, stars, start_price, current_bid, "
+                    "buyout_price, end_time) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self.author_id, self.item_id, self.stars, start, start,
+                        buyout or None, end.isoformat(),
+                    ),
                 )
         except ValueError as e:
             return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
         await update_quest_progress(self.author_id, "sell_auction")
+        buyout_text = f", buyout 🪙 {buyout}" if buyout else ""
         await interaction.followup.send(
             f"✅ Лот выставлен: **{self.item_id}** ({self.stars}★), "
-            f"стартовая цена 🪙 {start}, до {end.strftime('%H:%M %d.%m')}.",
+            f"стартовая цена 🪙 {start}{buyout_text}, "
+            f"до {end.strftime('%H:%M %d.%m')}.",
             ephemeral=True,
         )
 
@@ -12561,7 +16737,8 @@ async def open_auction_cancel_from_button(interaction: discord.Interaction, auth
     await open_auction_cancel_select(interaction, author_id)
 
 
-class AuctionCancelSelectView(discord.ui.View):
+class AuctionCancelSelectView(SafeView):
+    home_row = 2
     def __init__(self, author_id: int, options: list[discord.SelectOption]):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -12571,7 +16748,7 @@ class AuctionCancelSelectView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def select(self, interaction: discord.Interaction):
         aid = int(interaction.data["values"][0])
@@ -12604,129 +16781,589 @@ class AuctionCancelSelectView(discord.ui.View):
         except ValueError as e:
             return await interaction.followup.send(f"❌ {e}", ephemeral=True)
 
-        msg, compensation = await grant_item_or_compensation(
+        msg, _compensation = await grant_item_or_compensation(
             self.author_id, item_id, 1, stars or 0
         )
-        if compensation:
-            await interaction.followup.send(
-                f"✅ Лот #{aid} отменён. {msg}", ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"✅ Лот #{aid} отменён, предмет возвращён в замок.", ephemeral=True
-            )
+        await interaction.followup.send(
+            f"✅ Лот #{aid} отменён. {msg}", ephemeral=True
+        )
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
-        await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
+        await open_auction_view(interaction, self.author_id)
+
+
+async def place_auction_bid(
+    user_id: int, auction_id: int, amount: int
+) -> tuple[bool, str, int | None, bool]:
+    """Ставит ставку. Возвращает (ok, message, previous_bidder, extended)."""
+    previous_bidder = None
+    extended = False
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT seller_id, current_bid, current_bidder, buyout_price, "
+                "end_time, status FROM auctions WHERE id = ?",
+                (auction_id,),
+            ) as c:
+                lot = await c.fetchone()
+            if not lot:
+                raise ValueError("Лот не найден.")
+
+            seller_id, current_bid, current_bidder, buyout_price, end_time, status = lot
+            if status != "active":
+                raise ValueError("Лот уже закрыт.")
+            end_dt = datetime.datetime.fromisoformat(end_time)
+            if end_dt < datetime.datetime.now():
+                raise ValueError("Время лота истекло.")
+            if user_id == seller_id:
+                raise ValueError("Нельзя ставить на свой лот.")
+            if amount <= (current_bid or 0):
+                raise ValueError(f"Ставка должна быть > {current_bid}.")
+            if buyout_price and amount >= buyout_price:
+                raise ValueError(
+                    "Ставка должна быть ниже Buyout. Используй «Купить сразу»."
+                )
+
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                coins_row = await c.fetchone()
+            coins = (coins_row[0] if coins_row else 0) or 0
+            if coins < amount:
+                raise ValueError("Недостаточно монет.")
+
+            if current_bidder:
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                    (current_bid, current_bidder),
+                )
+
+            cur = await bot.db.execute(
+                "UPDATE players SET coins = coins - ? "
+                "WHERE user_id = ? AND coins >= ?",
+                (amount, user_id, amount),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Недостаточно монет (баланс изменился).")
+
+            await bot.db.execute(
+                "UPDATE auctions SET current_bid = ?, current_bidder = ? WHERE id = ?",
+                (amount, user_id, auction_id),
+            )
+
+            if (end_dt - datetime.datetime.now()).total_seconds() < AUCTION_ANTI_SNIPE_SECONDS:
+                new_end = (
+                    datetime.datetime.now() + datetime.timedelta(minutes=2)
+                ).isoformat()
+                await bot.db.execute(
+                    "UPDATE auctions SET end_time = ? WHERE id = ?",
+                    (new_end, auction_id),
+                )
+                extended = True
+
+            await bot.db.execute(
+                "INSERT INTO auction_bids "
+                "(auction_id, bidder_id, amount, kind) VALUES (?, ?, ?, 'bid')",
+                (auction_id, user_id, amount),
+            )
+            previous_bidder = current_bidder
+    except ValueError as e:
+        return False, f"❌ {e}", None, False
+
+    await update_quest_progress(user_id, "bid_auction")
+
+    if previous_bidder and previous_bidder != user_id:
+        prev_user = bot.get_user(previous_bidder)
+        if prev_user:
+            try:
+                await prev_user.send(
+                    f"🏛️ Твою ставку на лоте #{auction_id} перебили: 🪙 {amount}."
+                )
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                pass
+
+    message = f"{get_emoji('_approve')} Ставка 🪙 {amount} принята. Ты лидер лота!"
+    if extended:
+        message += "\n⏱ Лот продлён на 2 минуты."
+    return True, message, previous_bidder, extended
+
+
+async def buyout_auction(user_id: int, auction_id: int) -> tuple[bool, str, int]:
+    """Выкупает лот по buyout-цене. Возвращает (ok, message, compensation)."""
+    compensation = 0
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT seller_id, item_id, stars, current_bid, current_bidder, "
+                "buyout_price, end_time, status FROM auctions WHERE id = ?",
+                (auction_id,),
+            ) as c:
+                lot = await c.fetchone()
+            if not lot:
+                raise ValueError("Лот не найден.")
+
+            (
+                seller_id, item_id, stars, current_bid, current_bidder,
+                buyout_price, end_time, status,
+            ) = lot
+            if status != "active":
+                raise ValueError("Лот уже закрыт.")
+            if datetime.datetime.fromisoformat(end_time) < datetime.datetime.now():
+                raise ValueError("Время лота истекло.")
+            if user_id == seller_id:
+                raise ValueError("Нельзя купить свой лот.")
+            if not buyout_price:
+                raise ValueError("У этого лота нет Buyout.")
+            if buyout_price <= (current_bid or 0):
+                raise ValueError("Buyout уже перекрыт текущей ставкой.")
+
+            async with bot.db.execute(
+                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                coins_row = await c.fetchone()
+            coins = (coins_row[0] if coins_row else 0) or 0
+            if coins < buyout_price:
+                raise ValueError("Недостаточно монет для выкупа.")
+
+            if current_bidder:
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                    (current_bid, current_bidder),
+                )
+
+            cur = await bot.db.execute(
+                "UPDATE players SET coins = coins - ? "
+                "WHERE user_id = ? AND coins >= ?",
+                (buyout_price, user_id, buyout_price),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Недостаточно монет (баланс изменился).")
+
+            fee = int(buyout_price * AUCTION_FEE_RATE)
+            seller_net = buyout_price - fee
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ?, "
+                "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                (seller_net, seller_net, seller_id),
+            )
+
+            try:
+                await place_items(
+                    user_id, item_id, 1, commit=False, stars=stars or 0
+                )
+            except ValueError:
+                async with bot.db.execute(
+                    "SELECT price FROM items WHERE id = ?", (item_id,)
+                ) as c:
+                    price_row = await c.fetchone()
+                compensation = max(1, int((price_row[0] if price_row else 0) or 0))
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ?, "
+                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+                    (compensation, compensation, user_id),
+                )
+
+            await bot.db.execute(
+                "UPDATE auctions SET status = 'finished', current_bid = ?, "
+                "current_bidder = ?, end_time = ? WHERE id = ?",
+                (
+                    buyout_price, user_id, datetime.datetime.now().isoformat(),
+                    auction_id,
+                ),
+            )
+            await bot.db.execute(
+                "INSERT INTO auction_bids "
+                "(auction_id, bidder_id, amount, kind) VALUES (?, ?, ?, 'buyout')",
+                (auction_id, user_id, buyout_price),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}", 0
+
+    await update_quest_progress(user_id, "bid_auction")
+    await check_achievements(user_id)
+    message = f"{get_emoji('_approve')} Лот #{auction_id} куплен за 🪙 {buyout_price}!"
+    if compensation:
+        message += f"\nНет места — начислена компенсация 🪙 {compensation}."
+    return True, message, compensation
 
 
 class AuctionBidModal(discord.ui.Modal, title="Сделать ставку"):
-    auction_id = discord.ui.TextInput(label="ID лота", required=True)
     amount = discord.ui.TextInput(label="Ставка (монеты)", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, auction_id: int, page: int = 0):
         super().__init__()
         self.author_id = author_id
+        self.auction_id = auction_id
+        self.page = page
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         try:
-            aid = int(self.auction_id.value)
-            amt = int(self.amount.value)
-            if amt <= 0:
+            amount = int(self.amount.value)
+            if amount <= 0:
                 raise ValueError
         except ValueError:
             return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
 
-        try:
-            async with db_transaction():
-                async with bot.db.execute(
-                    "SELECT seller_id, current_bid, current_bidder, end_time, status "
-                    "FROM auctions WHERE id = ?",
-                    (aid,),
-                ) as c:
-                    lot = await c.fetchone()
-                if not lot:
-                    raise ValueError("Лот не найден.")
-
-                seller_id, current_bid, current_bidder, end_time, status = lot
-                if status != "active":
-                    raise ValueError("Лот уже закрыт.")
-                if datetime.datetime.fromisoformat(end_time) < datetime.datetime.now():
-                    raise ValueError("Время лота истекло.")
-                if amt <= current_bid:
-                    raise ValueError(f"Ставка должна быть > {current_bid}.")
-                if self.author_id == seller_id:
-                    raise ValueError("Нельзя ставить на свой лот.")
-
-                async with bot.db.execute(
-                    "SELECT coins FROM players WHERE user_id = ?", (self.author_id,)
-                ) as c:
-                    coins_row = await c.fetchone()
-                coins = (coins_row[0] if coins_row else 0) or 0
-                if coins < amt:
-                    raise ValueError("Недостаточно монет.")
-
-                # Возврат предыдущему лидеру (если был)
-                if current_bidder:
-                    await bot.db.execute(
-                        "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-                        (current_bid, current_bidder),
-                    )
-
-                # Списываем у нового с защитой от гонки
-                cur = await bot.db.execute(
-                    "UPDATE players SET coins = coins - ? "
-                    "WHERE user_id = ? AND coins >= ?",
-                    (amt, self.author_id, amt),
-                )
-                if cur.rowcount == 0:
-                    raise ValueError("Недостаточно монет (баланс изменился).")
-
-                await bot.db.execute(
-                    "UPDATE auctions SET current_bid = ?, current_bidder = ? WHERE id = ?",
-                    (amt, self.author_id, aid),
-                )
-
-                # Anti-snipe: ставка в последние 2 минуты продлевает лот.
-                end_dt = datetime.datetime.fromisoformat(end_time)
-                if (end_dt - datetime.datetime.now()).total_seconds() < 120:
-                    new_end = (
-                        datetime.datetime.now() + datetime.timedelta(minutes=2)
-                    ).isoformat()
-                    await bot.db.execute(
-                        "UPDATE auctions SET end_time = ? WHERE id = ?",
-                        (new_end, aid),
-                    )
-
-                await bot.db.execute(
-                    "INSERT INTO auction_bids (auction_id, bidder_id, amount) VALUES (?, ?, ?)",
-                    (aid, self.author_id, amt),
-                )
-        except ValueError as e:
-            return await interaction.followup.send(f"❌ {e}", ephemeral=True)
-
-        await update_quest_progress(self.author_id, "bid_auction")
-
-        if current_bidder and current_bidder != self.author_id:
-            prev_user = bot.get_user(current_bidder)
-            if prev_user:
-                try:
-                    await prev_user.send(
-                        f"🏛️ Твою ставку на лоте #{aid} перебили: 🪙 {amt}."
-                    )
-                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                    pass
-
-        await interaction.followup.send(f"✅ Ставка 🪙 {amt} принята. Ты лидер лота!", ephemeral=True)
+        ok, message, _previous, _extended = await place_auction_bid(
+            self.author_id, self.auction_id, amount
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await open_auction_view(
+                interaction, self.author_id, self.page, self.auction_id
+            )
         
+async def build_auction_history_embed(auction_id: int) -> discord.Embed:
+    async with bot.db.execute(
+        "SELECT a.seller_id, a.item_id, a.stars, a.current_bid, "
+        "a.current_bidder, a.buyout_price, a.end_time, a.status, "
+        "i.name, i.emoji "
+        "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+        "WHERE a.id = ?",
+        (auction_id,),
+    ) as c:
+        lot = await c.fetchone()
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} История лота #{auction_id}",
+        color=0xf1c40f,
+    )
+    if not lot:
+        embed.description = "Лот не найден."
+        return embed
+
+    (
+        seller_id, item_id, stars, current_bid, current_bidder,
+        buyout_price, end_time, status, name, item_emoji,
+    ) = lot
+    embed.description = (
+        f"{item_emoji or '📦'} **{name or item_id}** ({stars}★)\n"
+        f"Продавец: <@{seller_id}> · Статус: **{status}**"
+    )
+
+    async with bot.db.execute(
+        "SELECT bidder_id, amount, COALESCE(kind, 'bid'), timestamp "
+        "FROM auction_bids WHERE auction_id = ? ORDER BY id DESC LIMIT 10",
+        (auction_id,),
+    ) as c:
+        bids = await c.fetchall()
+
+    if bids:
+        lines = []
+        for bidder_id, amount, kind, timestamp in bids:
+            icon = get_emoji("_approve") if kind == "buyout" else get_emoji("_coin")
+            kind_name = "выкуп" if kind == "buyout" else "ставка"
+            lines.append(
+                f"{icon} <@{bidder_id}> — 🪙 **{amount}** ({kind_name})\n"
+                f"`{str(timestamp)[:16]}`"
+            )
+        embed.add_field(name="Последние ставки", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="Последние ставки", value="Ставок пока нет.", inline=False)
+
+    embed.add_field(
+        name="Итог",
+        value=(
+            f"Текущая ставка: 🪙 **{current_bid}**\n"
+            f"Лидер: {f'<@{current_bidder}>' if current_bidder else 'нет'}\n"
+            f"Buyout: {f'🪙 **{buyout_price}**' if buyout_price else 'нет'}\n"
+            f"До: `{str(end_time)[:16]}`"
+        ),
+        inline=False,
+    )
+    return embed
+
+
+async def open_auction_buyout_confirm(
+    interaction: discord.Interaction,
+    author_id: int,
+    auction_id: int,
+    page: int = 0,
+):
+    async with bot.db.execute(
+        "SELECT seller_id, item_id, stars, current_bid, buyout_price, "
+        "end_time, status, i.name, i.emoji "
+        "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+        "WHERE a.id = ?",
+        (auction_id,),
+    ) as c:
+        lot = await c.fetchone()
+
+    if not lot:
+        return await interaction.followup.send("❌ Лот не найден.", ephemeral=True)
+
+    (
+        seller_id, item_id, stars, current_bid, buyout_price,
+        end_time, status, name, item_emoji,
+    ) = lot
+    if status != "active" or not buyout_price:
+        return await interaction.followup.send(
+            "❌ У этого лота нет доступного Buyout.", ephemeral=True
+        )
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} Купить сразу",
+        description=(
+            f"{item_emoji or '📦'} **{name or item_id}** ({stars}★)\n"
+            f"Продавец: <@{seller_id}>\n\n"
+            f"Выкупить за {COIN} **{buyout_price}**?"
+        ),
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=AuctionBuyoutConfirmView(author_id, auction_id, page),
+    )
+
+
+class AuctionBuyoutConfirmView(BaseView):
+    def __init__(self, author_id: int, auction_id: int, page: int = 0):
+        super().__init__(author_id)
+        self.auction_id = auction_id
+        self.page = page
+
+    @discord.ui.button(label="Купить", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
+    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, message, _compensation = await buyout_auction(
+            self.author_id, self.auction_id
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        if ok:
+            await open_auction_view(interaction, self.author_id, self.page, None)
+
+    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_auction_view(interaction, self.author_id, self.page, None)
+
+
+class AuctionView(BaseView):
+    def __init__(
+        self,
+        author_id: int,
+        page: int,
+        total_pages: int,
+        lots: list,
+        selected_lot: int | None = None,
+        selected_buyout: int | None = None,
+    ):
+        super().__init__(author_id)
+        self.page = page
+        self.total_pages = total_pages
+        self.lots = lots
+        self.selected_lot = selected_lot
+        self.selected_buyout = selected_buyout
+
+        options = []
+        for lot in lots:
+            aid, _seller, item_id, stars, current_bid, _bidder, buyout, _end, name, emoji = lot
+            label = f"#{aid} {name or item_id} ({stars}★) — {current_bid}"
+            if buyout:
+                label += f" · B {buyout}"
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(aid),
+                    emoji=parse_emoji_safe(emoji),
+                    default=str(aid) == str(selected_lot),
+                )
+            )
+        if options:
+            self.add_item(
+                make_select("Выбери лот", options, self.select_lot, row=0)
+            )
+
+        self.btn_bid.disabled = selected_lot is None
+        self.btn_buyout.disabled = selected_lot is None or not selected_buyout
+        self.btn_history.disabled = selected_lot is None
+
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.",
+                emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary,
+                row=3,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.",
+                emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary,
+                row=3,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+    async def select_lot(self, interaction: discord.Interaction):
+        lot_id = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        await open_auction_view(interaction, self.author_id, self.page, lot_id)
+
+    @discord.ui.button(label="Сделать ставку", emoji=get_emoji("_coin"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_bid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.selected_lot is None:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери лот.", ephemeral=True
+            )
+        await interaction.response.send_modal(
+            AuctionBidModal(self.author_id, self.selected_lot, self.page)
+        )
+
+    @discord.ui.button(label="Купить сразу", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success, row=1)
+    async def btn_buyout(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.selected_lot is None:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери лот.", ephemeral=True
+            )
+        await interaction.response.defer()
+        await open_auction_buyout_confirm(
+            interaction, self.author_id, self.selected_lot, self.page
+        )
+
+    @discord.ui.button(label="История", emoji=get_emoji("_storyquests"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.selected_lot is None:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери лот.", ephemeral=True
+            )
+        embed = await build_auction_history_embed(self.selected_lot)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Выставить лот", emoji=get_emoji("_sell"), style=discord.ButtonStyle.success, row=2)
+    async def btn_sell(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_auction_sell_from_button(interaction, self.author_id)
+
+    @discord.ui.button(label="Мои лоты", emoji=get_emoji("_market"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_my_lots(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_auction_cancel_from_button(interaction, self.author_id)
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=4)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(title=f"{get_emoji('_clan')} Социум", description="Выбери действие:", color=0xe74c3c)
+        await interaction.edit_original_response(
+            embed=embed, view=SocialView(self.author_id)
+        )
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_auction_view(
+            interaction, self.author_id, self.page - 1, None
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_auction_view(
+            interaction, self.author_id, self.page + 1, None
+        )
+
+
+async def open_auction_view(
+    interaction: discord.Interaction,
+    author_id: int,
+    page: int = 0,
+    selected_lot: int | None = None,
+):
+    now = datetime.datetime.now()
+    now_iso = now.isoformat()
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM auctions WHERE status = 'active' AND end_time > ?",
+        (now_iso,),
+    ) as c:
+        total_lots = (await c.fetchone())[0] or 0
+
+    total_pages = max(1, (total_lots + AUCTION_PAGE_SIZE - 1) // AUCTION_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+
+    async with bot.db.execute(
+        "SELECT a.id, a.seller_id, a.item_id, a.stars, a.current_bid, "
+        "a.current_bidder, a.buyout_price, a.end_time, i.name, i.emoji "
+        "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+        "WHERE a.status = 'active' AND a.end_time > ? "
+        "ORDER BY a.end_time ASC LIMIT ? OFFSET ?",
+        (now_iso, AUCTION_PAGE_SIZE, page * AUCTION_PAGE_SIZE),
+    ) as c:
+        lots = await c.fetchall()
+
+    selected = None
+    selected_buyout = None
+    if selected_lot is not None:
+        for lot in lots:
+            if lot[0] == selected_lot:
+                selected = lot
+                selected_buyout = lot[6]
+                break
+        if selected is None:
+            selected_lot = None
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} Аукцион",
+        description=(
+            f"Страница {page + 1}/{total_pages} · лотов: **{total_lots}**\n"
+            "Выбери лот в списке, затем сделай ставку, посмотри историю "
+            "или выкупи сразу."
+        ),
+        color=0xf1c40f,
+    )
+
+    if lots:
+        lines = []
+        for lot in lots:
+            aid, _seller, item_id, stars, current_bid, bidder, buyout, end_time, name, emoji = lot
+            leader = f" · <@{bidder}>" if bidder else ""
+            buyout_str = f" · B 🪙 {buyout}" if buyout else ""
+            lines.append(
+                f"#{aid} {emoji or '📦'} **{name or item_id}** ({stars}★) — "
+                f"🪙 {current_bid}{leader}{buyout_str}"
+            )
+        embed.add_field(name="Лоты", value="\n".join(lines), inline=False)
+
+        if selected:
+            aid, seller_id, item_id, stars, current_bid, bidder, buyout, end_time, name, emoji = selected
+            leader = f"<@{bidder}>" if bidder else "нет ставок"
+            try:
+                end_dt = datetime.datetime.fromisoformat(end_time)
+                minutes = max(0, int((end_dt - now).total_seconds() // 60))
+                end_str = end_dt.strftime("%d.%m %H:%M")
+            except ValueError:
+                minutes = 0
+                end_str = str(end_time)
+            embed.add_field(
+                name=f"Выбранный лот #{aid}",
+                value=(
+                    f"{emoji or '📦'} **{name or item_id}** ({stars}★)\n"
+                    f"Продавец: <@{seller_id}>\n"
+                    f"Ставка: 🪙 **{current_bid}** · {leader}\n"
+                    f"Buyout: {f'🪙 **{buyout}**' if buyout else 'нет'}\n"
+                    f"До: {end_str} (≈{minutes} мин.)"
+                ),
+                inline=False,
+            )
+    else:
+        embed.description = "Активных лотов нет. Можно выставить свой лот."
+
+    embed.set_footer(text="Buyout — фиксированная цена, ставки должны быть ниже неё.")
+    await interaction.edit_original_response(
+        embed=embed,
+        view=AuctionView(
+            author_id, page, total_pages, lots, selected_lot, selected_buyout
+        ),
+    )
+
+
 # ============================================================
 #  📅 ЗАДАНИЯ
 # ============================================================
 
 class QuestsView(BaseView):
+    home_row = 2
     def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
@@ -12749,7 +17386,8 @@ class QuestsView(BaseView):
             return
         embed = BotEmbed(title="🎁 Забрать награду", description="Выбери задание:", color=0x3498db)
         await interaction.edit_original_response(
-            embed=embed, view=ClaimQuestSelectView(self.author_id, options)
+            embed=embed,
+            view=ClaimQuestSelectView(self.author_id, options, self.return_to),
         )
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
@@ -12766,10 +17404,16 @@ class QuestsView(BaseView):
             await self.back_to_main(interaction)
 
 
-class ClaimQuestSelectView(discord.ui.View):
-    def __init__(self, author_id: int, options: list[discord.SelectOption]):
+class ClaimQuestSelectView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        options: list[discord.SelectOption],
+        return_to: str = "main",
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.return_to = return_to
         self.add_item(make_select("Выбери задание", options, self.quest_select, row=0))
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
@@ -12797,27 +17441,34 @@ class ClaimQuestSelectView(discord.ui.View):
         await bot.db.execute(
             "UPDATE players SET daily_quest_claimed = ?, gems = gems + ?, coins = coins + ?, "
             "total_gems_earned = total_gems_earned + ?, "
-            "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
+            "total_coins_earned = total_coins_earned + ?, "
+            "lifetime_production = lifetime_production + ? WHERE user_id = ?",
             (json.dumps(claimed), reward_gems, reward_coins,
-             reward_gems, reward_coins, user_id)
+             reward_gems, reward_coins, reward_coins, user_id)
         )
-        await bot.db.commit()
-        await add_season_xp(user_id, 20)
+        await commit_if_needed()
+        await add_season_xp(user_id, 20, interaction.guild_id)
         embed = BotEmbed(
             title="🎁 Награда получена",
             description=f"💎 **{reward_gems}** гемов и 🪙 **{reward_coins}** монет за «{desc}»!",
             color=0x2ecc71,
         )
-        await interaction.edit_original_response(embed=embed, view=QuestsView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=QuestsView(self.author_id, self.return_to)
+        )
 
     async def fail(self, interaction: discord.Interaction, msg: str):
         embed = BotEmbed(title="❌ Ошибка", description=msg, color=0xe74c3c)
-        await interaction.edit_original_response(embed=embed, view=QuestsView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=QuestsView(self.author_id, self.return_to)
+        )
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_quests_embed(interaction)
-        await interaction.edit_original_response(embed=embed, view=QuestsView(self.author_id))
+        await interaction.edit_original_response(
+            embed=embed, view=QuestsView(self.author_id, self.return_to)
+        )
 
 
 # ============================================================
@@ -12927,7 +17578,8 @@ async def open_shop_buy_select(
     )
 
 
-class ShopBuySelectView(discord.ui.View):
+class ShopBuySelectView(SafeView):
+    home_row = 3
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -12963,7 +17615,7 @@ class ShopBuySelectView(discord.ui.View):
             description=f"{item[2]} **{item[0]}** — 🪙 {item[1]} за штуку.\nВыбери количество:",
             color=0xf1c40f
         )
-        await interaction.edit_original_response(embed=embed, view=BuyItemQuantityView(self.author_id, item_id))
+        await interaction.edit_original_response(embed=embed, view=BuyItemQuantityView(self.author_id, item_id, self.page))
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -12987,11 +17639,13 @@ class ShopBuySelectView(discord.ui.View):
         await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
 
 
-class BuyItemQuantityView(discord.ui.View):
-    def __init__(self, author_id: int, item_id: str):
+class BuyItemQuantityView(SafeView):
+    home_row = 2
+    def __init__(self, author_id: int, item_id: str, page: int = 0):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.item_id = item_id
+        self.page = page
         
         options = [
             discord.SelectOption(
@@ -13013,7 +17667,7 @@ class BuyItemQuantityView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await self.check_owner(interaction)
 
     async def quantity_select(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -13060,7 +17714,7 @@ class BuyItemQuantityView(discord.ui.View):
             await bot.db.rollback()
             return await self.fail(interaction, f"❌ {e}")
 
-        await bot.db.commit()
+        await commit_if_needed()
 
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
@@ -13069,6 +17723,9 @@ class BuyItemQuantityView(discord.ui.View):
         await update_quest_progress(user_id, "buy_10", qty)
         await update_quest_progress(user_id, "buy_25", qty)
         unlocked = await check_achievements(user_id)
+        onboarding = None
+        if self.item_id.endswith("_gen"):
+            onboarding = await complete_onboarding_step(user_id, "buy_generator")
 
         coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
         emoji = default_emoji or "⚙️" 
@@ -13079,12 +17736,17 @@ class BuyItemQuantityView(discord.ui.View):
                 f"\n📦 {to_profile} в замок, {to_storage} в хранилище, "
                 f"{to_temp} во временное хранилище."
             )
+        if onboarding:
+            msg += (
+                f"\n🚀 Первый шаг: **{ONBOARDING_STEPS['buy_generator'][0]}** "
+                f"+🪙 {onboarding['coins']}."
+            )
         if unlocked:
             msg += "\n🏆 " + ", ".join(f"{e} {n}" for e, n, _ in unlocked)
             
         embed = BotEmbed(title="🛒 Покупка", description=msg, color=0x2ecc71)
         embed = await fix_embed_emojis(embed)
-        await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
+        await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, self.page))
         
         # Клановый квест
         clan = await get_clan(user_id)
@@ -13095,7 +17757,7 @@ class BuyItemQuantityView(discord.ui.View):
 
     async def fail(self, interaction: discord.Interaction, msg: str):
         embed = BotEmbed(title="❌ Ошибка", description=msg, color=0xe74c3c)
-        await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, 0))
+        await interaction.edit_original_response(embed=embed, view=ShopView(self.author_id, self.page))
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -13103,7 +17765,7 @@ class BuyItemQuantityView(discord.ui.View):
             "SELECT id, name, price, emoji FROM items WHERE buyable = 1 ORDER BY price ASC"
         ) as c:
             rows = await c.fetchall()
-        await open_shop_buy_select(interaction, self.author_id, rows, 0)
+        await open_shop_buy_select(interaction, self.author_id, rows, self.page)
 
 
 # ============================================================
@@ -13111,6 +17773,7 @@ class BuyItemQuantityView(discord.ui.View):
 # ============================================================
 
 class UpgradesView(BaseView):
+    home_row = 2
     def __init__(self, author_id: int, page: int):
         super().__init__(author_id)
         self.page = page
@@ -13183,7 +17846,7 @@ class UpgradesView(BaseView):
             await interaction.followup.send("❌ Улучшений нет.", ephemeral=True)
             return
             
-        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0)
+        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, 0, self.page)
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -13197,7 +17860,10 @@ class UpgradesView(BaseView):
         self.page = min(total - 1, self.page + 1)
         await interaction.edit_original_response(embed=embed, view=self)
 
-async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: int, rows: list, owned: set, page: int):
+async def open_upgrades_buy_select(
+    interaction: discord.Interaction, author_id: int, rows: list, owned: set,
+    page: int, source_page: int = 0,
+):
     total = len(rows)
     total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -13209,6 +17875,10 @@ async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: 
         current_grid_size = (row[0] if row else START_GRID) or START_GRID
 
     options = []
+    owned_status_rank = max(
+        (status_rank(item) for item in owned if item in STATUS_BONUSES),
+        default=-1,
+    )
     for gid, name, price, emoji, currency, size in chunk:
         cur = "🪙" if currency == "coins" else "💎"
         
@@ -13218,6 +17888,12 @@ async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: 
         if size > 0 and size <= current_grid_size:
             disabled = True
             label_suffix = f" (у вас {current_grid_size})"
+        elif gid in STATUS_BONUSES and status_rank(gid) <= owned_status_rank:
+            disabled = True
+            if status_rank(gid) == owned_status_rank:
+                label_suffix = " ✅"
+            else:
+                label_suffix = " (уже есть выше)"
         elif gid in owned:
             disabled = True
             label_suffix = " ✅"
@@ -13236,16 +17912,21 @@ async def open_upgrades_buy_select(interaction: discord.Interaction, author_id: 
     )
     await interaction.edit_original_response(
         embed=embed,
-        view=UpgradesBuySelectView(author_id, options, page, total_pages)
+        view=UpgradesBuySelectView(author_id, options, page, total_pages, source_page)
     )
 
 
-class UpgradesBuySelectView(discord.ui.View):
-    def __init__(self, author_id: int, options: list[discord.SelectOption], page: int = 0, total_pages: int = 1):
+class UpgradesBuySelectView(SafeView):
+    home_row = 3
+    def __init__(
+        self, author_id: int, options: list[discord.SelectOption], page: int = 0,
+        total_pages: int = 1, source_page: int = 0,
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.page = page
         self.total_pages = total_pages
+        self.source_page = source_page
         self.add_item(make_select("Выбери улучшение...", options, self.upgrade_select, row=0))
 
         if total_pages > 1:
@@ -13319,6 +18000,26 @@ class UpgradesBuySelectView(discord.ui.View):
                 await interaction.followup.send(f"❌ **{name}** уже куплено.", ephemeral=True)
                 return
 
+        if category == "status":
+            async with bot.db.execute(
+                "SELECT upgrade_id FROM player_upgrades WHERE user_id = ? "
+                "AND upgrade_id IN ('vip','gold','platinum','diamond')",
+                (user_id,),
+            ) as c:
+                owned_statuses = [r[0] for r in await c.fetchall()]
+            owned_rank = max(
+                (status_rank(item) for item in owned_statuses),
+                default=-1,
+            )
+            if status_rank(upgrade_id) <= owned_rank:
+                best = max(owned_statuses, key=status_rank)
+                await interaction.followup.send(
+                    f"❌ У тебя уже есть статус **{best}**. "
+                    "Статусы не стакаются: покупай только следующий по линейке.",
+                    ephemeral=True,
+                )
+                return
+
         async with bot.db.execute(
             f"SELECT {currency} FROM players WHERE user_id = ?", (user_id,)
         ) as c:
@@ -13347,7 +18048,7 @@ class UpgradesBuySelectView(discord.ui.View):
                 "DELETE FROM player_upgrades WHERE user_id = ? AND upgrade_id = ?",
                 (user_id, upgrade_id),
             )
-            await bot.db.commit()
+            await commit_if_needed()
             await interaction.followup.send(
                 "❌ Недостаточно средств (баланс изменился).", ephemeral=True
             )
@@ -13358,13 +18059,12 @@ class UpgradesBuySelectView(discord.ui.View):
                 "UPDATE players SET grid_size = ? WHERE user_id = ?", (new_grid_size, user_id)
             )
         elif category == "status":
-            bonuses = {"vip": 0.15, "gold": 0.25, "platinum": 0.35, "diamond": 0.45}
             async with bot.db.execute(
                 "SELECT upgrade_id FROM player_upgrades WHERE user_id = ? AND upgrade_id IN "
                 "('vip','gold','platinum','diamond')", (user_id,)
             ) as c:
                 statuses = [r[0] for r in await c.fetchall()]
-            max_bonus = max(bonuses[s] for s in statuses) if statuses else 0.0
+            max_bonus = best_status_bonus(statuses)
             await bot.db.execute(
                 "UPDATE players SET income_bonus = ? WHERE user_id = ?", (max_bonus, user_id)
             )
@@ -13381,7 +18081,7 @@ class UpgradesBuySelectView(discord.ui.View):
                         except discord.HTTPException:
                             pass
 
-        await bot.db.commit()
+        await commit_if_needed()
         unit = "🪙" if currency == "coins" else "💎"
         await interaction.followup.send(f"✅ Куплено **{emoji} {name}** за {unit} {price}!", ephemeral=True)
 
@@ -13403,7 +18103,7 @@ class UpgradesBuySelectView(discord.ui.View):
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
             owned = {r[0] for r in await c.fetchall()}
-        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, self.page - 1)
+        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, self.page - 1, self.source_page)
 
     async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -13423,12 +18123,14 @@ class UpgradesBuySelectView(discord.ui.View):
             "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (interaction.user.id,)
         ) as c:
             owned = {r[0] for r in await c.fetchall()}
-        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, self.page + 1)
+        await open_upgrades_buy_select(interaction, self.author_id, rows, owned, self.page + 1, self.source_page)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed, _ = await build_upgrades_page(interaction, 0)
-        await interaction.edit_original_response(embed=embed, view=UpgradesView(self.author_id, 0))
+        embed, _ = await build_upgrades_page(interaction, self.source_page)
+        await interaction.edit_original_response(
+            embed=embed, view=UpgradesView(self.author_id, self.source_page)
+        )
 
 # ============================================================
 #  Личные настройки
@@ -13572,9 +18274,10 @@ class CustomizationHubView(BaseView):
 class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
     confirm = discord.ui.TextInput(label="Введите СБРОСИТЬ", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, main_message=None):
         super().__init__()
         self.author_id = author_id
+        self.main_message = main_message
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -13619,6 +18322,7 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                         grid_size = 9, storage_size = 36, income_bonus = 0.0,
                         total_crafts = 0, total_successes = 0,
                         total_coins_earned = 0, total_gems_earned = 0,
+                        lifetime_production = 0,
                         last_collected = CURRENT_TIMESTAMP,
                         last_gem_collected = CURRENT_TIMESTAMP,
                         daily_quest_date = NULL,
@@ -13638,17 +18342,15 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                     "craft_log", "craft_pity", "star_pity",
                     "user_pets_v2", "autocollectors",
                     "advent_progress", "advent_state", "bank_deposits",
-                    "bank_history", "user_notifications", "player_quests",
+                    "bank_loans", "bank_history", "user_notifications", "player_quests",
                     "user_cosmetics", "tax_log", "raid_cooldowns",
-                    "season_progress",
+                    "duel_cooldowns", "season_progress", "market_orders",
+                    "onboarding_progress",
                 ):
                     await bot.db.execute(
                         f"DELETE FROM {table} WHERE user_id = ?", (self.author_id,)
                     )
 
-                await bot.db.execute(
-                    "DELETE FROM market_listings WHERE seller_id = ?", (self.author_id,)
-                )
                 await bot.db.execute(
                     "DELETE FROM duel_history WHERE winner_id = ? OR loser_id = ?",
                     (self.author_id, self.author_id),
@@ -13667,6 +18369,14 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
             "✅ Прогресс сброшен. Замок, инвентарь, питомцы и квесты очищены.",
             ephemeral=True,
         )
+        if self.main_message:
+            embed = await build_user_profile_embed(interaction)
+            try:
+                await self.main_message.edit(
+                    embed=embed, view=UserProfileView(self.author_id)
+                )
+            except discord.HTTPException:
+                pass
 
 
 class UserSettingsView(BaseView):
@@ -13688,7 +18398,9 @@ class UserSettingsView(BaseView):
 
     @discord.ui.button(label="Сбросить прогресс", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=1)
     async def btn_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(UserResetModal(self.author_id))
+        await interaction.response.send_modal(
+            UserResetModal(self.author_id, interaction.message)
+        )
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -13696,26 +18408,6 @@ class UserSettingsView(BaseView):
         embed = await build_user_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=UserProfileView(self.author_id))
 
-class UserColorModal(discord.ui.Modal, title="Смена цвета профиля"):
-    color = discord.ui.TextInput(label="HEX-код цвета (например, #FF0000)", required=True)
-
-    def __init__(self, author_id: int):
-        super().__init__()
-        self.author_id = author_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        color_str = self.color.value.strip()
-        
-        # Проверка формата
-        try:
-            if not color_str.startswith("#"): color_str = "#" + color_str
-            color_int = int(color_str.replace("#", ""), 16)
-            # В базе пока нет поля для цвета, сохраним в guild_settings (или добавим колонку в players).
-            # Для простоты просто отправим уведомление, что функция в разработке (чтобы не ломать БД).
-            await interaction.followup.send(f"🎨 Цвет **{color_str}** сохранён! (Функция отображения будет добавлена позже).", ephemeral=True)
-        except ValueError:
-            await interaction.followup.send("❌ Неверный формат HEX-кода.", ephemeral=True)
 # ============================================================
 #  🏆 ДОСТИЖЕНИЯ
 # ============================================================
@@ -13738,7 +18430,11 @@ class AchievementsView(BaseView):
         self.add_item(nxt)
 
     async def back(self, interaction: discord.Interaction):
-        await self.back_to_main(interaction)
+        await interaction.response.defer()
+        embed = await build_user_profile_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=UserProfileView(self.author_id)
+        )
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -13753,24 +18449,17 @@ class AchievementsView(BaseView):
         await interaction.edit_original_response(embed=embed, view=self)
 
 
-class StatsView(BackOnlyView):
-    pass
-
-
 # ============================================================
 #  🛡️ АДМИН-ПАНЕЛЬ
 # ============================================================
 
-class AdminPanelView(discord.ui.View):
+class AdminPanelView(AdminView):
     def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Эта панель открыта не тобой.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Начислить", emoji=BOT_BTN_EMOJIS.get("_buy", "➕"), style=discord.ButtonStyle.success, row=0)
     async def grant(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -13802,6 +18491,12 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Добавить генератор", emoji=BOT_BTN_EMOJIS.get("_upgrades", "⚙️"), style=discord.ButtonStyle.secondary, row=2)
     async def add_gen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_global_owner(interaction):
+            await interaction.response.send_message(
+                "❌ Генераторы может добавлять только владелец бота.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(AddGeneratorModal(self.author_id))
 
     @discord.ui.button(label="Настройки", emoji=BOT_BTN_EMOJIS.get("_settings", "🔧"), style=discord.ButtonStyle.secondary, row=2)
@@ -13815,22 +18510,201 @@ class AdminPanelView(discord.ui.View):
         await interaction.response.defer()
         await open_admin_logs(interaction, self.author_id, page=0)
 
+    @discord.ui.button(label="Бэкап", emoji=BOT_BTN_EMOJIS.get("_storage", "💾"), style=discord.ButtonStyle.secondary, row=3)
+    async def backup_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_global_owner(interaction):
+            await interaction.response.send_message(
+                "❌ Ручной бэкап может делать только владелец бота.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        path = await bot.backup_database("manual")
+        if path:
+            await interaction.followup.send(
+                f"✅ Бэкап создан: `{path.name}`.", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ Не удалось создать бэкап (нет БД или активная транзакция).",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Игрок", emoji=BOT_BTN_EMOJIS.get("_profile", "👤"), style=discord.ButtonStyle.primary, row=4)
+    async def player_card(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="👤 Карточка игрока",
+            description="Выбери игрока в списке — покажу банк, клан, сезон и ордера.",
+            color=0x3498db,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPlayerSelectView(self.author_id)
+        )
+
     @discord.ui.button(label="Ещё", emoji=BOT_BTN_EMOJIS.get("_forward", "➡️"), style=discord.ButtonStyle.primary, row=4)
     async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="🛡️ Панель администратора — страница 2", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelPage2(self.author_id))
 
-class AdminPanelPage2(discord.ui.View):
+
+async def build_admin_player_card(user_id: int) -> discord.Embed:
+    async with bot.db.execute(
+        "SELECT coins, gems, prestige_points, title, grid_size, "
+        "lifetime_production, last_collected, last_tax_time "
+        "FROM players WHERE user_id = ?",
+        (user_id,),
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return BotEmbed(
+            title="❌ Игрок не найден",
+            description=f"В базе нет профиля <@{user_id}>.",
+            color=0xe74c3c,
+        )
+
+    coins, gems, points, title, grid, lifetime, last_col, last_tax = row
+    embed = BotEmbed(
+        title=f"👤 Карточка игрока — {title or 'Новичок'}",
+        description=f"<@{user_id}> · `{user_id}`",
+        color=0x3498db,
+    )
+    embed.add_field(
+        name="Баланс",
+        value=f"🪙 {format_price(coins or 0)} | 💎 {format_price(gems or 0)}",
+        inline=False,
+    )
+    embed.add_field(
+        name="Прогресс",
+        value=(
+            f"Престиж: **{points or 0}** · Сетка: **{grid or START_GRID}**\n"
+            f"Всего произведено: **{format_price(lifetime or 0)}**"
+        ),
+        inline=False,
+    )
+
+    async with bot.db.execute(
+        "SELECT c.name, cm.role FROM clan_members cm "
+        "JOIN clans c ON c.id = cm.clan_id WHERE cm.user_id = ?",
+        (user_id,),
+    ) as c:
+        clan_row = await c.fetchone()
+    embed.add_field(
+        name="Клан",
+        value=(
+            f"**{clan_row[0]}** ({clan_row[1]})"
+            if clan_row
+            else "не состоит в клане"
+        ),
+        inline=True,
+    )
+
+    async with bot.db.execute(
+        "SELECT COUNT(*) FROM market_orders WHERE user_id = ? AND status = 'active'",
+        (user_id,),
+    ) as c:
+        orders = (await c.fetchone())[0] or 0
+    async with bot.db.execute(
+        "SELECT amount, end_time FROM bank_deposits WHERE user_id = ?", (user_id,)
+    ) as c:
+        deposit = await c.fetchone()
+    async with bot.db.execute(
+        "SELECT amount, due_time FROM bank_loans WHERE user_id = ? "
+        "AND COALESCE(status, 'active') = 'active'",
+        (user_id,),
+    ) as c:
+        loan = await c.fetchone()
+    embed.add_field(
+        name="Обязательства",
+        value=(
+            f"Ордера: **{orders}**\n"
+            f"Вклад: {'**' + format_price(deposit[0]) + '**' if deposit else 'нет'}\n"
+            f"Кредит: {'**' + format_price(loan[0]) + '**' if loan else 'нет'}"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Активность",
+        value=f"Сбор: `{str(last_col)[:16]}`\nНалог: `{str(last_tax)[:16]}`",
+        inline=False,
+    )
+    return embed
+
+
+class AdminPlayerSelectView(AdminView):
+    home_row = 2
+
+    def __init__(self, author_id: int):
+        super().__init__(author_id, timeout=300)
+        select = discord.ui.UserSelect(
+            placeholder="Найди игрока по имени...",
+            min_values=1,
+            max_values=1,
+            row=0,
+        )
+        select.callback = self.select_player
+        self.add_item(select)
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=1,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def select_player(self, interaction: discord.Interaction):
+        target_id = int(interaction.data["values"][0])
+        await interaction.response.defer()
+        embed = await build_admin_player_card(target_id)
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPlayerCardView(self.author_id, target_id)
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="🛡️ Панель администратора",
+            description="Выбери действие кнопками ниже.",
+            color=0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPanelView(self.author_id)
+        )
+
+
+class AdminPlayerCardView(AdminView):
+    def __init__(self, author_id: int, target_id: int):
+        super().__init__(author_id, timeout=300)
+        self.target_id = target_id
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_admin_player_card(self.target_id)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="👤 Карточка игрока",
+            description="Выбери игрока в списке.",
+            color=0x3498db,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPlayerSelectView(self.author_id)
+        )
+
+
+class AdminPanelPage2(AdminView):
     def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Эта панель открыта не тобой.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Питомцы", emoji=BOT_BTN_EMOJIS.get("_pets", "🐾"), style=discord.ButtonStyle.primary, row=0)
     async def btn_pets(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -13890,19 +18764,49 @@ class AdminPanelPage2(discord.ui.View):
         embed = BotEmbed(title="⚙️ Прочее", description="Уведомления и достижения:", color=0x808080)
         await interaction.edit_original_response(embed=embed, view=AdminMiscView(self.author_id))
 
+    @discord.ui.button(label="Сезон", emoji=get_emoji("_advent"), style=discord.ButtonStyle.primary, row=3)
+    async def btn_season_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        settings = await get_settings(interaction.guild_id)
+        enabled = settings.get("battlepass_enabled", True)
+        await interaction.edit_original_response(
+            embed=build_admin_season_embed(enabled),
+            view=AdminSeasonView(self.author_id, enabled),
+        )
+
+    @discord.ui.button(label="Биржа", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=3)
+    async def btn_market_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_admin_market_embed(),
+            view=AdminMarketView(self.author_id),
+        )
+
+    @discord.ui.button(label="Перерождение", emoji=get_emoji("_rebirth"), style=discord.ButtonStyle.primary, row=3)
+    async def btn_prestige_admin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title=f"{get_emoji('_rebirth')} Перерождение",
+            description="Выдай или сбрось очки престижа игроку.",
+            color=0x9b59b6,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPrestigeView(self.author_id)
+        )
+
     @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=4)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="🛡️ Панель администратора", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
 
-class AdminProgressView(discord.ui.View):
+class AdminProgressView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Сбросить стрик дейли", emoji=get_emoji("_swap"), style=discord.ButtonStyle.danger, row=0)
     async def reset_streak(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -13922,13 +18826,13 @@ class AdminProgressView(discord.ui.View):
         embed = BotEmbed(title="🛡️ Панель администратора — страница 2", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelPage2(self.author_id))
 
-class AdminMiscView(discord.ui.View):
+class AdminMiscView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Сбросить кулдаун ЛС", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary, row=0)
     async def reset_notif(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -13947,6 +18851,360 @@ class AdminMiscView(discord.ui.View):
         await interaction.response.defer()
         embed = BotEmbed(title="🛡️ Панель администратора — страница 2", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelPage2(self.author_id))
+
+
+def build_admin_season_embed(enabled: bool) -> discord.Embed:
+    status = "включён" if enabled else "отключён"
+    color = 0x2ecc71 if enabled else 0xe74c3c
+    embed = BotEmbed(
+        title=f"{get_emoji('_advent')} Управление баттлпассом",
+        description=(
+            f"Статус: **{status}**\n\n"
+            "Отключение скрывает сезонный экран и блокирует начисление XP "
+            "за действия в этом сервере. Прогресс игроков сохраняется."
+        ),
+        color=color,
+    )
+    return embed
+
+
+class AdminSeasonView(AdminView):
+    def __init__(self, author_id: int, enabled: bool, timeout: int = 300):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.enabled = enabled
+        self.btn_toggle.label = (
+            "Выключить баттлпасс" if enabled else "Включить баттлпасс"
+        )
+        self.btn_toggle.style = (
+            discord.ButtonStyle.danger if enabled else discord.ButtonStyle.success
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await super().interaction_check(interaction)
+
+    @discord.ui.button(label="Выключить баттлпасс", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.danger, row=0)
+    async def btn_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        settings = await get_settings(interaction.guild_id)
+        new_value = not settings.get("battlepass_enabled", True)
+        await save_setting(interaction.guild_id, "battlepass_enabled", int(new_value), actor_id=interaction.user.id)
+        await log_admin_action(
+            self.author_id,
+            self.author_id,
+            "battlepass_toggle",
+            f"enabled={int(new_value)}",
+        )
+        await interaction.edit_original_response(
+            embed=build_admin_season_embed(new_value),
+            view=AdminSeasonView(self.author_id, new_value),
+        )
+
+    @discord.ui.button(label="Сбросить прогресс", emoji=get_emoji("_reset"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdminSeasonResetModal(self.author_id))
+
+    @discord.ui.button(label="Выдать премиум", emoji=get_emoji("_vip"), style=discord.ButtonStyle.success, row=1)
+    async def btn_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdminSeasonPremiumModal(self.author_id))
+
+    @discord.ui.button(label="Выдать XP", emoji=get_emoji("_stats"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_xp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdminSeasonXpModal(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="🛡️ Панель администратора — страница 2",
+            color=0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPanelPage2(self.author_id)
+        )
+
+
+class AdminSeasonResetModal(discord.ui.Modal, title="Сбросить прогресс сезона"):
+    user_id = discord.ui.TextInput(label="ID игрока", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = int(self.user_id.value)
+        except ValueError:
+            return await interaction.followup.send("❌ ID игрока — число.", ephemeral=True)
+        cur = await bot.db.execute(
+            "DELETE FROM season_progress WHERE user_id = ?", (uid,)
+        )
+        await commit_if_needed()
+        await log_admin_action(
+            self.author_id, uid, "season_reset", f"rows={cur.rowcount}"
+        )
+        await interaction.followup.send(
+            f"✅ Прогресс сезона <@{uid}> сброшен ({cur.rowcount} записей).",
+            ephemeral=True,
+        )
+
+
+class AdminSeasonPremiumModal(discord.ui.Modal, title="Выдать премиум-пропуск"):
+    user_id = discord.ui.TextInput(label="ID игрока", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = int(self.user_id.value)
+        except ValueError:
+            return await interaction.followup.send("❌ ID игрока — число.", ephemeral=True)
+        await get_season_data(uid)
+        season_id = current_season_id()
+        cur = await bot.db.execute(
+            "UPDATE season_progress SET premium = 1, updated_at = ? "
+            "WHERE user_id = ? AND season_id = ?",
+            (datetime.datetime.now().isoformat(), uid, season_id),
+        )
+        await commit_if_needed()
+        await log_admin_action(self.author_id, uid, "season_premium", season_id)
+        if cur.rowcount == 0:
+            return await interaction.followup.send(
+                "❌ Не удалось обновить прогресс.", ephemeral=True
+            )
+        await interaction.followup.send(
+            f"✅ Премиум-пропуск выдан <@{uid}>.", ephemeral=True
+        )
+
+
+class AdminSeasonXpModal(discord.ui.Modal, title="Выдать сезонный XP"):
+    user_id = discord.ui.TextInput(label="ID игрока", required=True)
+    amount = discord.ui.TextInput(label="Сколько XP", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = int(self.user_id.value)
+            amount = int(self.amount.value)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ ID и XP должны быть положительными числами.", ephemeral=True
+            )
+        season_id = current_season_id()
+        now = datetime.datetime.now().isoformat()
+        await bot.db.execute(
+            "INSERT OR IGNORE INTO season_progress "
+            "(user_id, season_id, updated_at) VALUES (?, ?, ?)",
+            (uid, season_id, now),
+        )
+        await bot.db.execute(
+            "UPDATE season_progress SET xp = xp + ?, updated_at = ? "
+            "WHERE user_id = ? AND season_id = ?",
+            (amount, now, uid, season_id),
+        )
+        await commit_if_needed()
+        await log_admin_action(self.author_id, uid, "season_xp", str(amount))
+        await interaction.followup.send(
+            f"✅ <@{uid}> получил **{amount}** сезонного XP.", ephemeral=True
+        )
+
+
+async def build_admin_market_embed() -> discord.Embed:
+    async with bot.db.execute(
+        "SELECT status, COUNT(*) FROM market_orders GROUP BY status"
+    ) as c:
+        status_rows = await c.fetchall()
+    counts = {status: count for status, count in status_rows}
+    async with bot.db.execute(
+        "SELECT side, COUNT(*) FROM market_orders WHERE status = 'active' GROUP BY side"
+    ) as c:
+        side_rows = await c.fetchall()
+    sides = {side: count for side, count in side_rows}
+    embed = BotEmbed(
+        title=f"{get_emoji('_market')} Управление биржей",
+        description=(
+            f"Активных ордеров: **{counts.get('active', 0)}**\n"
+            f"На покупку: **{sides.get('buy', 0)}** · "
+            f"На продажу: **{sides.get('sell', 0)}**\n"
+            f"Истёкших: **{counts.get('expired', 0)}** · "
+            f"Отменённых: **{counts.get('cancelled', 0)}**"
+        ),
+        color=0x9b59b6,
+    )
+    return embed
+
+
+class AdminMarketView(AdminView):
+    def __init__(self, author_id: int, timeout: int = 300):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await super().interaction_check(interaction)
+
+    @discord.ui.button(label="Очистить истёкшие", emoji=get_emoji("_reset"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_expire(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await expire_market_orders()
+        await interaction.edit_original_response(
+            embed=await build_admin_market_embed(),
+            view=AdminMarketView(self.author_id),
+        )
+
+    @discord.ui.button(label="Отменить ордер", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.danger, row=0)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdminCancelMarketOrderModal(self.author_id))
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.edit_original_response(
+            embed=await build_admin_market_embed(),
+            view=AdminMarketView(self.author_id),
+        )
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="🛡️ Панель администратора — страница 2",
+            color=0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPanelPage2(self.author_id)
+        )
+
+
+class AdminCancelMarketOrderModal(discord.ui.Modal, title="Отменить ордер биржи"):
+    order_id = discord.ui.TextInput(label="ID ордера", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            order_id = int(self.order_id.value)
+        except ValueError:
+            return await interaction.followup.send("❌ ID ордера — число.", ephemeral=True)
+        async with bot.db.execute(
+            "SELECT user_id FROM market_orders WHERE id = ?", (order_id,)
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            return await interaction.followup.send("❌ Ордер не найден.", ephemeral=True)
+        owner_id = row[0]
+        ok, msg = await cancel_market_order(order_id, owner_id)
+        if ok:
+            await log_admin_action(
+                self.author_id, owner_id, "market_order_cancel", str(order_id)
+            )
+        await interaction.followup.send(msg, ephemeral=True)
+
+
+class AdminPrestigeView(AdminView):
+    def __init__(self, author_id: int, timeout: int = 300):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await super().interaction_check(interaction)
+
+    @discord.ui.button(label="Выдать очки", emoji=get_emoji("_rebirth"), style=discord.ButtonStyle.success, row=0)
+    async def btn_grant(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdminGrantPrestigeModal(self.author_id))
+
+    @discord.ui.button(label="Сбросить очки", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=0)
+    async def btn_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AdminResetPrestigeModal(self.author_id))
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = BotEmbed(
+            title="🛡️ Панель администратора — страница 2",
+            color=0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=AdminPanelPage2(self.author_id)
+        )
+
+
+class AdminGrantPrestigeModal(discord.ui.Modal, title="Выдать очки престижа"):
+    user_id = discord.ui.TextInput(label="ID игрока", required=True)
+    amount = discord.ui.TextInput(label="Сколько очков", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            uid = int(self.user_id.value)
+            amount = int(self.amount.value)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            return await interaction.followup.send(
+                "❌ ID и количество должны быть положительными.", ephemeral=True
+            )
+        cur = await bot.db.execute(
+            "UPDATE players SET prestige_points = prestige_points + ? WHERE user_id = ?",
+            (amount, uid),
+        )
+        await commit_if_needed()
+        if cur.rowcount == 0:
+            return await interaction.followup.send("❌ Игрок не найден.", ephemeral=True)
+        await log_admin_action(
+            self.author_id, uid, "prestige_grant", str(amount)
+        )
+        await interaction.followup.send(
+            f"✅ <@{uid}> получил **{amount}** очков престижа.", ephemeral=True
+        )
+
+
+class AdminResetPrestigeModal(discord.ui.Modal, title="Сбросить очки престижа"):
+    user_id = discord.ui.TextInput(label="ID игрока", required=True)
+    confirm = discord.ui.TextInput(
+        label="Введите СБРОС", required=True
+    )
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        if self.confirm.value.strip().upper() != "СБРОС":
+            return await interaction.followup.send("❌ Отменено.", ephemeral=True)
+        try:
+            uid = int(self.user_id.value)
+        except ValueError:
+            return await interaction.followup.send("❌ ID игрока — число.", ephemeral=True)
+        await bot.db.execute(
+            "UPDATE players SET prestige_points = 0, "
+            "total_coins_earned = 0, lifetime_production = 0 "
+            "WHERE user_id = ?",
+            (uid,),
+        )
+        await commit_if_needed()
+        await log_admin_action(self.author_id, uid, "prestige_reset", "0")
+        await interaction.followup.send(
+            f"✅ Очки престижа и всего заработано у <@{uid}> сброшены.",
+            ephemeral=True,
+        )
 
 
 class AdminResetNotifCooldownModal(discord.ui.Modal, title="Сбросить кулдаун уведомлений"):
@@ -13972,7 +19230,7 @@ class AdminResetNotifCooldownModal(discord.ui.Modal, title="Сбросить к�
         await bot.db.execute(
             "UPDATE user_notifications SET last_sent = NULL WHERE user_id = ?", (uid,)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "reset_notif_cooldown", f"{count} записей")
         await interaction.followup.send(
             f"✅ Кулдаун уведомлений <@{uid}> сброшен (затронуто {count} записей).",
@@ -14028,7 +19286,7 @@ class AdminGiveAchievementModal(discord.ui.Modal, title="Выдать дости
         await bot.db.execute(
             "UPDATE players SET gems = gems + ? WHERE user_id = ?", (reward, uid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_achievement", f"{ach_id} (+{reward}💎)")
         await interaction.followup.send(
             f"✅ Достижение {emoji} **{name}** выдано <@{uid}>, награда 💎 {reward}.",
@@ -14067,7 +19325,7 @@ class AdminRemoveAchievementModal(discord.ui.Modal, title="Снять дости
             "DELETE FROM player_achievements WHERE user_id = ? AND achievement_id = ?",
             (uid, ach_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "remove_achievement", ach_id)
         await interaction.followup.send(
             f"✅ Достижение `{ach_id}` снято у <@{uid}> (гемы не отнимаются).",
@@ -14101,7 +19359,7 @@ class AdminResetStreakModal(discord.ui.Modal, title="Сбросить стрик
         await bot.db.execute(
             "UPDATE players SET streak_days = 0, last_daily = NULL WHERE user_id = ?", (uid,)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "reset_streak", f"was {row[0]}")
         await interaction.followup.send(
             f"✅ Стрик дейли <@{uid}> сброшен (было {row[0]}).", ephemeral=True
@@ -14162,7 +19420,7 @@ class AdminCompleteStoryModal(discord.ui.Modal, title="Завершить сюж
         await bot.db.execute(
             "UPDATE players SET gems = gems + ? WHERE user_id = ?", (reward, uid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "complete_story", f"{qid} (+{reward}💎)")
         await interaction.followup.send(
             f"✅ Квест «{name}» завершён у <@{uid}>, награда 💎 {reward}.", ephemeral=True
@@ -14195,20 +19453,20 @@ class AdminResetStoryModal(discord.ui.Modal, title="Сбросить сюжет�
             count = (await c.fetchone())[0] or 0
 
         await bot.db.execute("DELETE FROM player_quests WHERE user_id = ?", (uid,))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "reset_story", f"was {count}")
         await interaction.followup.send(
             f"✅ Прогресс сюжетных квестов <@{uid}> сброшен (было {count} записей).",
             ephemeral=True
         )
 
-class AdminAdventView(discord.ui.View):
+class AdminAdventView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Открыть окошко", emoji=get_emoji("_dailyquests"), style=discord.ButtonStyle.success, row=0)
     async def open_day(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14297,7 +19555,7 @@ class AdminOpenAdventModal(discord.ui.Modal, title="Открыть окошко 
             VALUES (?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET last_opened_day = ?, last_opened_date = ?
         """, (uid, day, today_str, day, today_str))
-        await bot.db.commit()
+        await commit_if_needed()
 
         await log_admin_action(self.author_id, uid, "open_advent", f"day={day}")
         msg = f"✅ Окошко {day} открыто у <@{uid}>: 🪙 {coins} | 💎 {gems}"
@@ -14333,20 +19591,20 @@ class AdminResetAdventModal(discord.ui.Modal, title="Сбросить прогр
 
         await bot.db.execute("DELETE FROM advent_progress WHERE user_id = ?", (uid,))
         await bot.db.execute("DELETE FROM advent_state WHERE user_id = ?", (uid,))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "reset_advent", f"was {count}")
         await interaction.followup.send(
             f"✅ Прогресс адвента <@{uid}> сброшен (было открыто {count} окошек).",
             ephemeral=True
         )
 
-class AdminPetsView(discord.ui.View):
+class AdminPetsView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Выдать", emoji=get_emoji("_dailyquests"), style=discord.ButtonStyle.success, row=0)
     async def give(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14366,13 +19624,13 @@ class AdminPetsView(discord.ui.View):
         embed = BotEmbed(title="🛡️ Панель администратора — страница 2", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminPanelPage2(self.author_id))
 
-class AdminAutocollectorView(discord.ui.View):
+class AdminAutocollectorView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Выдать", emoji=get_emoji("_dailyquests"), style=discord.ButtonStyle.success, row=0)
     async def give(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14430,7 +19688,7 @@ class AdminGiveAutocollectorModal(discord.ui.Modal, title="Выдать авто
             "INSERT INTO autocollectors (user_id, level, last_auto) VALUES (?, 1, ?)",
             (uid, now_iso)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_autocollector", "level=1")
         await interaction.followup.send(
             f"✅ Автосборщик (1 ур.) выдан <@{uid}>.", ephemeral=True
@@ -14470,7 +19728,7 @@ class AdminSetAutocollectorLevelModal(discord.ui.Modal, title="Установи�
         await bot.db.execute(
             "UPDATE autocollectors SET level = ? WHERE user_id = ?", (lvl, uid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "set_autocollector_level", f"→ {lvl}")
         await interaction.followup.send(
             f"✅ Уровень автосборщика <@{uid}> = **{lvl}**.", ephemeral=True
@@ -14501,19 +19759,19 @@ class AdminRemoveAutocollectorModal(discord.ui.Modal, title="Убрать авт
             return
 
         await bot.db.execute("DELETE FROM autocollectors WHERE user_id = ?", (uid,))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "remove_autocollector", f"level={row[0]}")
         await interaction.followup.send(
             f"✅ Автосборщик <@{uid}> (ур. {row[0]}) удалён.", ephemeral=True
         )
 
-class AdminBankView(discord.ui.View):
+class AdminBankView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Выдать вклад", emoji=get_emoji("_coin"), style=discord.ButtonStyle.success, row=0)
     async def give(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14560,9 +19818,10 @@ class AdminGiveDepositModal(discord.ui.Modal, title="Выдать вклад"):
                 await interaction.followup.send("❌ У игрока уже есть вклад.", ephemeral=True)
                 return
 
-        if amt > BANK_MAX_DEPOSIT:
+        max_deposit, _ = await get_bank_limits(uid)
+        if amt > max_deposit:
             return await interaction.followup.send(
-                f"❌ Максимум {BANK_MAX_DEPOSIT} монет на вклад.", ephemeral=True
+                f"❌ Максимум {max_deposit} монет на вклад.", ephemeral=True
             )
 
         now = datetime.datetime.now()
@@ -14579,7 +19838,7 @@ class AdminGiveDepositModal(discord.ui.Modal, title="Выдать вклад"):
             "INSERT INTO bank_history (user_id, amount) VALUES (?, ?)", (uid, amt)
         )
 
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_deposit", f"{amt} на {days} дн.")
         await interaction.followup.send(
             f"✅ Вклад 🪙 {amt} на {days} дн. выдан <@{uid}>.", ephemeral=True
@@ -14610,19 +19869,19 @@ class AdminRemoveDepositModal(discord.ui.Modal, title="Удалить вклад
             return
 
         await bot.db.execute("DELETE FROM bank_deposits WHERE user_id = ?", (uid,))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "remove_deposit", f"{row[0]}")
         await interaction.followup.send(
             f"✅ Вклад <@{uid}> (🪙 {row[0]}) удалён без возврата.", ephemeral=True
         )
 
-class AdminAuctionView(discord.ui.View):
+class AdminAuctionView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Удалить лот", emoji=get_emoji("_reset"), style=discord.ButtonStyle.danger, row=0)
     async def remove(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14686,7 +19945,7 @@ class AdminRemoveAuctionModal(discord.ui.Modal, title="Удалить лот"):
             )
 
         await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, seller_id, "remove_auction", f"id={aid}")
         await interaction.followup.send(
             f"✅ Лот {aid} удалён, предмет возвращён продавцу"
@@ -14725,19 +19984,19 @@ class AdminFinishAuctionModal(discord.ui.Modal, title="Завершить лот
             "UPDATE auctions SET end_time = ? WHERE id = ? AND status = 'active'",
             (datetime.datetime.now().isoformat(), aid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, 0, "finish_auction", f"id={aid}")
         await interaction.followup.send(
             f"✅ Лот {aid} помечен на закрытие (закроется в течение 5 минут).", ephemeral=True
         )
 
-class AdminClansView(discord.ui.View):
+class AdminClansView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Создать", emoji=get_emoji("_buy"), style=discord.ButtonStyle.success, row=0)
     async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14805,7 +20064,7 @@ class AdminCreateClanModal(discord.ui.Modal, title="Создать клан"):
             "INSERT INTO clan_members (user_id, clan_id, role) VALUES (?, ?, 'leader')",
             (lid, clan_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, lid, "create_clan", f"{name} (id={clan_id})")
         await interaction.followup.send(
             f"✅ Клан **{name}** создан (id={clan_id}), лидер <@{lid}>.", ephemeral=True
@@ -14856,7 +20115,7 @@ class AdminDisbandClanModal(discord.ui.Modal, title="Распустить кла
         await bot.db.execute("DELETE FROM clan_quests WHERE clan_id = ?", (cid,))
         await bot.db.execute("DELETE FROM clan_wars WHERE clan1_id = ? OR clan2_id = ?", (cid, cid))
         await bot.db.execute("DELETE FROM clans WHERE id = ?", (cid,))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, 0, "disband_clan", f"{row[0]} (id={cid})")
         await interaction.followup.send(f"✅ Клан **{row[0]}** распущен.", ephemeral=True)
 
@@ -14922,7 +20181,7 @@ class AdminAddClanMemberModal(discord.ui.Modal, title="Добавить в кл�
             "INSERT INTO clan_members (user_id, clan_id, role) VALUES (?, ?, ?)",
             (uid, cid, role)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "add_clan_member", f"clan={cid}, role={role}")
         await interaction.followup.send(
             f"✅ <@{uid}> добавлен в клан {cid} как **{role}**.", ephemeral=True
@@ -14956,19 +20215,19 @@ class AdminClanTreasuryModal(discord.ui.Modal, title="Пополнить сун�
         await bot.db.execute(
             "UPDATE clans SET treasury = treasury + ? WHERE id = ?", (amt, cid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, 0, "clan_treasury", f"clan={cid}, +{amt}")
         await interaction.followup.send(
             f"✅ Сундук клана {cid} пополнен на 🪙 {amt}.", ephemeral=True
         )
 
-class AdminTitlesView(discord.ui.View):
+class AdminTitlesView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Выдать", emoji=get_emoji("_dailyquests"), style=discord.ButtonStyle.success, row=0)
     async def give(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -15015,7 +20274,7 @@ class AdminSetTitleModal(discord.ui.Modal, title="Выдать титул"):
 
         name = TITLES[tid][0]
         await bot.db.execute("UPDATE players SET title = ? WHERE user_id = ?", (name, uid))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "set_title", tid)
         await interaction.followup.send(
             f"✅ Титул **{name}** выдан <@{uid}>.", ephemeral=True
@@ -15040,7 +20299,7 @@ class AdminRemoveTitleModal(discord.ui.Modal, title="Снять титул"):
         await bot.db.execute(
             "UPDATE players SET title = 'Новичок' WHERE user_id = ?", (uid,)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "remove_title", "→ Новичок")
         await interaction.followup.send(
             f"✅ Титул сброшен на «Новичок» у <@{uid}>.", ephemeral=True
@@ -15097,7 +20356,7 @@ class AdminGivePetModal(discord.ui.Modal, title="Выдать питомца"):
                 "UPDATE players SET active_pet = ? WHERE user_id = ?", (pet_id, uid)
             )
 
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_pet", pet_id)
         await interaction.followup.send(
             f"✅ Питомец **{PET_TYPES[pet_id]['name']}** выдан <@{uid}>.", ephemeral=True
@@ -15142,7 +20401,7 @@ class AdminSetPetLevelModal(discord.ui.Modal, title="Установить уро
             "UPDATE user_pets_v2 SET level = ? WHERE user_id = ? AND pet_id = ?",
             (lvl, uid, pet_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "set_pet_level", f"{pet_id} → {lvl}")
         await interaction.followup.send(
             f"✅ Уровень **{pet_id}** = **{lvl}** для <@{uid}>.", ephemeral=True
@@ -15174,14 +20433,14 @@ class AdminRemovePetModal(discord.ui.Modal, title="Убрать питомца")
             "UPDATE players SET active_pet = NULL WHERE user_id = ? AND active_pet = ?",
             (uid, pet_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "remove_pet", pet_id)
         await interaction.followup.send(
             f"✅ Питомец **{pet_id}** убран у <@{uid}>.", ephemeral=True
         )
 
 
-class AdminGrantView(discord.ui.View):
+class AdminGrantView(AdminView):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -15202,7 +20461,7 @@ class AdminGrantView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     async def currency_select(self, interaction: discord.Interaction):
         self.currency = interaction.data["values"][0]
@@ -15217,7 +20476,7 @@ class AdminGrantView(discord.ui.View):
         await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
 
 
-class AdminTakeView(discord.ui.View):
+class AdminTakeView(AdminView):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -15238,7 +20497,7 @@ class AdminTakeView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     async def currency_select(self, interaction: discord.Interaction):
         self.currency = interaction.data["values"][0]
@@ -15254,30 +20513,43 @@ class AdminTakeView(discord.ui.View):
 
 
 async def open_admin_logs(interaction: discord.Interaction, author_id: int, page: int = 0):
-    async with bot.db.execute("""
-        SELECT admin_id, target_id, action, details, timestamp
-        FROM admin_log ORDER BY id DESC LIMIT ? OFFSET ?
-    """, (PAGE_SIZE, page * PAGE_SIZE)) as c:
-        rows = await c.fetchall()
+    guild_id = interaction.guild_id
+    where = ""
+    params: list = []
+    if guild_id:
+        where = "WHERE guild_id = ? OR guild_id IS NULL"
+        params.append(guild_id)
 
-    async with bot.db.execute("SELECT COUNT(*) FROM admin_log") as c:
+    async with bot.db.execute(
+        f"SELECT COUNT(*) FROM admin_log {where}", params
+    ) as c:
         total = (await c.fetchone())[0]
 
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
-    chunk = rows
+
+    async with bot.db.execute(
+        f"SELECT admin_id, target_id, action, details, timestamp, guild_id "
+        f"FROM admin_log {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        (*params, PAGE_SIZE, page * PAGE_SIZE),
+    ) as c:
+        rows = await c.fetchall()
 
     embed = BotEmbed(
         title="📜 Логи администрации",
-        description=f"Страница {page + 1}/{total_pages} | Всего записей: {total}",
+        description=(
+            f"Страница {page + 1}/{total_pages} | Всего записей: {total}\n"
+            f"Фильтр: {'этот сервер + глобальные' if guild_id else 'все серверы'}"
+        ),
         color=0xe74c3c,
     )
-    if not chunk:
+    if not rows:
         embed.add_field(name="Пусто", value="Действий пока не было.")
-    for admin_id, target_id, action, details, ts in chunk:
+    for admin_id, target_id, action, details, ts, log_guild_id in rows:
+        guild_text = f" · сервер `{log_guild_id}`" if log_guild_id else " · глобально"
         embed.add_field(
             name=f"`{action}` — <@{admin_id}> → <@{target_id}>",
-            value=f"{details}\n{ts}",
+            value=f"{details}{guild_text}\n{ts}",
             inline=False,
         )
     await interaction.edit_original_response(
@@ -15286,7 +20558,7 @@ async def open_admin_logs(interaction: discord.Interaction, author_id: int, page
     )
 
 
-class AdminLogsView(discord.ui.View):
+class AdminLogsView(AdminView):
     def __init__(self, author_id: int, page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -15304,7 +20576,7 @@ class AdminLogsView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -15342,12 +20614,17 @@ class AdminGrantValuesModal(discord.ui.Modal, title="Начислить"):
             return
         async with bot.db.execute("SELECT 1 FROM players WHERE user_id = ?", (uid,)) as c:
             if not await c.fetchone():
-                await bot.db.execute("INSERT OR IGNORE INTO players (user_id, coins) VALUES (?, ?)", (uid, DEFAULT_START_COINS))
+                await bot.db.execute(
+                    "INSERT OR IGNORE INTO players "
+                    "(user_id, coins, last_gem_collected, last_tax_time) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                    (uid, DEFAULT_START_COINS),
+                )
         await bot.db.execute(
             f"UPDATE players SET {self.currency} = {self.currency} + ? WHERE user_id = ?",
             (amount, uid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(
             self.author_id, uid, "grant",
             f"{self.currency} +{amount}"
@@ -15387,7 +20664,7 @@ class AdminTakeValuesModal(discord.ui.Modal, title="Забрать"):
             f"UPDATE players SET {self.currency} = {self.currency} - ? WHERE user_id = ?",
             (amount, uid)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(
             self.author_id, uid, "take",
             f"{self.currency} -{amount}"
@@ -15495,7 +20772,7 @@ class AdminEditModal(discord.ui.Modal, title="Изменить поле проф
             await interaction.followup.send("❌ Неверное значение.", ephemeral=True)
             return
         await bot.db.execute(f"UPDATE players SET {field} = ? WHERE user_id = ?", (parsed, uid))
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(
             self.author_id, uid, "edit",
             f"{field} = {parsed}"
@@ -15549,6 +20826,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                     grid_size = 9, storage_size = 36, income_bonus = 0.0,
                     total_crafts = 0, total_successes = 0,
                     total_coins_earned = 0, total_gems_earned = 0,
+                    lifetime_production = 0,
                     last_collected = CURRENT_TIMESTAMP,
                     last_gem_collected = CURRENT_TIMESTAMP,
                     daily_quest_date = NULL,
@@ -15568,9 +20846,10 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                 "inventory", "player_achievements", "player_upgrades", "craft_log",
                 "craft_pity", "star_pity",
                 "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
-                "bank_deposits", "bank_history", "user_notifications",
+                "bank_deposits", "bank_loans", "bank_history", "user_notifications",
                 "player_quests", "user_cosmetics", "tax_log", "raid_cooldowns",
-                "player_collection", "season_progress",
+                "duel_cooldowns", "player_collection", "season_progress",
+                "market_orders", "onboarding_progress",
             ):
                 await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
 
@@ -15580,9 +20859,6 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
             )
             await bot.db.execute(
                 "DELETE FROM raid_loot_log WHERE user_id = ?", (uid,)
-            )
-            await bot.db.execute(
-                "DELETE FROM market_listings WHERE seller_id = ?", (uid,)
             )
 
         await log_admin_action(
@@ -15655,7 +20931,7 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
                 "INSERT OR IGNORE INTO player_collection (user_id, item_id) VALUES (?, ?)",
                 (uid, item_id),
             )
-            await bot.db.commit()
+            await commit_if_needed()
             msg = f"✅ Выдано {qty}×{emoji} {name} в хранилище <@{uid}>."
 
         await log_admin_action(
@@ -15710,7 +20986,7 @@ class AddGeneratorModal(discord.ui.Modal, title="Добавить генерат
         )
 
 
-class AddGeneratorStep2View(discord.ui.View):
+class AddGeneratorStep2View(AdminView):
     def __init__(self, author_id: int, item_id: str, name: str, price: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -15719,10 +20995,7 @@ class AddGeneratorStep2View(discord.ui.View):
         self.price = price
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Заполнить", emoji=get_emoji("_quests"), style=discord.ButtonStyle.primary, row=0)
     async def fill(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -15738,8 +21011,8 @@ class AddGeneratorStep2View(discord.ui.View):
 
 
 class AddGeneratorStep2Modal(discord.ui.Modal, title="Добавить генератор (шаг 2/2)"):
-    income_coins = discord.ui.TextInput(label="Доход монет/сек", default="0.001", required=True)
-    income_gems = discord.ui.TextInput(label="Доход гемов/сек", default="0", required=True)
+    income_coins = discord.ui.TextInput(label="Доход монет/час", default="0.001", required=True)
+    income_gems = discord.ui.TextInput(label="Доход гемов/час", default="0", required=True)
     emoji = discord.ui.TextInput(label="Эмодзи", default="⚙️", required=True)
     rarity = discord.ui.TextInput(label="Редкость", default="common", required=True)
 
@@ -15777,7 +21050,7 @@ class AddGeneratorStep2Modal(discord.ui.Modal, title="Добавить гене�
             "VALUES (?, ?, ?)",
             (self.item_id, self.price, self.price)
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await log_admin_action(
             self.author_id, 0, "add_generator",
             f"{self.item_id} ({self.name})"
@@ -15792,16 +21065,13 @@ class AddGeneratorStep2Modal(discord.ui.Modal, title="Добавить гене�
 #  ⚙️ НАСТРОЙКИ
 # ============================================================
 
-class SettingsView(discord.ui.View):
+class SettingsView(AdminView):
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Общие", emoji=BOT_BTN_EMOJIS.get("_settings", "🌐"), style=discord.ButtonStyle.primary, row=0)
     async def general(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -15869,7 +21139,7 @@ class SettingsGeneralModal(discord.ui.Modal, title="Общие настройк�
         settings = await get_settings(guild_id)
         changes = []
         if self.bot_name.value:
-            await save_setting(guild_id, "bot_name", self.bot_name.value.strip())
+            await save_setting(guild_id, "bot_name", self.bot_name.value.strip(), actor_id=interaction.user.id)
             changes.append(f"📛 Название: **{self.bot_name.value}**")
         if self.item_id.value and self.emoji.value:
             item_id = self.item_id.value.strip()
@@ -15887,30 +21157,39 @@ class SettingsGeneralModal(discord.ui.Modal, title="Общие настройк�
                 return
             custom = settings["custom_emojis"]
             custom[item_id] = emoji_val
-            await save_setting(guild_id, "custom_emojis", custom)
+            await save_setting(guild_id, "custom_emojis", custom, actor_id=interaction.user.id)
             changes.append(f"🎨 {item[0]}: {emoji_val}")
         await interaction.followup.send(
             "✅ Обновлено:\n" + "\n".join(changes) if changes else "ℹ️ Ничего не изменено.", ephemeral=True
         )
 
 
-class SettingsEconomyView(discord.ui.View):
+class SettingsEconomyView(AdminView):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Цена", emoji=get_emoji("_sell"), style=discord.ButtonStyle.primary, row=0)
     async def price(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_global_owner(interaction):
+            await interaction.response.send_message(
+                "❌ Глобальные цены может менять только владелец бота.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(EditItemPriceModal(self.author_id))
 
     @discord.ui.button(label="Доход", emoji=get_emoji("_stats"), style=discord.ButtonStyle.primary, row=0)
     async def income(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await is_global_owner(interaction):
+            await interaction.response.send_message(
+                "❌ Глобальный доход может менять только владелец бота.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_modal(EditItemIncomeModal(self.author_id))
 
     @discord.ui.button(label="Стартовые монеты", emoji=get_emoji("_coin"), style=discord.ButtonStyle.success, row=1)
@@ -15920,10 +21199,6 @@ class SettingsEconomyView(discord.ui.View):
     @discord.ui.button(label="Потолок гемов", emoji=get_emoji("_gem"), style=discord.ButtonStyle.success, row=1)
     async def gem_cap(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EditGemCapModal(self.author_id))
-
-    @discord.ui.button(label="Лимит дохода", emoji="⏳", style=discord.ButtonStyle.secondary, row=2)
-    async def passive_limit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(EditPassiveLimitModal(self.author_id))
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -15956,14 +21231,14 @@ class EditItemPriceModal(discord.ui.Modal, title="Изменить цену"):
             await interaction.followup.send(f"❌ `{item_id}` не найден.", ephemeral=True)
             return
         await bot.db.execute("UPDATE items SET price = ? WHERE id = ?", (price, item_id))
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(f"✅ Цена **{item[0]}** = 🪙 {price}.", ephemeral=True)
 
 
 class EditItemIncomeModal(discord.ui.Modal, title="Изменить доход"):
     item_id = discord.ui.TextInput(label="ID предмета", placeholder="basic_gen", required=True)
-    income_coins = discord.ui.TextInput(label="Доход монет/сек", required=False)
-    income_gems = discord.ui.TextInput(label="Доход гемов/сек", required=False)
+    income_coins = discord.ui.TextInput(label="Доход монет/час", required=False)
+    income_gems = discord.ui.TextInput(label="Доход гемов/час", required=False)
 
     def __init__(self, author_id: int):
         super().__init__()
@@ -15984,7 +21259,7 @@ class EditItemIncomeModal(discord.ui.Modal, title="Изменить доход")
                 if inc < 0:
                     raise ValueError
                 await bot.db.execute("UPDATE items SET income_per_hour = ? WHERE id = ?", (inc, item_id))
-                updates.append(f"🪙 {inc}/сек")
+                updates.append(f"🪙 {inc}/час")
             except ValueError:
                 await interaction.followup.send("❌ Неверный доход монет.", ephemeral=True)
                 return
@@ -15994,18 +21269,18 @@ class EditItemIncomeModal(discord.ui.Modal, title="Изменить доход")
                 if inc < 0:
                     raise ValueError
                 await bot.db.execute("UPDATE items SET income_gems_per_hour = ? WHERE id = ?", (inc, item_id))
-                updates.append(f"💎 {inc}/сек")
+                updates.append(f"💎 {inc}/час")
             except ValueError:
                 await interaction.followup.send("❌ Неверный доход гемов.", ephemeral=True)
                 return
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(
             f"✅ Доход **{item[0]}**: {', '.join(updates) if updates else 'без изменений'}.", ephemeral=True
         )
 
 
 class EditStartCoinsModal(discord.ui.Modal, title="Стартовые монеты"):
-    value = discord.ui.TextInput(label="Монет новым игрокам", default="3", required=True)
+    value = discord.ui.TextInput(label="Монет новым игрокам", default="20", required=True)
 
     def __init__(self, author_id: int):
         super().__init__()
@@ -16020,7 +21295,7 @@ class EditStartCoinsModal(discord.ui.Modal, title="Стартовые монет
         except ValueError:
             await interaction.followup.send("❌ Значение >= 0.", ephemeral=True)
             return
-        await save_setting(interaction.guild_id, "start_coins", val)
+        await save_setting(interaction.guild_id, "start_coins", val, actor_id=interaction.user.id)
         await interaction.followup.send(f"✅ Стартовые монеты: **{val}**.", ephemeral=True)
 
 
@@ -16040,28 +21315,8 @@ class EditGemCapModal(discord.ui.Modal, title="Потолок гемов"):
         except ValueError:
             await interaction.followup.send("❌ Значение >= 0.", ephemeral=True)
             return
-        await save_setting(interaction.guild_id, "gem_cap", val)
+        await save_setting(interaction.guild_id, "gem_cap", val, actor_id=interaction.user.id)
         await interaction.followup.send(f"✅ Потолок гемов: **{val}**.", ephemeral=True)
-
-
-class EditPassiveLimitModal(discord.ui.Modal, title="Лимит пассивного дохода"):
-    value = discord.ui.TextInput(label="Максимум накопления", default="100000", required=True)
-
-    def __init__(self, author_id: int):
-        super().__init__()
-        self.author_id = author_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            val = int(self.value.value)
-            if val < 0:
-                raise ValueError
-        except ValueError:
-            await interaction.followup.send("❌ Значение >= 0.", ephemeral=True)
-            return
-        await save_setting(interaction.guild_id, "passive_limit", val)
-        await interaction.followup.send(f"✅ Лимит дохода: **{val}**.", ephemeral=True)
 
 
 class SettingsCurrencyModal(discord.ui.Modal, title="Названия валют"):
@@ -16075,12 +21330,12 @@ class SettingsCurrencyModal(discord.ui.Modal, title="Названия валют
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild_id
-        await save_setting(guild_id, "currency_coins", self.coins.value.strip())
-        await save_setting(guild_id, "currency_gems", self.gems.value.strip())
+        await save_setting(guild_id, "currency_coins", self.coins.value.strip(), actor_id=interaction.user.id)
+        await save_setting(guild_id, "currency_gems", self.gems.value.strip(), actor_id=interaction.user.id)
         await interaction.followup.send(f"✅ Валюты: **{self.coins.value}** / **{self.gems.value}**.", ephemeral=True)
 
 
-class SettingsCommandsView(discord.ui.View):
+class SettingsCommandsView(AdminView):
     def __init__(self, author_id: int, disabled: list | None = None, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -16107,16 +21362,13 @@ class SettingsCommandsView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     async def toggle(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         guild_id = interaction.guild_id
         values = list(interaction.data.get("values", []))
-        await save_setting(guild_id, "disabled_commands", values)
+        await save_setting(guild_id, "disabled_commands", values, actor_id=interaction.user.id)
         names = [TOGGLEABLE_COMMANDS[c] for c in values]
         await interaction.followup.send(f"✅ Отключено: {', '.join(names) if names else 'ничего'}.", ephemeral=True)
 
@@ -16149,20 +21401,17 @@ class SettingsStatusRoleModal(discord.ui.Modal, title="Роль за стату�
         settings = await get_settings(guild_id)
         roles = settings["status_roles"]
         roles[status] = role_id
-        await save_setting(guild_id, "status_roles", roles)
+        await save_setting(guild_id, "status_roles", roles, actor_id=interaction.user.id)
         await interaction.followup.send(f"✅ Роль <@&{role_id}> за статус **{status}**.", ephemeral=True)
 
 
-class SettingsAchievementsView(discord.ui.View):
+class SettingsAchievementsView(AdminView):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     @discord.ui.button(label="Изменить награду", emoji=get_emoji("_customization"), style=discord.ButtonStyle.primary, row=0)
     async def edit_reward(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -16207,7 +21456,7 @@ class EditAchievementRewardModal(discord.ui.Modal, title="Изменить на�
             await interaction.followup.send("❌ Не найдено.", ephemeral=True)
             return
         await bot.db.execute("UPDATE achievements SET reward_gems = ? WHERE id = ?", (reward, ach_id))
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(f"✅ Награда «{item[0]}» = 💎 {reward}.", ephemeral=True)
 
 
@@ -16232,7 +21481,7 @@ class DeleteAchievementModal(discord.ui.Modal, title="Удалить дости�
             return
         await bot.db.execute("DELETE FROM achievements WHERE id = ?", (ach_id,))
         await bot.db.execute("DELETE FROM player_achievements WHERE achievement_id = ?", (ach_id,))
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(f"🗑️ «{item[0]}» удалено.", ephemeral=True)
 
 
@@ -16266,7 +21515,7 @@ class AddAchievementModal(discord.ui.Modal, title="Добавить достиж
             "INSERT INTO achievements (id, name, description, reward_gems, emoji) VALUES (?, ?, ?, ?, ?)",
             (ach_id, self.name.value.strip(), self.desc.value.strip(), reward, self.emoji.value.strip())
         )
-        await bot.db.commit()
+        await commit_if_needed()
         await interaction.followup.send(f"✅ «{self.name.value}» добавлено.", ephemeral=True)
 
 
@@ -16288,7 +21537,7 @@ class SettingsAdminRoleModal(discord.ui.Modal, title="Роль админист�
             await interaction.followup.send("❌ ID роли >= 0.", ephemeral=True)
             return
         if role_id == 0:
-            await save_setting(guild_id, "admin_role_id", None)
+            await save_setting(guild_id, "admin_role_id", None, actor_id=interaction.user.id)
             await interaction.followup.send("✅ Роль админа сброшена.", ephemeral=True)
             return
         guild = interaction.guild
@@ -16296,7 +21545,7 @@ class SettingsAdminRoleModal(discord.ui.Modal, title="Роль админист�
         if not role:
             await interaction.followup.send(f"❌ Роль `{role_id}` не найдена.", ephemeral=True)
             return
-        await save_setting(guild_id, "admin_role_id", role_id)
+        await save_setting(guild_id, "admin_role_id", role_id, actor_id=interaction.user.id)
         await interaction.followup.send(f"✅ Роль <@&{role_id}> получила доступ.", ephemeral=True)
 
 
@@ -16341,11 +21590,11 @@ class EditEmojiModal(discord.ui.Modal, title="Изменить эмодзи"):
             custom.pop(self.key, None)
             message = f"✅ Эмодзи для «{label}» сброшен."
 
-        await save_setting(interaction.guild_id, "custom_emojis", custom)
+        await save_setting(interaction.guild_id, "custom_emojis", custom, actor_id=interaction.user.id)
         await interaction.followup.send(message, ephemeral=True)
 
 
-class SettingsEmojisView(discord.ui.View):
+class SettingsEmojisView(AdminView):
     def __init__(self, author_id: int, timeout: int = 120):
         super().__init__(timeout=timeout)
         self.author_id = author_id
@@ -16366,10 +21615,7 @@ class SettingsEmojisView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("❌ Не твоё меню.", ephemeral=True)
-            return False
-        return True
+        return await super().interaction_check(interaction)
 
     async def emoji_select(self, interaction: discord.Interaction):
         key = interaction.data["values"][0]
@@ -16410,7 +21656,7 @@ async def open_star_emoji_select(interaction: discord.Interaction, author_id: in
     await interaction.edit_original_response(embed=embed, view=view)
 
 
-class StarEmojiPaginatedView(discord.ui.View):
+class StarEmojiPaginatedView(AdminView):
     def __init__(self, author_id: int, options: list[discord.SelectOption], page: int, total_pages: int):
         super().__init__(timeout=120)
         self.author_id = author_id
@@ -16431,7 +21677,7 @@ class StarEmojiPaginatedView(discord.ui.View):
         self.add_item(back)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.author_id
+        return await super().interaction_check(interaction)
 
     async def item_select(self, interaction: discord.Interaction):
         item_id = interaction.data["values"][0]
@@ -16477,7 +21723,7 @@ class StarEmojiModal1(discord.ui.Modal, title="Эмодзи по звёздам 
             "UPDATE items SET emoji_by_star = ? WHERE id = ?",
             (json.dumps(emojis, ensure_ascii=False), self.item_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
 
         # Показываем кнопку для второй части
         embed = BotEmbed(
@@ -16485,7 +21731,7 @@ class StarEmojiModal1(discord.ui.Modal, title="Эмодзи по звёздам 
             description="Первая часть (0★–2★) сохранена. Теперь настрой 3★–5★.",
             color=0xf1c40f
         )
-        view = discord.ui.View()
+        view = SafeView()
         nxt = discord.ui.Button(label="Далее (3★–5★)", emoji=get_emoji("_forward"), style=discord.ButtonStyle.primary)
         nxt.callback = lambda i: i.response.send_modal(StarEmojiModal2(self.author_id, self.item_id))
         view.add_item(nxt)
@@ -16522,7 +21768,7 @@ class StarEmojiModal2(discord.ui.Modal, title="Эмодзи по звёздам 
             "UPDATE items SET emoji_by_star = ? WHERE id = ?",
             (json.dumps(emojis, ensure_ascii=False), self.item_id)
         )
-        await bot.db.commit()
+        await commit_if_needed()
 
         count = len(emojis)
         await interaction.followup.send(
@@ -16555,7 +21801,7 @@ async def main_menu(interaction: discord.Interaction):
                 "синтезировать их в более мощные, собирать пассивный доход и сражаться с другими игроками.\n\n"
                 "**С чего начать:**\n"
                 "🛒 **Магазин** — купи свой первый генератор.\n"
-                "⚗️ **Синтез** — соединяй 5 одинаковых генераторов в 1 более редкий.\n"
+                f"⚗️ **Синтез** — соединяй {CRAFT_COST} одинаковых генераторов в 1 более редкий.\n"
                 "⭐ **Звёзды** — улучшай генераторы, чтобы они приносили больше дохода.\n"
                 "⚔️ **Социум** — вступай в клан, сражайся в рейдах и дуэлях.\n"
                 "💰 **Экономика** — копи монеты и гемы, вкладывай в банк.\n\n"
@@ -16637,4 +21883,16 @@ if __name__ == "__main__":
             "DISCORD_BOT_TOKEN не задан. Добавь переменную окружения "
             "или настрой .env на хостинге."
         )
+
+    def _handle_sigterm(*_args):
+        try:
+            asyncio.get_event_loop().create_task(bot.close())
+        except Exception:
+            log.exception("Не удалось запустить graceful shutdown по SIGTERM")
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except (ValueError, OSError):
+        pass
+
     bot.run(token)
