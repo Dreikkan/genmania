@@ -91,6 +91,17 @@ PRESTIGE_BONUS_PER_POINT = 0.05       # +5% к доходу за очко
 CLAN_MAX_LEVEL = 21                   # максимум уровня клана
 CLAN_XP_PER_LEVEL = 100               # XP для следующего уровня (база)
 
+# --- СЕЗОНЫ / BATTLE PASS ---
+SEASON_LEVELS = 30
+SEASON_PREMIUM_COST_GEMS = 250
+SEASON_XP_BASE = 100                  # XP с 0 на 1 уровень
+SEASON_XP_STEP = 25                   # прибавка к следующему уровню
+SEASON_WEEKEND_XP_MULT = 1.5          # событие выходного дня
+SEASON_MONTH_NAMES = (
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+)
+
 # --- ДУЭЛИ ---
 DUEL_CHALLENGE_TIMEOUT = 120          # сколько ждём согласия
 DUEL_CHALLENGE_DELETE_SECONDS = 30    # автоудаление после результата
@@ -1583,6 +1594,20 @@ class CastleBot(commands.Bot):
             )
         """)
 
+        # Сезонный прогресс / battle pass
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS season_progress (
+                user_id INTEGER,
+                season_id TEXT,
+                xp INTEGER DEFAULT 0,
+                premium INTEGER DEFAULT 0,
+                claimed_free TEXT DEFAULT '[]',
+                claimed_premium TEXT DEFAULT '[]',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, season_id)
+            )
+        """)
+
         # Добавляем эксклюзивные генераторы для 30-го дня (если их нет)
         
         daily_gens = [
@@ -1941,6 +1966,7 @@ class CastleBot(commands.Bot):
             "CREATE INDEX IF NOT EXISTS idx_raid_party_invites_party ON raid_party_invites(party_id)",
             "CREATE INDEX IF NOT EXISTS idx_tax_log_user ON tax_log(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_player_quests_user ON player_quests(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_season_progress_user ON season_progress(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_player_achievements_user ON player_achievements(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_bank_history_user ON bank_history(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_craft_log_user ON craft_log(user_id)",
@@ -2731,6 +2757,291 @@ async def db_transaction():
             await bot.db.rollback()
             raise
 
+# ============================================================
+#  🗓️ СЕЗОНЫ / BATTLE PASS
+# ============================================================
+
+def current_season_id() -> str:
+    return datetime.date.today().strftime("%Y-%m")
+
+
+def current_season_name() -> str:
+    today = datetime.date.today()
+    return f"{SEASON_MONTH_NAMES[today.month - 1]} {today.year}"
+
+
+def season_days_left() -> int:
+    today = datetime.date.today()
+    if today.month == 12:
+        last_day = datetime.date(today.year, 12, 31)
+    else:
+        last_day = datetime.date(today.year, today.month + 1, 1) - datetime.timedelta(days=1)
+    return max(0, (last_day - today).days + 1)
+
+
+def season_event_multiplier() -> float:
+    return SEASON_WEEKEND_XP_MULT if datetime.date.today().weekday() >= 5 else 1.0
+
+
+def season_event_label() -> str | None:
+    if season_event_multiplier() > 1:
+        return "Выходные: +50% сезонного XP"
+    return None
+
+
+def season_xp_for_next_level(level: int) -> int:
+    return SEASON_XP_BASE + max(0, level) * SEASON_XP_STEP
+
+
+def season_level_from_xp(xp: int) -> tuple[int, int]:
+    xp = max(0, int(xp or 0))
+    level = 0
+    remaining = xp
+    while level < SEASON_LEVELS:
+        need = season_xp_for_next_level(level)
+        if remaining < need:
+            break
+        remaining -= need
+        level += 1
+    return level, remaining
+
+
+def season_progress_bar(remaining: int, needed: int, width: int = 10) -> str:
+    if needed <= 0:
+        return "▰" * width
+    filled = max(0, min(width, int(width * remaining / needed)))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def season_reward(level: int, premium: bool = False) -> dict:
+    coins = 100 + level * 50
+    gems = 0
+    catalysts = 0
+    if premium:
+        gems = 5 + level * 2
+        if level % 5 == 0:
+            catalysts = 1
+    else:
+        if level % 5 == 0:
+            gems = 5
+        if level % 10 == 0:
+            catalysts = 1
+    return {"coins": coins, "gems": gems, "catalysts": catalysts}
+
+
+def season_reward_text(level: int, premium: bool = False) -> str:
+    reward = season_reward(level, premium)
+    parts = [f"🪙 {reward['coins']}"]
+    if reward["gems"]:
+        parts.append(f"💎 {reward['gems']}")
+    if reward["catalysts"]:
+        parts.append(f"🧪 {reward['catalysts']}")
+    return " | ".join(parts)
+
+
+def _parse_season_claimed(raw) -> set[int]:
+    try:
+        return {int(value) for value in json.loads(raw or "[]")}
+    except Exception:
+        return set()
+
+
+async def get_season_data(user_id: int) -> dict:
+    season_id = current_season_id()
+    await bot.db.execute(
+        "INSERT OR IGNORE INTO season_progress (user_id, season_id, updated_at) "
+        "VALUES (?, ?, ?)",
+        (user_id, season_id, datetime.datetime.now().isoformat()),
+    )
+    await bot.db.commit()
+
+    async with bot.db.execute(
+        "SELECT xp, premium, claimed_free, claimed_premium "
+        "FROM season_progress WHERE user_id = ? AND season_id = ?",
+        (user_id, season_id),
+    ) as c:
+        row = await c.fetchone()
+
+    xp, premium, free_json, premium_json = row or (0, 0, "[]", "[]")
+    xp = xp or 0
+    premium = bool(premium)
+    claimed_free = _parse_season_claimed(free_json)
+    claimed_premium = _parse_season_claimed(premium_json)
+    level, remaining = season_level_from_xp(xp)
+    needed = season_xp_for_next_level(level) if level < SEASON_LEVELS else 0
+
+    return {
+        "season_id": season_id,
+        "season_name": current_season_name(),
+        "xp": xp,
+        "level": level,
+        "remaining": remaining,
+        "needed": needed,
+        "premium": premium,
+        "days_left": season_days_left(),
+        "claimed_free": claimed_free,
+        "claimed_premium": claimed_premium,
+        "claimable_free": [
+            lvl for lvl in range(1, level + 1) if lvl not in claimed_free
+        ],
+        "claimable_premium": [
+            lvl for lvl in range(1, level + 1) if lvl not in claimed_premium
+        ] if premium else [],
+    }
+
+
+async def add_season_xp(user_id: int, base_amount: int) -> int:
+    """Начисляет сезонный XP. Ошибки не должны ломать основное действие."""
+    if base_amount <= 0:
+        return 0
+    amount = max(1, int(round(base_amount * season_event_multiplier())))
+    season_id = current_season_id()
+    now = datetime.datetime.now().isoformat()
+    try:
+        async with db_transaction():
+            await bot.db.execute(
+                "INSERT OR IGNORE INTO season_progress "
+                "(user_id, season_id, updated_at) VALUES (?, ?, ?)",
+                (user_id, season_id, now),
+            )
+            await bot.db.execute(
+                "UPDATE season_progress SET xp = xp + ?, updated_at = ? "
+                "WHERE user_id = ? AND season_id = ?",
+                (amount, now, user_id, season_id),
+            )
+    except Exception:
+        log.exception("Не удалось начислить сезонный XP пользователю %s", user_id)
+        return 0
+    return amount
+
+
+async def buy_season_premium(user_id: int) -> tuple[bool, str]:
+    season_id = current_season_id()
+    now = datetime.datetime.now().isoformat()
+    try:
+        async with db_transaction():
+            await bot.db.execute(
+                "INSERT OR IGNORE INTO season_progress "
+                "(user_id, season_id, updated_at) VALUES (?, ?, ?)",
+                (user_id, season_id, now),
+            )
+            async with bot.db.execute(
+                "SELECT premium FROM season_progress "
+                "WHERE user_id = ? AND season_id = ?",
+                (user_id, season_id),
+            ) as c:
+                row = await c.fetchone()
+            if row and row[0]:
+                raise ValueError("Премиум-пропуск уже активен.")
+
+            cur = await bot.db.execute(
+                "UPDATE players SET gems = gems - ? "
+                "WHERE user_id = ? AND gems >= ?",
+                (SEASON_PREMIUM_COST_GEMS, user_id, SEASON_PREMIUM_COST_GEMS),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"Нужно {GEM} {SEASON_PREMIUM_COST_GEMS}.")
+
+            await bot.db.execute(
+                "UPDATE season_progress SET premium = 1, updated_at = ? "
+                "WHERE user_id = ? AND season_id = ?",
+                (now, user_id, season_id),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}"
+    return True, (
+        f"{get_emoji('_approve')} Премиум-пропуск активирован! "
+        f"Открыты премиум-награды сезона «{current_season_name()}»."
+    )
+
+
+async def claim_season_rewards(user_id: int) -> tuple[bool, str, dict]:
+    season_id = current_season_id()
+    now = datetime.datetime.now().isoformat()
+    totals = {"coins": 0, "gems": 0, "catalysts": 0, "levels": 0}
+    try:
+        async with db_transaction():
+            await bot.db.execute(
+                "INSERT OR IGNORE INTO season_progress "
+                "(user_id, season_id, updated_at) VALUES (?, ?, ?)",
+                (user_id, season_id, now),
+            )
+            async with bot.db.execute(
+                "SELECT xp, premium, claimed_free, claimed_premium "
+                "FROM season_progress WHERE user_id = ? AND season_id = ?",
+                (user_id, season_id),
+            ) as c:
+                row = await c.fetchone()
+            if not row:
+                raise ValueError("Сезонный прогресс не найден.")
+
+            xp, premium, free_json, premium_json = row
+            level, _ = season_level_from_xp(xp or 0)
+            premium = bool(premium)
+            claimed_free = _parse_season_claimed(free_json)
+            claimed_premium = _parse_season_claimed(premium_json)
+
+            free_levels = [
+                lvl for lvl in range(1, level + 1) if lvl not in claimed_free
+            ]
+            premium_levels = [
+                lvl for lvl in range(1, level + 1) if lvl not in claimed_premium
+            ] if premium else []
+
+            if not free_levels and not premium_levels:
+                raise ValueError("Нет наград для получения.")
+
+            for lvl in free_levels:
+                reward = season_reward(lvl, premium=False)
+                for key in ("coins", "gems", "catalysts"):
+                    totals[key] += reward[key]
+                totals["levels"] += 1
+            for lvl in premium_levels:
+                reward = season_reward(lvl, premium=True)
+                for key in ("coins", "gems", "catalysts"):
+                    totals[key] += reward[key]
+                totals["levels"] += 1
+
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ?, gems = gems + ?, "
+                "catalysts = catalysts + ?, "
+                "total_coins_earned = total_coins_earned + ?, "
+                "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
+                (
+                    totals["coins"], totals["gems"], totals["catalysts"],
+                    totals["coins"], totals["gems"], user_id,
+                ),
+            )
+
+            new_free = claimed_free | set(free_levels)
+            new_premium = claimed_premium | set(premium_levels)
+            await bot.db.execute(
+                "UPDATE season_progress SET claimed_free = ?, "
+                "claimed_premium = ?, updated_at = ? "
+                "WHERE user_id = ? AND season_id = ?",
+                (
+                    json.dumps(sorted(new_free)),
+                    json.dumps(sorted(new_premium)),
+                    now, user_id, season_id,
+                ),
+            )
+    except ValueError as e:
+        return False, f"❌ {e}", totals
+
+    try:
+        await check_achievements(user_id)
+    except Exception:
+        log.exception("Не удалось проверить достижения после наград сезона")
+    parts = [f"{COIN} {totals['coins']}", f"{GEM} {totals['gems']}"]
+    if totals["catalysts"]:
+        parts.append(f"{get_emoji('_catalyst')} {totals['catalysts']}")
+    message = (
+        f"{get_emoji('_approve')} Получено наград: **{totals['levels']}**\n"
+        + " | ".join(parts)
+    )
+    return True, message, totals
+
+
 async def get_combat_power(user_id: int) -> int:
     """Считает боевую мощь на основе цены и звезд генераторов в замке."""
     async with bot.db.execute("""
@@ -3391,6 +3702,7 @@ async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
     async with bot.db.execute("SELECT quest_id, progress FROM player_quests WHERE user_id = ?", (user_id,)) as c:
         rows = await c.fetchall()
     progress_map = {r[0]: r[1] for r in rows}
+    completed_count = 0
 
     for qid, (name, desc, target, q_type, reward) in STORY_QUESTS.items():
         if q_type != action_type:
@@ -3407,12 +3719,15 @@ async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
         )
         # Если квест только что выполнен — даём награду
         if new_val >= target and current < target:
+            completed_count += 1
             await bot.db.execute(
                 "UPDATE players SET gems = gems + ?, "
                 "total_gems_earned = total_gems_earned + ? WHERE user_id = ?",
                 (reward, reward, user_id),
             )
     await bot.db.commit()
+    if completed_count:
+        await add_season_xp(user_id, 50 * completed_count)
 
 async def sync_story_achievements(user_id: int):
     """Синхронизирует прогресс квестов типа 'achievements' с реальным количеством достижений."""
@@ -3495,6 +3810,7 @@ async def claim_daily(user_id: int) -> dict:
 
     await update_quest_progress(user_id, "claim_daily")
     await check_achievements(user_id)
+    await add_season_xp(user_id, 25)
 
     return {"ok": True, "day": new_streak, "coins": coins, "gems": gems,
             "item": item_name, "streak": new_streak}
@@ -4557,6 +4873,7 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
     except ValueError as e:
         return False, f"❌ {e}", 0, points
 
+    await add_season_xp(user_id, 100)
     new_points = points + gain
     return (
         True,
@@ -4652,6 +4969,7 @@ async def check_achievements(user_id: int):
     if newly_unlocked:
         await bot.db.commit()
         await sync_story_achievements(user_id)
+        await add_season_xp(user_id, 30 * len(newly_unlocked))
     return newly_unlocked
 
 
@@ -4788,6 +5106,7 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
 
     # --- Формируем строку бонусов ---
     total_pct = await get_total_bonus_percent(user_id)
+    season = await get_season_data(user_id)
     embed = BotEmbed(
         title=f"{castle} {settings['bot_name']} — Замок {interaction.user.name}",
         description="Выбери раздел кнопками ниже.",
@@ -4802,6 +5121,11 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     embed.add_field(name="Доход", value=income_str, inline=False)
     embed.add_field(name="Бонус", value=f"+{total_pct}%", inline=True)
     embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
+    embed.add_field(
+        name="Сезон",
+        value=f"Ур. **{season['level']}/{SEASON_LEVELS}** · {season['days_left']} дн.",
+        inline=True,
+    )
     embed = await fix_embed_emojis(embed)
     return embed
 
@@ -6247,6 +6571,11 @@ class MainMenuView(BaseView):
         embed = await build_prestige_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=PrestigeView(self.author_id))
 
+    @discord.ui.button(label="Сезон", emoji=get_emoji("_advent"), style=discord.ButtonStyle.primary, row=3)
+    async def tab_season(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_season_view(interaction, self.author_id)
+
 
 async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
@@ -6574,11 +6903,160 @@ class QuestsHubView(BaseView):
             embed=embed, view=QuestsView(self.author_id, return_to="quests")
         )
 
+    @discord.ui.button(label="Сезон", emoji=get_emoji("_advent"), style=discord.ButtonStyle.primary, row=0)
+    async def btn_season(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_season_view(interaction, self.author_id)
+
     @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=MainMenuView(self.author_id))
+
+async def build_season_embed(user_id: int):
+    data = await get_season_data(user_id)
+    level = data["level"]
+
+    if level >= SEASON_LEVELS:
+        progress_text = (
+            f"Уровень **{SEASON_LEVELS}/{SEASON_LEVELS}** — максимум\n"
+            f"Всего XP: **{data['xp']}**"
+        )
+    else:
+        bar = season_progress_bar(data["remaining"], data["needed"])
+        progress_text = (
+            f"Уровень **{level}/{SEASON_LEVELS}**\n"
+            f"`{bar}` {data['remaining']}/{data['needed']} XP\n"
+            f"Всего XP: **{data['xp']}**"
+        )
+
+    embed = BotEmbed(
+        title=f"{get_emoji('_advent')} Сезон: {data['season_name']}",
+        description=(
+            f"До конца сезона: **{data['days_left']} дн.**\n"
+            "XP за синтезы, рейды, дуэли, квесты, достижения и перерождение."
+        ),
+        color=0x9b59b6,
+    )
+    embed.add_field(name="Прогресс", value=progress_text, inline=False)
+
+    event = season_event_label()
+    if event:
+        embed.add_field(name="Событие", value=event, inline=False)
+
+    next_levels = list(
+        range(data["level"] + 1, min(data["level"] + 5, SEASON_LEVELS) + 1)
+    )
+    if next_levels:
+        free_text = "\n".join(
+            f"Ур. {lvl}: {season_reward_text(lvl)}" for lvl in next_levels
+        )
+        premium_text = "\n".join(
+            f"Ур. {lvl}: {season_reward_text(lvl, premium=True)}"
+            for lvl in next_levels
+        )
+    else:
+        free_text = "Максимальный уровень достигнут."
+        premium_text = free_text
+
+    embed.add_field(name="Бесплатные награды", value=free_text, inline=True)
+    embed.add_field(name="Премиум-награды", value=premium_text, inline=True)
+
+    if data["premium"]:
+        pass_text = f"{get_emoji('_approve')} Активен"
+    else:
+        pass_text = f"Не куплен — {GEM} {SEASON_PREMIUM_COST_GEMS}"
+
+    claimable = len(data["claimable_free"]) + len(data["claimable_premium"])
+    if claimable:
+        pass_text += (
+            f"\nК получению: **{len(data['claimable_free'])}** бесплатных"
+        )
+        if data["premium"]:
+            pass_text += f" + **{len(data['claimable_premium'])}** премиум"
+
+    embed.add_field(name="Премиум-пропуск", value=pass_text, inline=False)
+    embed.set_footer(
+        text=f"Сезон {data['season_id']} · Уровень = {SEASON_XP_BASE}+ XP"
+    )
+    return embed, data
+
+
+async def open_season_view(interaction: discord.Interaction, author_id: int):
+    embed, data = await build_season_embed(author_id)
+    await interaction.edit_original_response(
+        embed=embed, view=SeasonView(author_id, data)
+    )
+
+
+class SeasonView(BaseView):
+    def __init__(self, author_id: int, data: dict):
+        super().__init__(author_id)
+        self.data = data
+        self.btn_premium.disabled = bool(data["premium"])
+        if data["premium"]:
+            self.btn_premium.label = "Премиум активен"
+        self.btn_claim.disabled = not (
+            data["claimable_free"] or data["claimable_premium"]
+        )
+
+    @discord.ui.button(label="Забрать награды", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success, row=0)
+    async def btn_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        _ok, msg, _totals = await claim_season_rewards(self.author_id)
+        await interaction.followup.send(msg, ephemeral=True)
+        await open_season_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Премиум", emoji=get_emoji("_vip"), style=discord.ButtonStyle.primary, row=0)
+    async def btn_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=BotEmbed(
+                title="Премиум-пропуск",
+                description=(
+                    f"Активировать премиум-пропуск за {GEM} "
+                    f"**{SEASON_PREMIUM_COST_GEMS}**?\n\n"
+                    "Откроются премиум-награды всех полученных уровней сезона."
+                ),
+                color=0x9b59b6,
+            ),
+            view=SeasonPremiumConfirmView(self.author_id, SEASON_PREMIUM_COST_GEMS),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_season_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await build_main_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=MainMenuView(self.author_id)
+        )
+
+
+class SeasonPremiumConfirmView(BaseView):
+    def __init__(self, author_id: int, cost: int):
+        super().__init__(author_id)
+        self.cost = cost
+
+    @discord.ui.button(label=f"Купить за {SEASON_PREMIUM_COST_GEMS}", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
+    async def btn_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        ok, msg = await buy_season_premium(self.author_id)
+        if not ok:
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+        await open_season_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_season_view(interaction, self.author_id)
+
 
 class AutocollectorView(BaseView):
     def __init__(self, author_id: int, return_to: str = "shop", timeout: int = 600):
@@ -8457,6 +8935,7 @@ async def finalize_raid(result: dict):
                 )
                 await bot.db.commit()
                 await check_achievements(uid)
+            await add_season_xp(uid, 40 if result["success"] else 10)
         except Exception:
             log.exception("Не удалось обновить прогресс рейда для %s", uid)
 
@@ -9245,6 +9724,10 @@ async def resolve_duel(challenger_id: int, opponent_id: int, bet: int, mode: str
 
     await check_achievements(challenger_id)
     await check_achievements(opponent_id)
+
+    loser = opponent_id if winner == challenger_id else challenger_id
+    await add_season_xp(winner, 40)
+    await add_season_xp(loser, 10)
 
     winner_name = f"<@{winner}>"
     msg = (
@@ -11579,6 +12062,7 @@ class CraftConfirmView(discord.ui.View):
             await update_clan_quest(clan[0], "synthesize", 1)
 
         unlocked = await check_achievements(user_id)
+        await add_season_xp(user_id, 25 if success else 8)
 
         if guaranteed:
             chance_str = "🎲 100% (гарантия pity)"
@@ -12318,6 +12802,7 @@ class ClaimQuestSelectView(discord.ui.View):
              reward_gems, reward_coins, user_id)
         )
         await bot.db.commit()
+        await add_season_xp(user_id, 20)
         embed = BotEmbed(
             title="🎁 Награда получена",
             description=f"💎 **{reward_gems}** гемов и 🪙 **{reward_coins}** монет за «{desc}»!",
@@ -13155,6 +13640,7 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                     "advent_progress", "advent_state", "bank_deposits",
                     "bank_history", "user_notifications", "player_quests",
                     "user_cosmetics", "tax_log", "raid_cooldowns",
+                    "season_progress",
                 ):
                     await bot.db.execute(
                         f"DELETE FROM {table} WHERE user_id = ?", (self.author_id,)
@@ -15084,7 +15570,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                 "user_pets_v2", "autocollectors", "advent_progress", "advent_state",
                 "bank_deposits", "bank_history", "user_notifications",
                 "player_quests", "user_cosmetics", "tax_log", "raid_cooldowns",
-                "player_collection",
+                "player_collection", "season_progress",
             ):
                 await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
 
