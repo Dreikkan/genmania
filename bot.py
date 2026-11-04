@@ -313,6 +313,12 @@ MARKET_HISTORY_LIMIT = 20             # точек истории цен
 MARKET_ORDER_DURATION_HOURS = 72      # срок ордера
 MARKET_ORDER_PAGE_SIZE = 10
 MARKET_ORDER_RARITIES = {"common", "uncommon", "rare", "epic", "legendary", "mythic"}
+SHOP_MARKET_MIN_RATIO = 0.80          # биржа для магазинных генераторов: 80–120%
+SHOP_MARKET_MAX_RATIO = 1.20
+MARKET_MIN_RATIO = 0.50               # epic+: 50–200% от базовой цены
+MARKET_MAX_RATIO = 2.00
+MARKET_MAX_STEP = 0.10                # максимум изменения цены за цикл
+STARTER_SHOP_DISCOUNT = 0.50          # скидка новичку на первый генератор
 
 # --- ОТРЯДЫ РЕЙДОВ ---
 RAID_PARTY_MAX = 3                    # лидер + 2 участника
@@ -386,7 +392,7 @@ STAR_PITY_BONUS = 0.05        # +5% к шансу звезды за провал
 STAR_PITY_MAX = 0.30          # максимум +30% от pity
 STAR_HARD_PITY = 10           # 10-я попытка гарантирована
 SELL_RATE = 0.10  # 10% от цены (было 35%)
-SELL_ALLOWED_RARITIES = {"common", "uncommon", "rare"}  # epic+ — только синтез/аукцион
+SELL_ALLOWED_RARITIES = {"common", "uncommon", "rare"}  # epic+ — аукцион, кроме synthesis-only
 
 
 def calculate_sell_price(price: int, stars: int = 0) -> int:
@@ -409,6 +415,46 @@ def calculate_market_buy_prices(
     )
     avg_price = max(1, int((int(price) + int(new_price)) / 2))
     return avg_price, new_price
+
+
+def market_price_bounds(item_price: int, buyable: bool) -> tuple[int, int]:
+    """Допустимый коридор биржевой цены.
+
+    Для магазинных генераторов биржа не может уйти дальше ±20% от
+    фиксированной цены магазина. Для epic+ коридор шире — 50–200%.
+    """
+    base = max(1, int(item_price or 1))
+    if buyable:
+        return (
+            max(1, int(base * SHOP_MARKET_MIN_RATIO)),
+            max(1, int(base * SHOP_MARKET_MAX_RATIO)),
+        )
+    return (
+        max(1, int(base * MARKET_MIN_RATIO)),
+        max(1, int(base * MARKET_MAX_RATIO)),
+    )
+
+
+def market_order_price_bounds(item_price: int, buyable: bool) -> tuple[int, int]:
+    """Границы цены в ордере.
+
+    Для магазинных генераторов верхняя граница — цена магазина, чтобы
+    нельзя было скупить товар в магазине и перепродать дороже.
+    """
+    low, high = market_price_bounds(item_price, buyable)
+    if buyable:
+        high = max(low, int(item_price or high))
+    return low, high
+
+
+def clamp_market_price(price, item_price: int, buyable: bool) -> int:
+    low, high = market_price_bounds(item_price, buyable)
+    value = int(price or item_price or 1)
+    return min(high, max(low, value))
+
+
+def is_synthesis_only(item_id: str) -> bool:
+    return item_id in GEN_SYNTHESIS_ONLY
 BANK_MAX_DEPOSIT = 50000       # базовый максимум монет на вклад
 BANK_DAILY_RATE = 0.02         # 2% в день (сложный процент)
 BANK_MAX_DAYS = 30
@@ -2552,6 +2598,23 @@ class CastleBot(commands.Bot):
                 SELECT 1 FROM market_history mh WHERE mh.item_id = mp.item_id
             )
         """)
+        async with self.db.execute(
+            "SELECT mp.item_id, mp.current_price, i.price, i.buyable "
+            "FROM market_prices mp JOIN items i ON i.id = mp.item_id"
+        ) as c:
+            market_rows = await c.fetchall()
+        for item_id, current, item_price, buyable in market_rows:
+            normalized = clamp_market_price(
+                current or item_price or 1,
+                item_price or 1,
+                bool(buyable),
+            )
+            if normalized != current:
+                await self.db.execute(
+                    "UPDATE market_prices SET current_price = ? "
+                    "WHERE item_id = ?",
+                    (normalized, item_id),
+                )
         await self.db.commit()
 
             # --- pets (пересоздаём с составным ключом) ---
@@ -2979,14 +3042,24 @@ class CastleBot(commands.Bot):
             try:
                 await asyncio.sleep(21600)  # 6 часов
                 async with self.db.execute(
-                    "SELECT item_id, base_price, demand, supply FROM market_prices"
+                    "SELECT mp.item_id, mp.base_price, mp.current_price, "
+                    "mp.demand, mp.supply, i.price, i.buyable "
+                    "FROM market_prices mp JOIN items i ON i.id = mp.item_id"
                 ) as c:
                     rows = await c.fetchall()
 
-                for item_id, base, demand, supply in rows:
+                for item_id, base, current, demand, supply, item_price, buyable in rows:
+                    old_price = int(current or item_price or base or 1)
+                    anchor = int(item_price or base or old_price)
                     ratio = 1.0 + (demand - supply) / max(1, demand + supply) * 0.5
-                    new_price = int(base * ratio)
-                    new_price = max(int(base * 0.5), min(int(base * 2.0), new_price))
+                    target = int(old_price * ratio)
+                    max_step = max(1, int(old_price * MARKET_MAX_STEP))
+                    stepped = old_price + max(
+                        -max_step, min(max_step, target - old_price)
+                    )
+                    new_price = clamp_market_price(
+                        stepped, anchor, bool(buyable)
+                    )
                     await self.db.execute(
                         "UPDATE market_prices SET current_price = ?, demand = 0, supply = 0, "
                         "last_update = ? WHERE item_id = ?",
@@ -7817,9 +7890,11 @@ async def build_clan_war_embed(interaction: discord.Interaction, war, clan_id: i
 async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, str]:
     if qty <= 0:
         return False, "❌ Количество должно быть больше нуля."
+    if is_synthesis_only(item_id):
+        return False, "❌ Этот генератор нельзя купить: только синтез."
 
     async with bot.db.execute("""
-        SELECT i.name, i.price, mp.current_price, mp.base_price,
+        SELECT i.name, i.price, i.buyable, mp.current_price, mp.base_price,
                mp.demand, mp.supply
         FROM items i
         JOIN market_prices mp ON mp.item_id = i.id
@@ -7828,9 +7903,22 @@ async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, s
         row = await c.fetchone()
     if not row:
         return False, "❌ Предмет не найден на бирже."
-    name, item_price, current_price, base_price, demand0, supply0 = row
-    price = current_price or item_price or base_price or 1
-    avg_price, new_price = calculate_market_buy_prices(price, base_price, qty)
+    name, item_price, buyable, current_price, base_price, demand0, supply0 = row
+    price = clamp_market_price(
+        current_price or item_price or base_price or 1,
+        item_price or base_price or 1,
+        bool(buyable),
+    )
+    avg_price, new_price = calculate_market_buy_prices(
+        price, item_price or base_price or price, qty
+    )
+    new_price = clamp_market_price(
+        new_price, item_price or base_price or price, bool(buyable)
+    )
+    avg_price = min(
+        new_price,
+        max(price, avg_price),
+    )
     total = avg_price * qty
 
     try:
@@ -7878,10 +7966,12 @@ async def buy_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, s
 async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, str]:
     if qty <= 0:
         return False, "❌ Количество должно быть больше нуля."
+    if is_synthesis_only(item_id):
+        return False, "❌ Этот генератор нельзя продать: только синтез."
 
     async with bot.db.execute("""
-        SELECT i.name, i.price, i.rarity, mp.current_price, mp.base_price,
-               mp.demand, mp.supply
+        SELECT i.name, i.price, i.rarity, i.buyable, mp.current_price,
+               mp.base_price, mp.demand, mp.supply
         FROM items i
         JOIN market_prices mp ON mp.item_id = i.id
         WHERE i.id = ?
@@ -7889,11 +7979,15 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
         row = await c.fetchone()
     if not row:
         return False, "❌ Предмет не найден на бирже."
-    name, item_price, rarity, current_price, base_price, demand0, supply0 = row
+    name, item_price, rarity, buyable, current_price, base_price, demand0, supply0 = row
     if rarity not in SELL_ALLOWED_RARITIES:
         return False, "❌ Предметы этой редкости продаются только через аукцион."
 
-    price = current_price or item_price or base_price or 1
+    price = clamp_market_price(
+        current_price or item_price or base_price or 1,
+        item_price or base_price or 1,
+        bool(buyable),
+    )
     proceeds = max(1, int(price * MARKET_SELL_RATE)) * qty
 
     try:
@@ -7926,9 +8020,10 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
                 (proceeds, proceeds, user_id),
             )
 
-            new_price = max(
-                int(base_price * 0.5) if base_price else 1,
-                max(1, int(price * (1 - 0.01 * qty))),
+            new_price = clamp_market_price(
+                int(price * (1 - 0.01 * qty)),
+                item_price or base_price or price,
+                bool(buyable),
             )
             await bot.db.execute(
                 "UPDATE market_prices SET supply = supply + ?, "
@@ -8056,11 +8151,14 @@ async def build_market_embed(
         "name": "i.name ASC",
     }
     sort = sort if sort in sort_map else "change"
-    where = ""
-    params: list = []
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
+    conditions = [f"mp.item_id NOT IN ({hidden_ph})"]
+    params: list = list(hidden)
     if rarity:
-        where = "WHERE i.rarity = ?"
+        conditions.append("i.rarity = ?")
         params.append(rarity)
+    where = "WHERE " + " AND ".join(conditions)
 
     async with bot.db.execute(
         f"SELECT COUNT(*) FROM market_prices mp "
@@ -8075,7 +8173,7 @@ async def build_market_embed(
     async with bot.db.execute(
         f"""
         SELECT mp.item_id, i.name, i.emoji, mp.base_price, mp.current_price,
-               mp.demand, mp.supply,
+               mp.demand, mp.supply, i.price, i.buyable,
                (SELECT GROUP_CONCAT(price, ',') FROM (
                     SELECT price FROM market_history mh
                     WHERE mh.item_id = mp.item_id ORDER BY mh.id DESC LIMIT 6
@@ -8104,6 +8202,9 @@ async def build_market_embed(
             f"Страница {page + 1}/{total_pages}\n"
             "Покупка — по средней цене пачки. Продажа — "
             f"**{int(MARKET_SELL_RATE * 100)}%** от текущей цены.\n"
+            "Для магазинных генераторов цена ограничена "
+            f"**{int(SHOP_MARKET_MIN_RATIO * 100)}–"
+            f"{int(SHOP_MARKET_MAX_RATIO * 100)}%** цены магазина.\n"
             f"Фильтр: **{rarity_label}** · Сортировка: **{sort_names[sort]}**"
         ),
         color=0x9b59b6,
@@ -8112,7 +8213,13 @@ async def build_market_embed(
         embed.add_field(name="Пусто", value="На бирже пока нет товаров.")
         return await fix_embed_emojis(embed), total_pages
 
-    for item_id, name, emoji, base, current, demand, supply, recent in rows:
+    for item_id, name, emoji, base, current, demand, supply, item_price, buyable, recent in rows:
+        current = clamp_market_price(
+            current or item_price or base or 1,
+            item_price or base or 1,
+            bool(buyable),
+        )
+        base = item_price or base
         trend = "🟢" if current > base else ("🔴" if current < base else "⚪")
         prices = [
             int(value) for value in (recent or "").split(",") if value
@@ -8140,14 +8247,21 @@ async def create_market_order(
         return False, "❌ Количество и цена должны быть больше нуля."
 
     async with bot.db.execute(
-        "SELECT name, rarity FROM items WHERE id = ?", (item_id,)
+        "SELECT name, rarity, price, buyable FROM items WHERE id = ?", (item_id,)
     ) as c:
         item = await c.fetchone()
     if not item:
         return False, "❌ Предмет не найден."
-    name, rarity = item
+    name, rarity, item_price, buyable = item
+    if is_synthesis_only(item_id):
+        return False, "❌ Этот генератор нельзя торговать: только синтез."
     if rarity not in MARKET_ORDER_RARITIES:
-        return False, "❌ Ордера доступны только для common/uncommon/rare."
+        return False, "❌ Ордера недоступны для этой редкости."
+    low, high = market_order_price_bounds(item_price, bool(buyable))
+    if not (low <= price <= high):
+        return False, (
+            f"❌ Цена ордера вне коридора: 🪙 {low}–{high}."
+        )
 
     expires = (
         datetime.datetime.now()
@@ -8225,6 +8339,22 @@ async def fill_market_order(order_id: int, user_id: int) -> tuple[bool, str]:
                 raise ValueError("Ордер истёк.")
             if owner_id == user_id:
                 raise ValueError("Нельзя исполнить свой ордер.")
+
+            async with bot.db.execute(
+                "SELECT price, buyable FROM items WHERE id = ?", (item_id,)
+            ) as c:
+                item_row = await c.fetchone()
+            if not item_row:
+                raise ValueError("Предмет не найден.")
+            item_price, item_buyable = item_row
+            low, high = market_order_price_bounds(
+                item_price, bool(item_buyable)
+            )
+            if not (low <= price <= high):
+                raise ValueError(
+                    "Цена ордера устарела и вышла за коридор. "
+                    "Попроси продавца создать новый ордер."
+                )
 
             remaining = quantity - filled
             if remaining <= 0:
@@ -8397,6 +8527,30 @@ async def expire_market_orders():
     await commit_if_needed()
 
 
+def starter_shop_total(price: int, qty: int) -> int:
+    """Стоимость покупки со скидкой на первую штуку."""
+    if qty <= 0:
+        return 0
+    discounted_unit = max(1, int(price * STARTER_SHOP_DISCOUNT))
+    return discounted_unit + price * (qty - 1)
+
+
+async def is_starter_shop_purchase(user_id: int, item_id: str) -> bool:
+    """Первый генератор новичка: скидка один раз, пока нет генераторов."""
+    if not item_id.endswith("_gen"):
+        return False
+    completed = await get_onboarding_progress(user_id)
+    if "buy_generator" in completed:
+        return False
+    async with bot.db.execute(
+        "SELECT 1 FROM inventory inv "
+        "JOIN items i ON inv.item_id = i.id "
+        "WHERE inv.user_id = ? AND i.id LIKE '%_gen' LIMIT 1",
+        (user_id,),
+    ) as c:
+        return await c.fetchone() is None
+
+
 async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
@@ -8410,6 +8564,11 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
         "FROM items WHERE id LIKE '%_gen' ORDER BY price ASC"
     ) as c:
         rows = await c.fetchall()
+
+    async with bot.db.execute(
+        "SELECT item_id, current_price FROM market_prices"
+    ) as c:
+        market_current = dict(await c.fetchall())
 
     total = len(rows)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -8433,6 +8592,7 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
             f"Баланс: {coin} **{format_price(balance_coins)}** | "
             f"{gem} **{format_price(balance_gems)}**\n"
             f"Стоимость всей страницы: {coin} **{format_price(page_total)}**\n"
+            "Магазин — фиксированная цена, биржа — вторичный рынок.\n"
             f"-# {INCOME_HINT}"
         ),
         color=0xf1c40f,
@@ -8452,10 +8612,24 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
             price_str = "Цена: `Только синтез`"
         else:
             price_str = "Покупка на бирже/аукционе"
-            
+
+        market_str = ""
+        if item_id not in GEN_SYNTHESIS_ONLY and item_id in market_current:
+            market_price = clamp_market_price(
+                market_current[item_id] or price,
+                price,
+                bool(buyable),
+            )
+            market_str = f"Биржа: {coin} {format_price(market_price)}"
+
+        value_parts = [price_str]
+        if market_str:
+            value_parts.append(market_str)
+        value_parts.extend([inc_str, RARITY_NAMES.get(rarity, rarity)])
+
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
-            value=f"{price_str} | {inc_str} | {RARITY_NAMES.get(rarity, rarity)}",
+            value=" | ".join(value_parts),
             inline=False
         )
         
@@ -10540,10 +10714,14 @@ async def open_market_view(
 
 
 async def build_trading_hub_embed() -> discord.Embed:
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
     async with bot.db.execute(
         "SELECT mp.item_id, i.name, i.emoji, mp.current_price, mp.base_price, "
-        "mp.demand, mp.supply FROM market_prices mp "
-        "JOIN items i ON i.id = mp.item_id ORDER BY i.price ASC"
+        "mp.demand, mp.supply, i.price, i.buyable FROM market_prices mp "
+        f"JOIN items i ON i.id = mp.item_id "
+        f"WHERE mp.item_id NOT IN ({hidden_ph}) ORDER BY i.price ASC",
+        hidden,
     ) as c:
         rows = await c.fetchall()
 
@@ -10553,7 +10731,13 @@ async def build_trading_hub_embed() -> discord.Embed:
         color=0x2ecc71,
     )
     shown = 0
-    for item_id, name, emoji, current, base, demand, supply in rows:
+    for item_id, name, emoji, current, base, demand, supply, item_price, buyable in rows:
+        current = clamp_market_price(
+            current or item_price or base or 1,
+            item_price or base or 1,
+            bool(buyable),
+        )
+        base = item_price or base
         async with bot.db.execute(
             "SELECT COUNT(*), MIN(price) FROM market_orders "
             "WHERE item_id = ? AND side = 'sell' AND status = 'active'",
@@ -10719,10 +10903,14 @@ async def open_market_history_select(
     page: int = 0,
     edit: bool = False,
 ):
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
     async with bot.db.execute(
         "SELECT mp.item_id, i.name, i.emoji FROM market_prices mp "
         "JOIN items i ON i.id = mp.item_id "
-        "ORDER BY i.name ASC"
+        f"WHERE mp.item_id NOT IN ({hidden_ph}) "
+        "ORDER BY i.name ASC",
+        hidden,
     ) as c:
         rows = await c.fetchall()
 
@@ -10821,8 +11009,13 @@ async def open_market_orders(
     selected_order: int | None = None,
 ):
     now = datetime.datetime.now().isoformat()
-    where = "o.status = 'active' AND o.expires_at > ?"
-    params: list = [now]
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
+    where = (
+        f"o.status = 'active' AND o.expires_at > ? "
+        f"AND o.item_id NOT IN ({hidden_ph})"
+    )
+    params: list = [now, *hidden]
     if side_filter in ("buy", "sell"):
         where += " AND o.side = ?"
         params.append(side_filter)
@@ -11253,22 +11446,27 @@ async def open_market_order_create(
 ):
     allowed = tuple(MARKET_ORDER_RARITIES)
     placeholders = ",".join("?" for _ in allowed)
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
     if side == "sell":
         async with bot.db.execute(
             f"SELECT inv.item_id, i.name, i.emoji, COUNT(*) AS cnt "
             f"FROM inventory inv JOIN items i ON i.id = inv.item_id "
             f"WHERE inv.user_id = ? AND inv.location = 'storage' "
             f"AND inv.stars = 0 AND i.rarity IN ({placeholders}) "
+            f"AND inv.item_id NOT IN ({hidden_ph}) "
             f"GROUP BY inv.item_id ORDER BY i.name ASC",
-            (author_id, *allowed),
+            (author_id, *allowed, *hidden),
         ) as c:
             rows = await c.fetchall()
     else:
         async with bot.db.execute(
             f"SELECT mp.item_id, i.name, i.emoji, 0 AS cnt "
             f"FROM market_prices mp JOIN items i ON i.id = mp.item_id "
-            f"WHERE i.rarity IN ({placeholders}) ORDER BY i.name ASC",
-            allowed,
+            f"WHERE i.rarity IN ({placeholders}) "
+            f"AND mp.item_id NOT IN ({hidden_ph}) "
+            f"ORDER BY i.name ASC",
+            (*allowed, *hidden),
         ) as c:
             rows = await c.fetchall()
 
@@ -11298,6 +11496,11 @@ async def open_market_order_create(
         ),
         color=0x9b59b6,
     )
+    if rows:
+        embed.description += (
+            "\nЦена: магазинные — не выше цены магазина, "
+            "epic+ — 50–200% от базовой."
+        )
     await interaction.edit_original_response(
         embed=embed,
         view=MarketOrderCreateView(author_id, side, options, page, total_pages),
@@ -11403,12 +11606,16 @@ class MarketOrderCreateModal(discord.ui.Modal, title="Создать ордер"
 
 
 async def open_market_buy_select(interaction: discord.Interaction, author_id: int, page: int = 0):
-    async with bot.db.execute("""
-        SELECT mp.item_id, i.name, i.emoji, mp.current_price
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
+    async with bot.db.execute(f"""
+        SELECT mp.item_id, i.name, i.emoji, mp.current_price,
+               i.price, i.buyable
         FROM market_prices mp
         JOIN items i ON i.id = mp.item_id
+        WHERE mp.item_id NOT IN ({hidden_ph})
         ORDER BY i.name ASC
-    """) as c:
+    """, hidden) as c:
         rows = await c.fetchall()
 
     if not rows:
@@ -11418,14 +11625,20 @@ async def open_market_buy_select(interaction: discord.Interaction, author_id: in
     total_pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * page_size:page * page_size + page_size]
-    options = [
-        discord.SelectOption(
-            label=f"{name} — {current} монет"[:100],
-            value=item_id,
-            emoji=parse_emoji_safe(emoji),
+    options = []
+    for item_id, name, emoji, current, item_price, buyable in chunk:
+        current = clamp_market_price(
+            current or item_price or 1,
+            item_price or 1,
+            bool(buyable),
         )
-        for item_id, name, emoji, current in chunk
-    ]
+        options.append(
+            discord.SelectOption(
+                label=f"{name} — {current} монет"[:100],
+                value=item_id,
+                emoji=parse_emoji_safe(emoji),
+            )
+        )
     embed = BotEmbed(
         title="🛒 Биржа — покупка",
         description=f"Страница {page + 1}/{total_pages}\nВыбери предмет.",
@@ -11504,7 +11717,8 @@ class MarketBuyModal(discord.ui.Modal, title="Купить на бирже"):
 
 async def open_market_sell_select(interaction: discord.Interaction, author_id: int, page: int = 0):
     async with bot.db.execute("""
-        SELECT inv.item_id, i.name, i.emoji, COUNT(*) AS cnt, mp.current_price
+        SELECT inv.item_id, i.name, i.emoji, COUNT(*) AS cnt,
+               mp.current_price, i.price, i.buyable
         FROM inventory inv
         JOIN items i ON i.id = inv.item_id
         JOIN market_prices mp ON mp.item_id = inv.item_id
@@ -11525,14 +11739,20 @@ async def open_market_sell_select(interaction: discord.Interaction, author_id: i
     total_pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     chunk = rows[page * page_size:page * page_size + page_size]
-    options = [
-        discord.SelectOption(
-            label=f"{name} ×{cnt} — {current} монет"[:100],
-            value=item_id,
-            emoji=parse_emoji_safe(emoji),
+    options = []
+    for item_id, name, emoji, cnt, current, item_price, buyable in chunk:
+        current = clamp_market_price(
+            current or item_price or 1,
+            item_price or 1,
+            bool(buyable),
         )
-        for item_id, name, emoji, cnt, current in chunk
-    ]
+        options.append(
+            discord.SelectOption(
+                label=f"{name} ×{cnt} — {current} монет"[:100],
+                value=item_id,
+                emoji=parse_emoji_safe(emoji),
+            )
+        )
     embed = BotEmbed(
         title=f"{get_emoji('_sell')} Биржа — продажа",
         description=(
@@ -19497,18 +19717,24 @@ async def open_auction_sell_select(
     author_id: int,
     page: int = 0,
 ):
-    async with bot.db.execute("""
+    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+    hidden_ph = ",".join("?" for _ in hidden)
+    async with bot.db.execute(f"""
         SELECT inv.slot, inv.item_id, inv.stars, i.name, i.emoji
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'profile'
+              AND inv.item_id NOT IN ({hidden_ph})
+              AND (i.buyable = 0 OR inv.stars > 0)
         ORDER BY inv.slot ASC
-    """, (author_id,)) as c:
+    """, (author_id, *hidden)) as c:
         rows = await c.fetchall()
 
     if not rows:
         return await interaction.followup.send(
-            "❌ В замке нет предметов для аукциона.", ephemeral=True
+            "❌ В замке нет предметов для аукциона "
+            "(магазинные 0★ продаются в магазине).",
+            ephemeral=True,
         )
 
     page_size = 10
@@ -19617,6 +19843,26 @@ class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на �
                 )
         except ValueError:
             return await interaction.followup.send("❌ Неверные данные.", ephemeral=True)
+
+        if self.item_id in GEN_SYNTHESIS_ONLY:
+            return await interaction.followup.send(
+                "❌ Этот генератор нельзя продавать: только синтез.",
+                ephemeral=True,
+            )
+        async with bot.db.execute(
+            "SELECT buyable FROM items WHERE id = ?", (self.item_id,)
+        ) as c:
+            item_row = await c.fetchone()
+        if not item_row:
+            return await interaction.followup.send(
+                "❌ Предмет не найден.", ephemeral=True
+            )
+        if item_row[0] and self.stars == 0:
+            return await interaction.followup.send(
+                "❌ Магазинные генераторы 0★ продаются в магазине, "
+                "а не на аукционе.",
+                ephemeral=True,
+            )
 
         end = datetime.datetime.now() + datetime.timedelta(hours=hours)
         try:
@@ -20575,9 +20821,21 @@ class ShopBuySelectView(SafeView):
         await interaction.response.defer()
         async with bot.db.execute("SELECT name, price, emoji FROM items WHERE id = ?", (item_id,)) as c:
             item = await c.fetchone()
+        starter = await is_starter_shop_purchase(self.author_id, item_id)
+        description = (
+            f"{item[2]} **{item[0]}** — 🪙 {item[1]} за штуку.\n"
+        )
+        if starter:
+            discounted = max(1, int(item[1] * STARTER_SHOP_DISCOUNT))
+            description += (
+                f"🎁 Первый генератор: скидка "
+                f"{int(STARTER_SHOP_DISCOUNT * 100)}% "
+                f"(цена первой штуки — 🪙 {discounted}).\n"
+            )
+        description += "Выбери количество:"
         embed = BotEmbed(
             title="🛒 Покупка",
-            description=f"{item[2]} **{item[0]}** — 🪙 {item[1]} за штуку.\nВыбери количество:",
+            description=description,
             color=0xf1c40f
         )
         await interaction.edit_original_response(embed=embed, view=BuyItemQuantityView(self.author_id, item_id, self.page))
@@ -20650,7 +20908,13 @@ class BuyItemQuantityView(SafeView):
         if not buyable:
             return await self.fail(interaction, f"❌ **{name}** нельзя купить.")
 
-        total_cost = price * qty
+        starter = await is_starter_shop_purchase(user_id, self.item_id)
+        discount = 0
+        if starter and qty > 0:
+            total_cost = starter_shop_total(price, qty)
+            discount = max(0, price * qty - total_cost)
+        else:
+            total_cost = price * qty
 
         # Проверка баланса
         async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (user_id,)) as c:
@@ -20696,6 +20960,11 @@ class BuyItemQuantityView(SafeView):
         emoji = default_emoji or "⚙️" 
         
         msg = f"✅ Куплено {emoji} **{name}** x{qty} за {coin} {format_price(total_cost)}."
+        if discount:
+            msg += (
+                f"\n🎁 Стартовая скидка на первый генератор: "
+                f"−{coin} {format_price(discount)}."
+            )
         if to_storage > 0 or to_temp > 0:
             msg += (
                 f"\n📦 {to_profile} в замок, {to_storage} в хранилище, "
