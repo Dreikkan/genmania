@@ -71,7 +71,7 @@ ONBOARDING_STEPS = {
     ),
     "craft": (
         "Сделай синтез",
-        "Замок → Синтез",
+        "Энергостанция → Синтез",
         100,
         1,
     ),
@@ -232,7 +232,7 @@ RETENTION_LIMITS = {
 SCHEMA_VERSION = 9
 
 # Content migrations: увеличивать при изменении items/achievements/shop.
-CONTENT_VERSION = 5
+CONTENT_VERSION = 6
 
 # --- КОЛЛЕКЦИЯ ---
 COLLECTION_BONUS_PER_ITEM = 0.005     # +0.5% к доходу за каждый открытый генератор
@@ -469,6 +469,7 @@ START_GRID = 9
 STORAGE_SIZE = 36
 TEMP_STORAGE_SIZE = 100
 PAGE_SIZE = 10
+UPGRADES_PAGE_SIZE = 5
 SHOP_SELECT_PAGE_SIZE = 10
 SLOT_WIDTH = 8
 
@@ -495,10 +496,10 @@ QUEST_POOL = {
     "buy_10":         ("Купи 10 предметов в магазине", 10, 4, 150),
     "buy_25":         ("Купи 25 предметов в магазине", 25, 8, 350),
 
-    # --- ЗАМОК И ХРАНИЛИЩЕ ---
-    "move_2":         ("Перемести 2 предмета между замком и хранилищем", 2, 2, 30),
-    "move_5":         ("Перемести 5 предметов между замком и хранилищем", 5, 3, 60),
-    "sort_1":         ("Отсортируй генераторы в замке 1 раз", 1, 2, 40),
+    # --- ЭНЕРГОСТАНЦИЯ И ХРАНИЛИЩЕ ---
+    "move_2":         ("Перемести 2 предмета между энергостанцией и хранилищем", 2, 2, 30),
+    "move_5":         ("Перемести 5 предметов между энергостанцией и хранилищем", 5, 3, 60),
+    "sort_1":         ("Отсортируй генераторы на энергостанции 1 раз", 1, 2, 40),
     "swap_1":         ("Поменяй местами 1 предмет", 1, 2, 40),
     "sell_3":         ("Продай 3 предмета в хранилище", 3, 3, 80),
 
@@ -630,7 +631,7 @@ BOT_BTN_EMOJIS = {
     # Валюты и ресурсы
     "_coin":         discord.PartialEmoji(name="coin", id=1566419648579244123),
     "_gem":          discord.PartialEmoji(name="gem", id=1566419655906820136),
-    "_castle":       discord.PartialEmoji(name="castle", id=1566419642480853022),
+    "_castle":       discord.PartialEmoji(name="energystation", id=1567350064848830494),
     "_storage":      discord.PartialEmoji(name="storage", id=1566419666832728104),
     
     # Меню и разделы
@@ -714,7 +715,7 @@ BOT_BTN_EMOJIS = {
 EMOJI_KEYS = {
     "_coin":         ("Монета", str(BOT_BTN_EMOJIS.get("_coin", "🪙"))),
     "_gem":          ("Гем", str(BOT_BTN_EMOJIS.get("_gem", "💎"))),
-    "_castle":       ("Замок", str(BOT_BTN_EMOJIS.get("_castle", "🏰"))),
+    "_castle":       ("Энергостанция", str(BOT_BTN_EMOJIS.get("_castle", "⚡"))),
     "_storage":      ("Хранилище", str(BOT_BTN_EMOJIS.get("_storage", "🎒"))),
     "_shop":         ("Магазин", str(BOT_BTN_EMOJIS.get("_shop", "🛒"))),
     "_upgrades":     ("Улучшения", str(BOT_BTN_EMOJIS.get("_upgrades", "💎"))),
@@ -741,7 +742,7 @@ EMOJI_KEYS = {
 
 # Стандартные эмодзи (используются, если кастомные отключены)
 UNICODE_EMOJIS = {
-    "_coin": "🪙", "_gem": "💎", "_castle": "🏰", "_storage": "🎒",
+    "_coin": "🪙", "_gem": "💎", "_castle": "⚡", "_storage": "🎒",
     "_shop": "🛒", "_upgrades": "⬆️", "_achievements": "🏆", "_quests": "📅",
     "_dailyquests": "📅", "_storyquests": "📜", "_stats": "📊", "_settings": "⚙️",
     "_customization": "🎨", "_notifications": "📬", "_autocollector": "🤖",
@@ -766,7 +767,7 @@ CUSTOM_EMOJI_RE = re.compile(r"^<a?:([a-zA-Z0-9_]+):(\d+)>$")
 
 COIN = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
 GEM = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
-CASTLE = str(BOT_BTN_EMOJIS.get("_castle", "🏰"))
+CASTLE = str(BOT_BTN_EMOJIS.get("_castle", "⚡"))
 STORAGE = str(BOT_BTN_EMOJIS.get("_storage", "🎒"))
 
 # Сюжетные квесты: id -> (название, описание, цель, тип действия, награда гемами)
@@ -804,7 +805,7 @@ TITLES = {
     "gem_master": ("Гемовый магнат", "Накопи 100 гемов"),
     "quest_hero": ("Герой сюжета", "Выполни 5 сюжетных квестов"),
     "ach_hunter": ("Охотник за достижениями", "Открой 10 достижений"),
-    "grid_master":("Мастер сетки", "Расширь замок до 100 слотов"),
+    "grid_master":("Мастер сетки", "Расширь энергостанцию до 100 слотов"),
     "ascended":   ("Перерождённый", "Соверши перерождение"),
 }
 
@@ -1756,9 +1757,9 @@ class CastleBot(commands.Bot):
 
         grid_emoji = str(BOT_BTN_EMOJIS.get("_inventory", "📐"))
         grid_items = [
-            ("grid_4x4", "Сетка 4×4", "Увеличивает замок до 16 слотов", 500,   16, grid_emoji),
-            ("grid_5x5", "Сетка 5×5", "Увеличивает замок до 25 слотов", 1250,  25, grid_emoji),
-            ("grid_6x6", "Сетка 6×6", "Увеличивает замок до 36 слотов", 1750,  36, grid_emoji),
+            ("grid_4x4", "Сетка 4×4", "Увеличивает энергостанцию до 16 слотов", 500,   16, grid_emoji),
+            ("grid_5x5", "Сетка 5×5", "Увеличивает энергостанцию до 25 слотов", 1250,  25, grid_emoji),
+            ("grid_6x6", "Сетка 6×6", "Увеличивает энергостанцию до 36 слотов", 1750,  36, grid_emoji),
         ]
         for g in grid_items:
             await self.db.execute("INSERT OR IGNORE INTO grid_shop VALUES (?, ?, ?, ?, ?, ?)", g)
@@ -2118,10 +2119,10 @@ class CastleBot(commands.Bot):
             await self.db.execute("INSERT OR IGNORE INTO achievements VALUES (?, ?, ?, ?, ?)", a)
 
         gem_items = [
-            ("grid_7x7",   "Сетка 7×7",   "Увеличивает замок до 49 слотов",  100,  grid_emoji, "upgrade", 1),
-            ("grid_8x8",   "Сетка 8×8",   "Увеличивает замок до 64 слотов",  250,  grid_emoji, "upgrade", 1),
-            ("grid_9x9",   "Сетка 9×9",   "Увеличивает замок до 81 слота",   400,  grid_emoji, "upgrade", 1),
-            ("grid_10x10", "Сетка 10×10", "Увеличивает замок до 100 слотов",1000,  grid_emoji, "upgrade", 1),
+            ("grid_7x7",   "Сетка 7×7",   "Увеличивает энергостанцию до 49 слотов",  100,  grid_emoji, "upgrade", 1),
+            ("grid_8x8",   "Сетка 8×8",   "Увеличивает энергостанцию до 64 слотов",  250,  grid_emoji, "upgrade", 1),
+            ("grid_9x9",   "Сетка 9×9",   "Увеличивает энергостанцию до 81 слота",   400,  grid_emoji, "upgrade", 1),
+            ("grid_10x10", "Сетка 10×10", "Увеличивает энергостанцию до 100 слотов",1000,  grid_emoji, "upgrade", 1),
             ("vip",        "VIP",         "+15% к доходу навсегда",             100,  str(BOT_BTN_EMOJIS.get("_vip", "⭐")), "status", 1),
             ("gold",       "Gold",        "+25% к доходу навсегда",             300,  str(BOT_BTN_EMOJIS.get("_gold", "🥇")), "status", 1),
             ("platinum",   "Platinum",    "+35% к доходу навсегда",             700,  str(BOT_BTN_EMOJIS.get("_platinum", "💠")), "status", 1),
@@ -2774,7 +2775,7 @@ class CastleBot(commands.Bot):
         ):
             await self.db.execute(index_sql)
 
-        # При изменении состава генераторов в замке сбрасываем точку
+        # При изменении состава генераторов на энергостанции сбрасываем точку
         # накопления. Иначе можно купить генератор после недели офлайна
         # и мгновенно получить доход за всё это время.
         for trigger_sql in (
@@ -2919,8 +2920,9 @@ class CastleBot(commands.Bot):
                         (name, price, income, gem_income, rarity, item_id),
                     )
                     await self.db.execute(
-                        "UPDATE market_prices SET base_price = ? WHERE item_id = ?",
-                        (price, item_id),
+                        "UPDATE market_prices SET base_price = ?, current_price = ? "
+                        "WHERE item_id = ?",
+                        (price, price, item_id),
                     )
 
                 for item_id, name, _emoji, rarity, price in daily_gens:
@@ -4284,7 +4286,7 @@ async def claim_season_rewards(user_id: int) -> tuple[bool, str, dict]:
 
 
 async def get_combat_power(user_id: int) -> int:
-    """Считает боевую мощь на основе цены и звезд генераторов в замке."""
+    """Считает боевую мощь на основе цены и звезд генераторов на энергостанции."""
     async with bot.db.execute("""
         SELECT SUM(i.price * (1 + inv.stars * 0.5)) 
         FROM inventory inv 
@@ -4519,7 +4521,7 @@ async def attack_clan_war(war_id: int, user_id: int) -> tuple[bool, str, bool]:
 
     power = await get_combat_power(user_id)
     if power <= 0:
-        return False, "❌ У тебя нет генераторов в замке.", False
+        return False, "❌ У тебя нет генераторов на энергостанции.", False
 
     level, _, _ = await get_clan_level_info(clan_id)
     level_mult = 1 + max(0, level - 1) * 0.01
@@ -4839,7 +4841,7 @@ async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = 
     if total_free < quantity:
         raise ValueError(
             f"Не хватает места: свободно {total_free} "
-            f"(замок + хранилище + временное), нужно {quantity}."
+            f"(энергостанция + хранилище + временное), нужно {quantity}."
         )
 
     to_profile = min(quantity, len(free_profile))
@@ -5852,9 +5854,9 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
         inline=True
     )
 
-    # Замок
+    # Энергостанция
     embed.add_field(
-        name="🏰 Замок",
+        name=f"{CASTLE} Энергостанция",
         value=(
             f"Генераторов: **{gens_total}**\n"
             f"Доходных: **{gens_income}**\n"
@@ -6278,7 +6280,7 @@ def get_set_tier(set_id: str, count: int) -> tuple[int, float]:
 
 
 def compute_set_synergy(rows, grid_size: int) -> dict:
-    """Считает бонусы сетов по раскладке замка.
+    """Считает бонусы сетов по раскладке энергостанции.
 
     rows: [(slot, item_id), ...] только из location='profile'.
     """
@@ -6490,7 +6492,7 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
             await bot.db.execute(
                 "DELETE FROM market_orders WHERE user_id = ?", (user_id,)
             )
-            # Сетки сбрасываются вместе с замком, а купленные статусы
+            # Сетки сбрасываются вместе с энергостанцией, а купленные статусы
             # остаются навсегда.
             await bot.db.execute(
                 "DELETE FROM player_upgrades WHERE user_id = ? "
@@ -6714,7 +6716,7 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     custom = settings["custom_emojis"]
     coin = custom.get("_coin", str(BOT_BTN_EMOJIS.get("_coin", "🪙")))
     gem = custom.get("_gem", str(BOT_BTN_EMOJIS.get("_gem", "💎")))
-    castle = custom.get("_castle", str(BOT_BTN_EMOJIS.get("_castle", "🏰")))
+    castle = custom.get("_castle", str(BOT_BTN_EMOJIS.get("_castle", "⚡")))
 
     parts = []
     if per_sec_coins > 0:
@@ -6751,7 +6753,7 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     total_pct = await get_total_bonus_percent(user_id)
     season = await get_season_data(user_id)
     embed = BotEmbed(
-        title=f"{castle} {settings['bot_name']} — Замок {interaction.user.name}",
+        title=f"{castle} {settings['bot_name']} — Энергостанция {interaction.user.name}",
         description=(
             "Выбери раздел кнопками ниже.\n"
             f"-# {INCOME_HINT}"
@@ -6830,7 +6832,7 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
         ),
         "prestige": (
             "🔁 Перерождение",
-            "**Что это:** сброс замка ради постоянного бонуса к доходу.\n\n"
+            "**Что это:** сброс энергостанции ради постоянного бонуса к доходу.\n\n"
             "**Очки:** стоимость растёт: 1-е — 150 000, 2-е — 200 000, 3-е — 250 000 и т.д. "
             "Уже полученные очки учитываются: следующее очко всегда дороже.\n\n"
             "**Бонус:** +5% к доходу за каждое очко. Очки сохраняются навсегда.\n\n"
@@ -6854,8 +6856,8 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             f"на {CRAFT_HARD_PITY}-й попытке — гарантия.\n\n"
             f"**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +{int(STAR_BONUS[1] * 100)}%, 2★ +{int(STAR_BONUS[2] * 100)}%, 3★ +{int(STAR_BONUS[3] * 100)}%, 4★ +{int(STAR_BONUS[4] * 100)}%, 5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
             "**Продажа:** прямая — только `common`/`uncommon`/`rare`, 10% от цены. `epic`+ — биржа, аукцион или синтез.\n\n"
-            "**Хранилище:** «Замок» → «Хранилище». Генераторы там не дают доход.\n\n"
-            "**Временное хранилище:** 100 слотов для предметов, которым не хватило места в замке и хранилище."
+            "**Хранилище:** «Энергостанция» → «Хранилище». Генераторы там не дают доход.\n\n"
+            "**Временное хранилище:** 100 слотов для предметов, которым не хватило места на энергостанции и хранилище."
         ),
         "sets": (
             "🧩 Сеты",
@@ -6864,7 +6866,7 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             "• за количество предметов сета — пороговый бонус;\n"
             "• за соседние пары одного сета — дополнительный бонус;\n"
             "• за заполненные ряды — бонус этажа.\n\n"
-            "**Где смотреть:** «Замок» → поле «Сеты»; подробности — в профиле.\n\n"
+            "**Где смотреть:** «Энергостанция» → поле «Сеты»; подробности — в профиле.\n\n"
             "**Совет:** ставь генераторы одного сета рядом, чтобы получать больше."
         ),
         "pets": (
@@ -6896,8 +6898,8 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             "**Состав:** базово 10 мест; расширяется за монеты из сундука в «Улучшениях» (до 50).\n\n"
             "**Роли:** лидер, заместитель, офицер, ветеран, участник.\n\n"
             "**Сундук:** общий банк клана.\n\n"
-            "**Сетка:** 6×6, отдельная от личного замка. Генераторы в ней дают **мощь клана** для войн и не приносят монеты напрямую. "
-            "Личные генераторы в замке на клан не работают.\n\n"
+            "**Сетка:** 6×6, отдельная от личной энергостанции. Генераторы в ней дают **мощь клана** для войн и не приносят монеты напрямую. "
+            "Личные генераторы на энергостанции на клан не работают.\n\n"
             "**Бонус к доходу:** зависит от уровня клана: +1% за уровень, максимум +20%. "
             "Уровень растёт от клановых квестов, пожертвований, войн и взносов в сундук.\n\n"
             "**Квесты:** недельные (синтезы, покупки, рейды, войны).\n\n"
@@ -7007,8 +7009,8 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
         "cosmetics": (
             "🎨 Кастомизация",
             "**Цвет эмбеда:** HEX-код (например, `#FF0000`).\n\n"
-            "**Фон:** URL картинки (отображается в профиле и замке).\n\n"
-            "**Иконка замка:** эмодзи или кастомный `<:name:id>`.\n\n"
+            "**Фон:** URL картинки (отображается в профиле и энергостанции).\n\n"
+            "**Иконка энергостанции:** эмодзи или кастомный `<:name:id>`.\n\n"
             "**Титулы:** выбор активного (влияет на бонус).\n\n"
             "**Где:** «Мой профиль» → «Косметика» / «Титулы»."
         ),
@@ -7046,7 +7048,7 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             "📈 Аналитика",
             "**Что внутри:**\n"
             "💰 Доход (монеты/час, гемы/час, полный бонус)\n"
-            "🏰 Замок (генераторы, средний доход, сетка, мощь)\n"
+            f"{CASTLE} Энергостанция (генераторы, средний доход, сетка, мощь)\n"
             "🧩 Коллекция и сеты (бонусы, сезон)\n"
             "⚗️ Синтез (попытки, винрейт, катализаторы)\n"
             "🐾 Питомцы (куплено, лучший ур., активный)\n"
@@ -7210,7 +7212,7 @@ async def build_notification_center_embed(user_id: int) -> discord.Embed:
 
     embed = BotEmbed(
         title="🔔 Центр уведомлений",
-        description="Актуальные события твоего замка.",
+        description="Актуальные события твоей энергостанции.",
         color=0x3498db,
     )
     if lines:
@@ -7251,7 +7253,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
 
     coin = custom.get("_coin", "🪙")
     gem = custom.get("_gem", "💎")
-    castle = custom.get("_castle", "🏰")
+    castle = custom.get("_castle", "⚡")
 
     per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
     parts = []
@@ -7294,14 +7296,14 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
     cos_icon = cos[2] if cos else None
 
     embed = BotEmbed(
-        title=f"{cos_icon or castle} Замок {interaction.user.name}",
+        title=f"{cos_icon or castle} Энергостанция {interaction.user.name}",
         color=cos_color
     )
     if cos_bg:
         embed.set_image(url=cos_bg)
     if not rows:
         embed.description = (
-            "Замок пуст. Купи первый генератор в «Магазине» — "
+            "Энергостанция пуста. Купи первый генератор в «Магазине» — "
             "он начнёт приносить доход."
         )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
@@ -7328,7 +7330,7 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
         ]
         power_value = f"Всего: **{total_power}**\n" + "\n".join(power_lines)
     else:
-        power_value = f"Всего: **{total_power}**\nнет генераторов в замке"
+        power_value = f"Всего: **{total_power}**\nнет генераторов на энергостанции"
     embed.add_field(name="⚔️ Мощь", value=power_value, inline=False)
     autoc = await get_autocollector(user_id)
     if autoc:
@@ -7381,7 +7383,7 @@ async def build_generator_details_embed(
     )
 
     if not rows:
-        embed.description = "У тебя нет генераторов в замке."
+        embed.description = "У тебя нет генераторов на энергостанции."
         return embed, 1
 
     async with bot.db.execute(
@@ -7480,7 +7482,7 @@ async def build_generator_details_embed(
         embed.add_field(name="Наборы", value="\n".join(set_lines), inline=False)
 
     embed.add_field(
-        name="💰 Итого по замку",
+        name="💰 Итого по энергостанции",
         value=(
             f"🪙 {total_coins:.2f}/час | 💎 {total_gems:.4f}/час\n"
             f"⚔️ Мощь: **{total_power}**"
@@ -7551,9 +7553,9 @@ async def build_public_profile_embed(
             else f"👤 Профиль: <@{target_id}>"
         ),
         description=(
-            "Данные разведки: баланс, доход, мощь и замок."
+            "Данные разведки: баланс, доход, мощь и энергостанция."
             if detailed
-            else "Публичный обзор: титул, клан, мощь и замок."
+            else "Публичный обзор: титул, клан, доход, коллекция и энергостанция."
         ),
         color=0x9b59b6 if detailed else 0x3498db,
     )
@@ -7578,11 +7580,12 @@ async def build_public_profile_embed(
             value=f"**{prestige or 0}** очков · бонус +{int(min((prestige or 0) * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100)}%",
             inline=True,
         )
-    embed.add_field(
-        name="⚔️ Мощь",
-        value=f"**{power}**",
-        inline=True,
-    )
+    if detailed:
+        embed.add_field(
+            name="⚔️ Мощь",
+            value=f"**{power}**",
+            inline=True,
+        )
     embed.add_field(
         name="Доход",
         value=(
@@ -7607,7 +7610,7 @@ async def build_public_profile_embed(
             inline=False,
         )
 
-    if power_rows:
+    if detailed and power_rows:
         top = sorted(power_rows, key=lambda row: row[3], reverse=True)[:5]
         embed.add_field(
             name="Топ генераторов по мощи",
@@ -7618,12 +7621,45 @@ async def build_public_profile_embed(
             inline=False,
         )
 
+    if not detailed:
+        async with bot.db.execute(
+            "SELECT COUNT(*) FROM items WHERE id LIKE '%\\_gen' ESCAPE '\\'"
+        ) as c:
+            total_generators = (await c.fetchone())[0] or 0
+        collection_count = await get_collection_count(target_id)
+        async with bot.db.execute(
+            "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?",
+            (target_id,),
+        ) as c:
+            achievements_count = (await c.fetchone())[0] or 0
+        async with bot.db.execute("SELECT COUNT(*) FROM achievements") as c:
+            achievements_total = (await c.fetchone())[0] or 0
+        embed.add_field(
+            name=f"{CASTLE} Энергостанция",
+            value=(
+                f"Сетка: **{grid_size}**\n"
+                f"Занято: **{len(rows)}/{grid_size}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="📚 Коллекция",
+            value=f"**{collection_count}/{total_generators}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="🏆 Достижения",
+            value=f"**{achievements_count}/{achievements_total}**",
+            inline=True,
+        )
+
     width = max(1, int(grid_size ** 0.5))
     embed.add_field(
-        name=f"Замок · сетка {grid_size}",
+        name=f"Энергостанция · сетка {grid_size}",
         value="\n".join(
             "  ".join(
-                grid.get(slot, "⬛")
+                grid.get(slot, "⬛") if detailed
+                else ("🟦" if slot in grid else "⬛")
                 for slot in range(start, min(start + width, grid_size))
             )
             for start in range(0, grid_size, width)
@@ -7668,7 +7704,7 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     )
     if not rows:
         embed.description += (
-            "\n\nХранилище пусто. Перемести сюда предметы из замка, "
+            "\n\nХранилище пусто. Перемести сюда предметы из энергостанции, "
             "чтобы освободить слоты."
         )
 
@@ -7703,7 +7739,7 @@ async def build_temp_storage_embed(interaction: discord.Interaction) -> discord.
         title=f"📦 Временное хранилище — {interaction.user.name}",
         description=(
             f"Занято: **{len(rows)}/{TEMP_STORAGE_SIZE}**\n"
-            "Сюда попадают предметы, которым не хватило слотов в замке и хранилище."
+            "Сюда попадают предметы, которым не хватило слотов на энергостанции и хранилище."
             + (
                 "\n\nВременное хранилище пусто."
                 if not rows
@@ -8771,9 +8807,9 @@ async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tu
         owned = {r[0] for r in await c.fetchall()}
 
     total = len(rows)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    total_pages = max(1, (total + UPGRADES_PAGE_SIZE - 1) // UPGRADES_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
+    chunk = rows[page * UPGRADES_PAGE_SIZE: page * UPGRADES_PAGE_SIZE + UPGRADES_PAGE_SIZE]
     page_coins = sum(
         price for _id, _name, _desc, price, _emoji, currency, _size in chunk
         if currency == "coins"
@@ -8990,7 +9026,7 @@ async def build_user_profile_embed(interaction: discord.Interaction) -> discord.
             value=f"Ур. {lvl} (раз в {AUTOCOLLECT_LEVELS[lvl][1]} ч)",
             inline=True
         )
-    embed.add_field(name="🏰 Замок", value=f"Сетка: **{grid}** слотов\nБонус дохода: **+{int(bonus * 100)}%**", inline=True)
+    embed.add_field(name=f"{CASTLE} Энергостанция", value=f"Сетка: **{grid}** слотов\nБонус дохода: **+{int(bonus * 100)}%**", inline=True)
     embed.add_field(name="🆔 ID", value=f"`{user_id}`", inline=True)
 
     embed = await fix_embed_emojis(embed)
@@ -9102,7 +9138,7 @@ async def build_cosmetics_embed(interaction: discord.Interaction) -> discord.Emb
     )
     embed.add_field(name="Цвет эмбеда", value=f"`#{color:06X}`" if color else "по умолчанию", inline=True)
     embed.add_field(name="Фон (URL)", value=bg or "не задан", inline=True)
-    embed.add_field(name="Иконка замка", value=icon or "не задана", inline=True)
+    embed.add_field(name="Иконка энергостанции", value=icon or "не задана", inline=True)
     return embed
 
 async def build_pets_embed(interaction: discord.Interaction) -> discord.Embed:
@@ -9486,7 +9522,7 @@ class MainMenuView(BaseView):
             except ValueError:
                 pass
 
-    @discord.ui.button(label="Замок", emoji=get_emoji("_castle"), style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Энергостанция", emoji=get_emoji("_castle"), style=discord.ButtonStyle.primary, row=0)
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
@@ -9604,7 +9640,7 @@ async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embe
     embed = BotEmbed(
         title="🔁 Перерождение",
         description=(
-            "Сбрось текущий замок и начни заново — но уже с постоянным бонусом к доходу.\n"
+            "Сбрось текущую энергостанцию и начни заново — но уже с постоянным бонусом к доходу.\n"
             "Это основной долгосрочный цикл игры."
         ),
         color=0x9b59b6,
@@ -9689,7 +9725,7 @@ class PrestigeConfirmModal(discord.ui.Modal, title="Подтверждение �
 GUIDE_SECTIONS = {
     "economy": ("Экономика", "Монеты, гемы, доход, обмен, банк, налоги"),
     "offline": ("Офлайн-доход", "Накопление, штраф, автосборщик"),
-    "prestige": ("Перерождение", "Сброс замка, очки престижа, постоянный бонус"),
+    "prestige": ("Перерождение", "Сброс энергостанции, очки престижа, постоянный бонус"),
     "collection": ("Коллекция", "Открытые генераторы и бонус к доходу"),
     "generators": ("Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
     "sets": ("Сеты", "Синергии, соседство, этажи"),
@@ -9897,7 +9933,7 @@ class GeneratorDetailView(BaseView):
             self.add_item(nxt)
 
         back = discord.ui.Button(
-            label="В замок",
+            label="На энергостанцию",
             emoji=get_emoji("_castle"),
             style=discord.ButtonStyle.secondary,
             row=1,
@@ -11833,6 +11869,11 @@ class MarketSellModal(discord.ui.Modal, title="Продать на бирже"):
 
 
 class SocialView(BaseView):
+    @discord.ui.button(label="PvP", emoji=get_emoji("_raid"), style=discord.ButtonStyle.danger, row=0)
+    async def btn_pvp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_pvp_hub(interaction, self.author_id)
+
     @discord.ui.button(label="Клан", emoji=get_emoji("_clan"), style=discord.ButtonStyle.success, row=0)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -11855,7 +11896,7 @@ class SocialView(BaseView):
         embed = await build_top_embed(interaction, "coins", 10)
         await interaction.edit_original_response(embed=embed, view=TopView(self.author_id, "coins", 10))
 
-    @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
     async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_auction_view(interaction, self.author_id)
@@ -11873,11 +11914,6 @@ class SocialView(BaseView):
     async def btn_bank(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_bank_view(interaction, self.author_id)
-
-    @discord.ui.button(label="PvP", emoji=get_emoji("_raid"), style=discord.ButtonStyle.danger, row=1)
-    async def btn_pvp(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await open_pvp_hub(interaction, self.author_id)
 
     @discord.ui.button(label="Налоги", emoji=get_emoji("_coin"), style=discord.ButtonStyle.danger, row=2)
     async def btn_taxes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -14048,7 +14084,7 @@ async def perform_raid(attacker_ids: list[int], target_id: int):
                 power = await get_combat_power(uid)
                 if power <= 0:
                     raise ValueError(
-                        f"❌ У <@{uid}> нет генераторов в замке (мощь 0)."
+                        f"❌ У <@{uid}> нет генераторов на энергостанции (мощь 0)."
                     )
                 powers[uid] = power
 
@@ -14336,7 +14372,7 @@ async def open_raid_menu(interaction: discord.Interaction, author_id: int):
     embed = BotEmbed(
         title=f"{get_emoji('_raid')} Подготовка к рейду",
         description=(
-            "Атакуй чужой замок и забери часть монет.\n\n"
+            "Атакуй чужую энергостанцию и забери часть монет.\n\n"
             "**В одиночку** — только твоя мощь.\n"
             "**Собрать отряд** — до 3 игроков, общая мощь и синергия.\n"
             "Базовая добыча делится поровну, бонусы применяются к доле каждого."
@@ -14730,7 +14766,7 @@ class RaidInviteView(SafeView):
             pass
 
 
-class RaidTargetModal(discord.ui.Modal, title="Атака замка"):
+class RaidTargetModal(discord.ui.Modal, title="Атака энергостанции"):
     target_id = discord.ui.TextInput(label="ID игрока для атаки", required=True)
 
     def __init__(self, author_id: int, party_id: int | None = None):
@@ -15998,7 +16034,7 @@ async def open_profile_select(interaction: discord.Interaction, author_id: int):
         title="👤 Просмотр профиля",
         description=(
             "Выбери игрока и посмотри минимальный публичный обзор: "
-            "титул, клан, мощь, доход и замок."
+            "титул, клан, доход, коллекция, достижения и сетка энергостанции."
         ),
         color=0x3498db,
     )
@@ -16769,7 +16805,7 @@ class CosmeticBgModal(discord.ui.Modal, title="Фон профиля"):
             pass
 
 
-class CosmeticIconModal(discord.ui.Modal, title="Иконка замка"):
+class CosmeticIconModal(discord.ui.Modal, title="Иконка энергостанции"):
     emoji = discord.ui.TextInput(label="Эмодзи или <:name:id>", required=True, max_length=100)
     note = discord.ui.TextInput(label="Комментарий (необязательно)", required=False, max_length=100)
 
@@ -16965,7 +17001,7 @@ class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на мо�
 
 
 # ============================================================
-#  🏰 ЗАМОК
+#  ⚡ ЭНЕРГОСТАНЦИЯ
 # ============================================================
 
 async def build_sets_embed(user_id: int) -> discord.Embed:
@@ -17078,7 +17114,7 @@ class ProfileView(BaseView):
     @discord.ui.button(label="Сортировка", emoji=get_emoji("_sorting"), style=discord.ButtonStyle.secondary, row=2)
     async def sort_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = BotEmbed(title="🔄 Сортировка генераторов", description="Выбери, как упорядочить генераторы в замке:", color=0x3498db)
+        embed = BotEmbed(title="🔄 Сортировка генераторов", description="Выбери, как упорядочить генераторы на энергостанции:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=SortMenuView(self.author_id))
 
     @discord.ui.button(label="Детали", emoji=discord.PartialEmoji(name="generatorparts", id=1566487110553313501), style=discord.ButtonStyle.primary, row=2)
@@ -17131,7 +17167,7 @@ async def build_mailbox_embed(user_id: int):
             f"×{quantity}{stars_str}"
         )
     embed.description = (
-        "Предметы, которым не хватило места в замке, хранилище и временном "
+        "Предметы, которым не хватило места на энергостанции, хранилище и временном "
         "хранилище.\n\n" + "\n".join(lines)
     )
     if len(rows) > 15:
@@ -17950,7 +17986,7 @@ async def open_star_view(
             (user_id, item_id, stars)
         ) as c:
             have = (await c.fetchone())[0]
-        location_label = "Замок" if location == "profile" else "Хранилище"
+        location_label = "Энергостанция" if location == "profile" else "Хранилище"
         options.append(discord.SelectOption(
             label=(
                 f"{location_label} · слот {slot}: {name} "
@@ -17970,7 +18006,7 @@ async def open_star_view(
             f"5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
             f"Чтобы поднять звезду, нужно **несколько копий** того же генератора с такой же звёздностью.\n"
             f"При провале сгорает одна копия, но звезда **не понижается**.\n\n"
-            f"Выбери генератор в замке или хранилище:"
+            f"Выбери генератор на энергостанции или хранилище:"
         ),
         color=0xf1c40f
     )
@@ -18100,14 +18136,14 @@ async def show_star_confirm(
         if pity
         else ""
     )
-    location_label = "Замок" if location == "profile" else "Хранилище"
+    location_label = "Энергостанция" if location == "profile" else "Хранилище"
 
     embed = BotEmbed(
         title=f"⭐ Улучшение до {next_star}★",
         description=(
             f"Генератор: {emoji} **{name}** "
             f"({location_label}, слот {slot}, {current_stars}★)\n\n"
-            f"Нужно копий: **{have}/{need}** (замок + хранилище)\n"
+            f"Нужно копий: **{have}/{need}** (энергостанция + хранилище)\n"
             f"Шанс успеха: **{chance_str}**{pity_str}\n"
             f"Стоимость: **💎 {settings_star['gems']}**\n"
             f"Новый суммарный бонус: **+{int(STAR_BONUS[next_star] * 100)}%** к доходу.\n\n"
@@ -18242,7 +18278,7 @@ class StarConfirmView(SafeView):
             await update_story_quests(self.author_id, "stars", 1)
             await update_quest_progress(self.author_id, "star_up_1")
             unlocked = await check_achievements(user_id)
-            location_label = "Замок" if keep[0] == "profile" else "Хранилище"
+            location_label = "Энергостанция" if keep[0] == "profile" else "Хранилище"
             desc = (
                 f"Генератор улучшен до **{self.next_star}★** "
                 f"({location_label}, слот {keep[1]}).\n"
@@ -18316,7 +18352,7 @@ async def open_move_view(interaction: discord.Interaction, source: str, author_i
         ))
 
     location_name = {
-        "profile": "Замка",
+        "profile": "Энергостанции",
         "storage": "Хранилища",
         "temp": "Временного хранилища",
     }.get(source, "Хранилища")
@@ -18404,8 +18440,13 @@ class MoveView(SafeView):
         free = [s for s in range(target_size) if s not in used]
 
         if not free:
+            no_space = (
+                f"В хранилище нет места (макс. {target_size})."
+                if target == "storage"
+                else f"На энергостанции нет места (макс. {target_size})."
+            )
             return await interaction.edit_original_response(
-                embed=BotEmbed(title="❌ Ошибка", description=f"В {'Хранилище' if target == 'storage' else 'Замке'} нет места (макс. {target_size}).", color=0xe74c3c), 
+                embed=BotEmbed(title="❌ Ошибка", description=no_space, color=0xe74c3c), 
                 view=None
             )
 
@@ -18420,10 +18461,16 @@ class MoveView(SafeView):
         await sort_inventory(user_id, "storage")
         await sort_inventory(user_id, "temp")
 
-        target_name = "Хранилище" if target == "storage" else "Замок"
+        if target == "storage":
+            target_phrase = "в **Хранилище**"
+        else:
+            target_phrase = "на **Энергостанцию**"
         embed = BotEmbed(
             title="✅ Перемещено",
-            description=f"Предмет успешно перемещён в **{target_name}**.\nЗакрой это окно и проверь основное меню.",
+            description=(
+                f"Предмет успешно перемещён {target_phrase}.\n"
+                "Закрой это окно и проверь основное меню."
+            ),
             color=0x2ecc71
         )
         await interaction.edit_original_response(embed=embed, view=None)
@@ -18572,7 +18619,7 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
         title="⚗️ Синтез",
         description=(
             f"Страница {page + 1}/{total_pages}\n"
-            "Копии берутся из замка и хранилища.\n"
+            "Копии берутся из энергостанции и хранилища.\n"
             "Выбери предмет для синтеза:"
         ),
         color=0x3498db
@@ -19231,7 +19278,7 @@ async def take_bank_loan(
             ) as c:
                 row = await c.fetchone()
             if not row:
-                raise ValueError("Залоговый предмет не найден в замке.")
+                raise ValueError("Залоговый предмет не найден на энергостанции.")
             slot = row[0]
 
             cur = await bot.db.execute(
@@ -19297,7 +19344,7 @@ async def repay_bank_loan(user_id: int) -> tuple[bool, str]:
             if cur.rowcount == 0:
                 raise ValueError("Недостаточно монет (баланс изменился).")
 
-            # Залог возвращается в замок/хранилище или в почту.
+            # Залог возвращается на энергостанцию/хранилище или в почту.
             await grant_item_or_compensation(
                 user_id, item_id, 1, stars or 0
             )
@@ -19319,7 +19366,7 @@ async def repay_bank_loan(user_id: int) -> tuple[bool, str]:
 
     message = (
         f"✅ Кредит погашен: 🪙 **{total_due}**. "
-        f"Залог **{item_id}** возвращён в замок или почту."
+        f"Залог **{item_id}** возвращён на энергостанцию или в почту."
     )
     return True, message
 
@@ -19732,7 +19779,7 @@ async def open_auction_sell_select(
 
     if not rows:
         return await interaction.followup.send(
-            "❌ В замке нет предметов для аукциона "
+            "❌ На энергостанции нет предметов для аукциона "
             "(магазинные 0★ продаются в магазине).",
             ephemeral=True,
         )
@@ -19752,7 +19799,7 @@ async def open_auction_sell_select(
 
     embed = BotEmbed(
         title="🏛️ Выставить лот",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из замка.",
+        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет из энергостанции.",
         color=0xf1c40f,
     )
     await interaction.edit_original_response(
@@ -20967,7 +21014,7 @@ class BuyItemQuantityView(SafeView):
             )
         if to_storage > 0 or to_temp > 0:
             msg += (
-                f"\n📦 {to_profile} в замок, {to_storage} в хранилище, "
+                f"\n📦 {to_profile} на энергостанцию, {to_storage} в хранилище, "
                 f"{to_temp} во временное хранилище."
             )
         if onboarding:
@@ -21609,7 +21656,7 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
 
         await log_admin_action(self.author_id, self.author_id, "self_reset", "user reset")
         await interaction.followup.send(
-            "✅ Прогресс сброшен. Замок, инвентарь, питомцы и квесты очищены.",
+            "✅ Прогресс сброшен. Энергостанция, инвентарь, питомцы и квесты очищены.",
             ephemeral=True,
         )
         if self.main_message:
@@ -24093,7 +24140,7 @@ class AdminProfileModal(discord.ui.Modal, title="Профиль игрока"):
         embed.add_field(name="Апгрейды", value=", ".join(upgrades) if upgrades else "нет", inline=False)
         embed.add_field(name="Последний сбор монет", value=last_coins or "—", inline=True)
         embed.add_field(name="Последний сбор гемов", value=last_gems or "—", inline=True)
-        embed.add_field(name=f"Замок ({len(profile_items)})", value="\n".join(profile_items) if profile_items else "пусто", inline=False)
+        embed.add_field(name=f"Энергостанция ({len(profile_items)})", value="\n".join(profile_items) if profile_items else "пусто", inline=False)
         embed.add_field(name=f"Хранилище ({len(storage_items)})", value="\n".join(storage_items) if storage_items else "пусто", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -24269,7 +24316,7 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
             msg = f"✅ Выдано {qty}×{emoji} {name} <@{uid}>."
             if to_storage > 0 or to_temp > 0:
                 msg += (
-                    f"\n📦 {to_profile} в замок, {to_storage} в хранилище, "
+                    f"\n📦 {to_profile} на энергостанцию, {to_storage} в хранилище, "
                     f"{to_temp} во временное хранилище."
                 )
         else:
@@ -25151,7 +25198,7 @@ async def notifications_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="меню", description="Открыть главное меню замка")
+@bot.tree.command(name="меню", description="Открыть главное меню энергостанции")
 async def main_menu(interaction: discord.Interaction):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
@@ -25162,27 +25209,59 @@ async def main_menu(interaction: discord.Interaction):
         
     if not player_exists:
         # Приветствие (без повторного response)
+        settings = await get_settings(guild_id)
+        start_coins = settings["start_coins"]
         embed = BotEmbed(
-            title="🏰 Добро пожаловать в Gen Mania!",
+            title=f"{CASTLE} Gen Mania — твоя энергостанция начинается здесь",
             description=(
-                "Приветствую тебя, будущий повелитель замка! 👑\n\n"
-                "**Gen Mania** — инкрементальная игра: генераторы приносят доход, "
-                "ты улучшаешь их, собираешь коллекцию и сражаешься за влияние.\n\n"
-                "**Первые шаги:**\n"
+                "Добро пожаловать, будущий повелитель! 👑\n\n"
+                "**Gen Mania** — инкрементальная игра, где генераторы приносят "
+                "доход даже офлайн, а энергостанция растёт от первого медного генератора "
+                "до легендарных синтезов.\n\n"
+                f"**Стартовый капитал:** 🪙 **{format_price(start_coins)}**"
+            ),
+            color=0x9b59b6
+        )
+        embed.add_field(
+            name=f"{CASTLE} Энергостанция",
+            value="Покупай генераторы, повышай звёзды, синтезируй новые и собирай сеты.",
+            inline=True,
+        )
+        embed.add_field(
+            name="💰 Экономика",
+            value="Магазин с фиксированной ценой, биржа, аукцион, банк и вклады.",
+            inline=True,
+        )
+        embed.add_field(
+            name="⚔️ PvP",
+            value="Рейды, дуэли, доска целей и реванши.",
+            inline=True,
+        )
+        embed.add_field(
+            name="📈 Прогресс",
+            value="Квесты, сезон, достижения, титулы и перерождение.",
+            inline=True,
+        )
+        embed.add_field(
+            name="🤝 Социум",
+            value="Кланы, топы, профили и шпионаж.",
+            inline=True,
+        )
+        embed.add_field(
+            name="🚀 Первые шаги",
+            value=(
                 "1. Купи первый генератор в «Магазине».\n"
                 "2. Забери ежедневную награду.\n"
                 "3. Открой «Квесты» и выполни задания.\n"
-                "4. Сделай синтез в «Замке».\n"
-                "5. Загляни в «Социум»: клан, рейды, дуэли.\n\n"
-                "**Полезно знать:**\n"
-                "• офлайн-доход копится, после 2 часов ручной сбор даёт 70%;\n"
-                "• автосборщик собирает 100% без штрафа;\n"
-                "• мощь зависит от цены и звёзд генераторов;\n"
-                "• «Путеводитель» в главном меню подробно объясняет каждую механику.\n\n"
-                "Жми **«Продолжить»**, чтобы войти в игру. "
-                "Главное меню всегда доступно командой `/меню`."
+                "4. Сделай синтез в разделе «Энергостанция»."
             ),
-            color=0x9b59b6
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                "Магазин держит фиксированную цену — биржа не поднимет её "
+                "для новичков. /меню — открыть меню."
+            )
         )
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed = await fix_embed_emojis(embed)
