@@ -134,6 +134,7 @@ CRAFT_CHAIN = {
 }
 
 CRAFT_COST = 3
+CRAFT_RESULT_STARS = 0  # синтез создаёт обычную копию без звезды
 
 # Генераторы, которые нельзя купить даже на бирже/аукционе.
 GEN_SYNTHESIS_ONLY = frozenset({"space_gen", "divine_gen", "legendary_gen"})
@@ -229,7 +230,7 @@ RETENTION_LIMITS = {
 }
 
 # Schema migrations: увеличивать при изменении структуры таблиц.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Content migrations: увеличивать при изменении items/achievements/shop.
 CONTENT_VERSION = 6
@@ -393,6 +394,48 @@ STAR_PITY_MAX = 0.30          # максимум +30% от pity
 STAR_HARD_PITY = 10           # 10-я попытка гарантирована
 SELL_RATE = 0.10  # 10% от цены (было 35%)
 SELL_ALLOWED_RARITIES = {"common", "uncommon", "rare"}  # epic+ — аукцион, кроме synthesis-only
+BULK_SELL_LABELS = {
+    "common": "Обычные 0★",
+    "uncommon": "Необычные 0★",
+    "rare": "Редкие 0★",
+    "dupes": "Дубликаты 0★",
+}
+STORAGE_FILTERS = {
+    "all": "Все",
+    "zero": "0★",
+    "starred": "Со звёздами",
+    "locked": "Заблокированные",
+    "common": "Обычные",
+    "uncommon": "Необычные",
+    "rare": "Редкие",
+    "epic": "Epic+",
+}
+
+
+def _filter_inventory_rows(
+    rows, mode: str, stars_idx: int, rarity_idx: int, locked_idx: int
+):
+    if mode == "zero":
+        return [row for row in rows if (row[stars_idx] or 0) == 0]
+    if mode == "starred":
+        return [row for row in rows if (row[stars_idx] or 0) > 0]
+    if mode == "locked":
+        return [row for row in rows if row[locked_idx]]
+    if mode == "epic":
+        return [row for row in rows if row[rarity_idx] not in SELL_ALLOWED_RARITIES]
+    if mode in SELL_ALLOWED_RARITIES:
+        return [row for row in rows if row[rarity_idx] == mode]
+    return list(rows)
+
+
+def filter_storage_rows(rows, mode: str):
+    """Фильтр строк хранилища: (slot, item_id, emoji, stars, price, rarity, locked)."""
+    return _filter_inventory_rows(rows, mode, 3, 5, 6)
+
+
+def filter_profile_rows(rows, mode: str):
+    """Фильтр строк энергостанции: (slot, item_id, name, emoji, stars, price, rarity, locked)."""
+    return _filter_inventory_rows(rows, mode, 4, 6, 7)
 
 
 def calculate_sell_price(price: int, stars: int = 0) -> int:
@@ -1552,6 +1595,7 @@ class CastleBot(commands.Bot):
                 item_id TEXT,
                 location TEXT DEFAULT 'profile',
                 stars INTEGER DEFAULT 0,
+                is_locked INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, location, slot)
             )
         """)
@@ -1618,6 +1662,9 @@ class CastleBot(commands.Bot):
             await ensure_column(self.db, "items", column, definition)
 
         await ensure_column(self.db, "inventory", "stars", "INTEGER DEFAULT 0")
+        await ensure_column(
+            self.db, "inventory", "is_locked", "INTEGER DEFAULT 0"
+        )
 
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS craft_log (
@@ -6815,8 +6862,8 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             "Кредит под залог генератора до 50% его стоимости.\n\n"
             f"**Налоги:** {int(DEFAULT_TAX_RATE * 100)}% в сутки от баланса монет "
             "(значение задаётся в настройках гильдии). Вклады не облагаются.\n\n"
-            "**Продажа:** прямая продажа — 10% цены; биржа — около 70%, "
-            "но с комиссией и ожиданием покупателя.\n\n"
+            "**Продажа:** прямая продажа — 10% цены; быстрая продажа 0★ — "
+            "безопасно и пачкой; биржа — около 70%, но с комиссией и ожиданием покупателя.\n\n"
             "**Где смотреть:** главное меню → «Обмен валют»; «Социум» → «Банк» / «Налоги»."
         ),
         "offline": (
@@ -6850,12 +6897,14 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
         "generators": (
             "🏗️ Генераторы",
             "**Покупка:** common/uncommon/rare — в «Магазине»; epic–mythic — биржа или аукцион; пространственный/божественный/легендарный — только синтез.\n\n"
-            f"**Синтез:** {CRAFT_COST} одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 12%). "
+            f"**Синтез:** {CRAFT_COST} одинаковых → 1 выше уровнем без звезды. Шанс зависит от редкости (100% → 12%). "
             f"Стоимость в гемах растёт. Катализатор +{int(CATALYST_BONUS * 100)}%, "
             f"за каждый провал шанс растёт на {int(CRAFT_PITY_BONUS * 100)}%, "
             f"на {CRAFT_HARD_PITY}-й попытке — гарантия.\n\n"
             f"**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +{int(STAR_BONUS[1] * 100)}%, 2★ +{int(STAR_BONUS[2] * 100)}%, 3★ +{int(STAR_BONUS[3] * 100)}%, 4★ +{int(STAR_BONUS[4] * 100)}%, 5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
-            "**Продажа:** прямая — только `common`/`uncommon`/`rare`, 10% от цены. `epic`+ — биржа, аукцион или синтез.\n\n"
+            "**Продажа:** прямая — только `common`/`uncommon`/`rare`, 10% от цены. "
+            "Быстрая продажа 0★ — обычные/необычные/редкие и дубликаты, "
+            "звёздные и `epic`+ защищены. `epic`+ — биржа, аукцион или синтез.\n\n"
             "**Хранилище:** «Энергостанция» → «Хранилище». Генераторы там не дают доход.\n\n"
             "**Временное хранилище:** 100 слотов для предметов, которым не хватило места на энергостанции и хранилище."
         ),
@@ -7227,15 +7276,19 @@ async def build_guide_section_embed(key: str) -> discord.Embed:
     return embed
 
 
-async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed:
+async def build_profile_embed(
+    interaction: discord.Interaction, filter_mode: str = "all"
+) -> discord.Embed:
     user_id = interaction.user.id
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
+    filter_mode = filter_mode if filter_mode in STORAGE_FILTERS else "all"
 
     grid_size, bonus, gems, coins = await get_player_stats(user_id, guild_id)
 
     async with bot.db.execute("""
-        SELECT inv.slot, i.id, i.name, i.emoji, inv.stars, i.price
+        SELECT inv.slot, i.id, i.name, i.emoji, inv.stars, i.price,
+               i.rarity, COALESCE(inv.is_locked, 0)
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'profile'
@@ -7243,13 +7296,18 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
         rows = await c.fetchall()
 
     custom = settings["custom_emojis"]
-    items = {}
     power_rows = []
-    for slot, item_id, item_name, default_emoji, stars, price in rows:
+    for slot, item_id, item_name, default_emoji, stars, price, rarity, locked in rows:
         emoji = custom.get(item_id, default_emoji)
         emoji = await get_star_emoji(item_id, stars, emoji)
-        items[slot] = emoji
         power_rows.append((item_name, emoji, stars, price or 0))
+
+    visible_rows = filter_profile_rows(rows, filter_mode)
+    visible_items = {}
+    for slot, item_id, _item_name, default_emoji, stars, _price, _rarity, _locked in visible_rows:
+        emoji = custom.get(item_id, default_emoji)
+        emoji = await get_star_emoji(item_id, stars, emoji)
+        visible_items[slot] = emoji
 
     coin = custom.get("_coin", "🪙")
     gem = custom.get("_gem", "💎")
@@ -7357,8 +7415,22 @@ async def build_profile_embed(interaction: discord.Interaction) -> discord.Embed
 
     # Выводим сетку по рядам (поддерживает неквадратные размеры)
     for start in range(0, grid_size, width):
-        row_items = [items.get(slot, "⬛") for slot in range(start, min(start + width, grid_size))]
+        row_items = [
+            visible_items.get(slot, "⬛")
+            for slot in range(start, min(start + width, grid_size))
+        ]
         embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
+    if rows and not visible_rows:
+        embed.description = (
+            "По выбранному фильтру ничего нет. "
+            f"Фильтр: **{STORAGE_FILTERS[filter_mode]}**."
+        )
+    embed.set_footer(
+        text=(
+            f"Фильтр: {STORAGE_FILTERS[filter_mode]} · "
+            f"Показано {len(visible_rows)}/{len(rows)}"
+        )
+    )
     embed = await fix_embed_emojis(embed)
     return embed
 
@@ -7669,25 +7741,38 @@ async def build_public_profile_embed(
     return await fix_embed_emojis(embed)
 
 
-async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed:
+async def build_storage_embed(
+    interaction: discord.Interaction, filter_mode: str = "all"
+) -> discord.Embed:
     user_id = interaction.user.id
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
     grid_size = await get_storage_size(user_id)
+    filter_mode = filter_mode if filter_mode in STORAGE_FILTERS else "all"
 
     async with bot.db.execute("""
-        SELECT inv.slot, i.id, i.emoji, inv.stars FROM inventory inv
+        SELECT inv.slot, i.id, i.emoji, inv.stars, i.price, i.rarity,
+               COALESCE(inv.is_locked, 0)
+        FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'storage'
     """, (user_id,)) as c:
         rows = await c.fetchall()
 
     custom = settings["custom_emojis"]
-    items = {}
-    for slot, item_id, default_emoji, stars in rows:
-        emoji = custom.get(item_id, default_emoji)
-        emoji = await get_star_emoji(item_id, stars, emoji)
-        items[slot] = emoji
+    visible_rows = filter_storage_rows(rows, filter_mode)
+    zero_star = sum(1 for row in rows if (row[3] or 0) == 0)
+    starred = len(rows) - zero_star
+    locked_count = sum(1 for row in rows if row[6])
+    sellable = [
+        row for row in rows
+        if (row[3] or 0) == 0
+        and row[5] in SELL_ALLOWED_RARITIES
+        and not row[6]
+    ]
+    sell_total = sum(
+        calculate_sell_price(row[4], 0) for row in sellable
+    )
 
     async with bot.db.execute(
         "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'temp'",
@@ -7700,8 +7785,24 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
     embed = BotEmbed(title=f"{storage_emoji} Хранилище {interaction.user.name}", color=0x808080)
     embed.description = (
         f"Слотов: **{grid_size}** | "
-        f"Временное: **{temp_count}/{TEMP_STORAGE_SIZE}**"
+        f"Временное: **{temp_count}/{TEMP_STORAGE_SIZE}**\n"
+        f"0★: **{zero_star}** | Со звёздами: **{starred}** | "
+        f"🔒 Заблокировано: **{locked_count}**\n"
     )
+    if sellable:
+        embed.description += (
+            f"Быстрая продажа 0★: **{len(sellable)}** шт. за "
+            f"🪙 **{format_price(sell_total)}**\n"
+        )
+    else:
+        embed.description += "Быстрая продажа 0★: нет подходящих предметов\n"
+    embed.description += (
+        f"Фильтр: **{STORAGE_FILTERS[filter_mode]}** · "
+        f"Показано **{len(visible_rows)}/{len(rows)}**\n"
+        "-# Звёздные, epic+ и предметы из энергостанции не входят в быструю продажу."
+    )
+    if rows and not visible_rows:
+        embed.description += "\n\nПо выбранному фильтру ничего нет."
     if not rows:
         embed.description += (
             "\n\nХранилище пусто. Перемести сюда предметы из энергостанции, "
@@ -7709,8 +7810,13 @@ async def build_storage_embed(interaction: discord.Interaction) -> discord.Embed
         )
 
     # Выводим сетку по рядам (поддерживает неквадратные размеры)
+    visible_items = {}
+    for slot, item_id, default_emoji, stars, _price, _rarity, _locked in visible_rows:
+        emoji = custom.get(item_id, default_emoji)
+        emoji = await get_star_emoji(item_id, stars, emoji)
+        visible_items[slot] = emoji
     for start in range(0, grid_size, width):
-        row_items = [items.get(slot, "⬛") for slot in range(start, min(start + width, grid_size))]
+        row_items = [visible_items.get(slot, "⬛") for slot in range(start, min(start + width, grid_size))]
         embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
     embed = await fix_embed_emojis(embed)
     return embed
@@ -8031,7 +8137,8 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
             async with bot.db.execute(
                 "SELECT slot FROM inventory "
                 "WHERE user_id = ? AND location = 'storage' AND item_id = ? "
-                "AND stars = 0 ORDER BY slot ASC LIMIT ?",
+                "AND stars = 0 AND COALESCE(is_locked, 0) = 0 "
+                "ORDER BY slot ASC LIMIT ?",
                 (user_id, item_id, qty),
             ) as c:
                 slots = [r[0] for r in await c.fetchall()]
@@ -8044,7 +8151,8 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
                 cur = await bot.db.execute(
                     "DELETE FROM inventory "
                     "WHERE user_id = ? AND location = 'storage' AND slot = ? "
-                    "AND item_id = ? AND stars = 0",
+                    "AND item_id = ? AND stars = 0 "
+                    "AND COALESCE(is_locked, 0) = 0",
                     (user_id, slot, item_id),
                 )
                 if cur.rowcount == 0:
@@ -8309,6 +8417,7 @@ async def create_market_order(
                 async with bot.db.execute(
                     "SELECT slot FROM inventory WHERE user_id = ? "
                     "AND location = 'storage' AND item_id = ? AND stars = 0 "
+                    "AND COALESCE(is_locked, 0) = 0 "
                     "ORDER BY slot ASC LIMIT ?",
                     (user_id, item_id, quantity),
                 ) as c:
@@ -8418,6 +8527,7 @@ async def fill_market_order(order_id: int, user_id: int) -> tuple[bool, str]:
                 async with bot.db.execute(
                     "SELECT slot FROM inventory WHERE user_id = ? "
                     "AND location = 'storage' AND item_id = ? AND stars = 0 "
+                    "AND COALESCE(is_locked, 0) = 0 "
                     "ORDER BY slot ASC LIMIT ?",
                     (user_id, item_id, remaining),
                 ) as c:
@@ -11489,7 +11599,8 @@ async def open_market_order_create(
             f"SELECT inv.item_id, i.name, i.emoji, COUNT(*) AS cnt "
             f"FROM inventory inv JOIN items i ON i.id = inv.item_id "
             f"WHERE inv.user_id = ? AND inv.location = 'storage' "
-            f"AND inv.stars = 0 AND i.rarity IN ({placeholders}) "
+            f"AND inv.stars = 0 AND COALESCE(inv.is_locked, 0) = 0 "
+            f"AND i.rarity IN ({placeholders}) "
             f"AND inv.item_id NOT IN ({hidden_ph}) "
             f"GROUP BY inv.item_id ORDER BY i.name ASC",
             (author_id, *allowed, *hidden),
@@ -11760,6 +11871,7 @@ async def open_market_sell_select(interaction: discord.Interaction, author_id: i
         JOIN market_prices mp ON mp.item_id = inv.item_id
         WHERE inv.user_id = ? AND inv.location = 'storage'
           AND inv.stars = 0
+          AND COALESCE(inv.is_locked, 0) = 0
           AND i.rarity IN ('common', 'uncommon', 'rare')
         GROUP BY inv.item_id
         ORDER BY i.name ASC
@@ -17078,6 +17190,36 @@ class SetsView(BaseView):
 
 
 class ProfileView(BaseView):
+    def __init__(self, author_id: int, filter_mode: str = "all"):
+        super().__init__(author_id)
+        self.filter_mode = filter_mode if filter_mode in STORAGE_FILTERS else "all"
+        filter_options = [
+            discord.SelectOption(
+                label=label,
+                value=mode,
+                emoji=get_emoji("_castle"),
+                default=mode == self.filter_mode,
+            )
+            for mode, label in STORAGE_FILTERS.items()
+        ]
+        self.add_item(
+            make_select(
+                "Фильтр энергостанции",
+                filter_options,
+                self.select_filter,
+                row=4,
+            )
+        )
+
+    async def select_filter(self, interaction: discord.Interaction):
+        mode = interaction.data["values"][0]
+        await interaction.response.defer()
+        embed = await build_profile_embed(interaction, mode)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ProfileView(self.author_id, filter_mode=mode),
+        )
+
     @discord.ui.button(label="Хранилище", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=0)
     async def storage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await deny_if_disabled(interaction, "storage"):
@@ -17130,6 +17272,13 @@ class ProfileView(BaseView):
         await interaction.response.defer()
         embed = await build_sets_embed(self.author_id)
         await interaction.edit_original_response(embed=embed, view=SetsView(self.author_id))
+
+    @discord.ui.button(label="Массовые", emoji=get_emoji("_settings"), style=discord.ButtonStyle.primary, row=3)
+    async def mass_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_mass_ops_view(
+            interaction, self.author_id, self.filter_mode, location="profile"
+        )
 
     @discord.ui.button(label="Почта", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=3)
     async def mailbox_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -17318,9 +17467,44 @@ class StorageSortMenuView(BaseView):
 
 
 class StorageView(BaseView):
-    def __init__(self, author_id: int, return_to: str = "profile", timeout: int = 600):
+    def __init__(
+        self,
+        author_id: int,
+        return_to: str = "profile",
+        filter_mode: str = "all",
+        timeout: int = 600,
+    ):
         super().__init__(author_id, timeout)
         self.return_to = return_to
+        self.filter_mode = filter_mode if filter_mode in STORAGE_FILTERS else "all"
+        filter_options = [
+            discord.SelectOption(
+                label=label,
+                value=mode,
+                emoji=get_emoji("_storage"),
+                default=mode == self.filter_mode,
+            )
+            for mode, label in STORAGE_FILTERS.items()
+        ]
+        self.add_item(
+            make_select(
+                "Фильтр хранилища",
+                filter_options,
+                self.select_filter,
+                row=4,
+            )
+        )
+
+    async def select_filter(self, interaction: discord.Interaction):
+        mode = interaction.data["values"][0]
+        await interaction.response.defer()
+        embed = await build_storage_embed(interaction, mode)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=StorageView(
+                self.author_id, self.return_to, filter_mode=mode
+            ),
+        )
 
     @discord.ui.button(label="Переместить", emoji=get_emoji("_move"), style=discord.ButtonStyle.primary, row=0)
     async def move_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -17337,6 +17521,11 @@ class StorageView(BaseView):
         await interaction.response.defer()
         await open_sell_view(interaction, self.author_id)
 
+    @discord.ui.button(label="Быстрая продажа", emoji=get_emoji("_sell"), style=discord.ButtonStyle.primary, row=1)
+    async def bulk_sell_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_bulk_sell_view(interaction, self.author_id)
+
     @discord.ui.button(label="Сортировка", emoji=get_emoji("_sorting"), style=discord.ButtonStyle.secondary, row=1)
     async def sort_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -17347,6 +17536,18 @@ class StorageView(BaseView):
         )
         await interaction.edit_original_response(
             embed=embed, view=StorageSortMenuView(self.author_id)
+        )
+
+    @discord.ui.button(label="Блокировка", emoji=get_emoji("_settings"), style=discord.ButtonStyle.secondary, row=2)
+    async def lock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_lock_view(interaction, self.author_id)
+
+    @discord.ui.button(label="Массовые", emoji=get_emoji("_settings"), style=discord.ButtonStyle.primary, row=2)
+    async def mass_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_mass_ops_view(
+            interaction, self.author_id, self.filter_mode, location="storage"
         )
 
     @discord.ui.button(label="Временное", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=2)
@@ -17394,6 +17595,7 @@ async def open_sell_view(interaction: discord.Interaction, author_id: int, page:
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'storage'
+              AND COALESCE(inv.is_locked, 0) = 0
         ORDER BY inv.slot ASC
     """, (user_id,)) as c:
         rows = await c.fetchall()
@@ -17471,6 +17673,7 @@ class SellSelectView(SafeView):
             "SELECT i.name, i.price, inv.stars, i.rarity FROM inventory inv "
             "JOIN items i ON inv.item_id = i.id "
             "WHERE inv.user_id = ? AND inv.location = 'storage' "
+            "AND COALESCE(inv.is_locked, 0) = 0 "
             "AND inv.slot = ? AND inv.item_id = ? AND inv.stars = ?",
             (interaction.user.id, slot, item_id, stars)
         ) as c:
@@ -17556,6 +17759,7 @@ class SellConfirmView(SafeView):
                     "SELECT i.price, i.rarity, inv.stars FROM inventory inv "
                     "JOIN items i ON inv.item_id = i.id "
                     "WHERE inv.user_id = ? AND inv.location = 'storage' "
+                    "AND COALESCE(inv.is_locked, 0) = 0 "
                     "AND inv.slot = ? AND inv.item_id = ? AND inv.stars = ?",
                     (user_id, self.slot, self.item_id, self.stars),
                 ) as c:
@@ -17575,7 +17779,7 @@ class SellConfirmView(SafeView):
                 cursor = await bot.db.execute(
                     "DELETE FROM inventory "
                     "WHERE user_id = ? AND location = 'storage' AND slot = ? "
-                    "AND item_id = ? AND stars = ?",
+                    "AND item_id = ? AND stars = ? AND COALESCE(is_locked, 0) = 0",
                     (user_id, self.slot, self.item_id, self.stars),
                 )
                 if cursor.rowcount == 0:
@@ -17610,6 +17814,817 @@ class SellConfirmView(SafeView):
         embed = await build_storage_embed(interaction)
         await interaction.edit_original_response(
             embed=embed, view=StorageView(self.author_id, return_to="profile")
+        )
+
+
+# ============================================================
+#  🧹 БЫСТРАЯ ПРОДАЖА
+# ============================================================
+
+async def get_bulk_sell_summary(user_id: int) -> dict:
+    """Сводка безопасной продажи: только 0★ из хранилища."""
+    allowed = tuple(sorted(SELL_ALLOWED_RARITIES))
+    placeholders = ",".join("?" for _ in allowed)
+    async with bot.db.execute(
+        f"SELECT inv.item_id, inv.slot, i.price, i.rarity "
+        f"FROM inventory inv JOIN items i ON inv.item_id = i.id "
+        f"WHERE inv.user_id = ? AND inv.location = 'storage' "
+        f"AND inv.stars = 0 AND COALESCE(inv.is_locked, 0) = 0 "
+        f"AND i.rarity IN ({placeholders}) "
+        f"ORDER BY inv.item_id, inv.slot",
+        (user_id, *allowed),
+    ) as c:
+        rows = await c.fetchall()
+
+    summary = {
+        mode: {"count": 0, "total": 0}
+        for mode in BULK_SELL_LABELS
+    }
+    by_item: dict[str, list[tuple[int, int]]] = {}
+    for item_id, slot, price, rarity in rows:
+        value = calculate_sell_price(price or 0, 0)
+        summary[rarity]["count"] += 1
+        summary[rarity]["total"] += value
+        by_item.setdefault(item_id, []).append((slot, value))
+
+    for copies in by_item.values():
+        for _slot, value in copies[1:]:
+            summary["dupes"]["count"] += 1
+            summary["dupes"]["total"] += value
+    return summary
+
+
+async def perform_bulk_sell(
+    user_id: int, mode: str
+) -> tuple[bool, str, int, int]:
+    """Массовая продажа 0★ с повторной проверкой и транзакцией."""
+    if mode not in BULK_SELL_LABELS:
+        return False, "❌ Неизвестный режим продажи.", 0, 0
+
+    allowed = tuple(sorted(SELL_ALLOWED_RARITIES))
+    placeholders = ",".join("?" for _ in allowed)
+    sold_count = 0
+    total = 0
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                f"SELECT inv.item_id, inv.slot, i.price, i.rarity "
+                f"FROM inventory inv JOIN items i ON inv.item_id = i.id "
+                f"WHERE inv.user_id = ? AND inv.location = 'storage' "
+                f"AND inv.stars = 0 AND COALESCE(inv.is_locked, 0) = 0 "
+        f"AND i.rarity IN ({placeholders}) "
+                f"ORDER BY inv.item_id, inv.slot",
+                (user_id, *allowed),
+            ) as c:
+                rows = await c.fetchall()
+
+            if mode == "dupes":
+                by_item: dict[str, list[tuple[str, int, int, str]]] = {}
+                for row in rows:
+                    by_item.setdefault(row[0], []).append(row)
+                chosen = [
+                    row
+                    for copies in by_item.values()
+                    for row in copies[1:]
+                ]
+            else:
+                chosen = [row for row in rows if row[3] == mode]
+
+            if not chosen:
+                raise ValueError(
+                    f"Нет предметов для продажи: {BULK_SELL_LABELS[mode]}."
+                )
+
+            total = sum(
+                calculate_sell_price(row[2] or 0, 0) for row in chosen
+            )
+            for item_id, slot, _price, _rarity in chosen:
+                cur = await bot.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = 'storage' AND slot = ? "
+                    "AND item_id = ? AND stars = 0 "
+                    "AND COALESCE(is_locked, 0) = 0",
+                    (user_id, slot, item_id),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(
+                        "Один из предметов уже продан или перемещён. "
+                        "Открой продажу заново."
+                    )
+
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                (total, user_id),
+            )
+            sold_count = len(chosen)
+    except ValueError as e:
+        return False, f"❌ {e}", 0, 0
+
+    await update_quest_progress(user_id, "sell_3", sold_count)
+    await check_achievements(user_id)
+    return (
+        True,
+        f"✅ Продано **{sold_count}** шт. за 🪙 **{format_price(total)}**.",
+        sold_count,
+        total,
+    )
+
+
+async def open_bulk_sell_view(
+    interaction: discord.Interaction, author_id: int
+):
+    summary = await get_bulk_sell_summary(author_id)
+    embed = BotEmbed(
+        title="🧹 Быстрая продажа 0★",
+        description=(
+            "Выбери категорию. Продажа необратима, но потребует подтверждения.\n"
+            "В быструю продажу попадают только **0★** предметы из хранилища."
+        ),
+        color=0x2ecc71,
+    )
+    for mode, label in BULK_SELL_LABELS.items():
+        data = summary[mode]
+        value = (
+            f"**{data['count']}** шт. · 🪙 **{format_price(data['total'])}**"
+            if data["count"]
+            else "нет предметов"
+        )
+        embed.add_field(name=label, value=value, inline=True)
+    embed.set_footer(
+        text=(
+            "Звёздные предметы, epic+ и генераторы из энергостанции "
+            "не затрагиваются."
+        )
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=BulkSellView(author_id, summary),
+    )
+
+
+async def open_bulk_sell_confirm(
+    interaction: discord.Interaction, author_id: int, mode: str
+):
+    summary = await get_bulk_sell_summary(author_id)
+    data = summary.get(mode)
+    if not data or not data["count"]:
+        return await interaction.followup.send(
+            "❌ В этой категории нет предметов.", ephemeral=True
+        )
+    embed = BotEmbed(
+        title="🧹 Подтверждение быстрой продажи",
+        description=(
+            f"Категория: **{BULK_SELL_LABELS[mode]}**\n"
+            f"Будет продано: **{data['count']}** шт.\n"
+            f"Ты получишь: 🪙 **{format_price(data['total'])}**\n\n"
+            "Продать эти предметы?"
+        ),
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=BulkSellConfirmView(
+            author_id, mode, data["count"], data["total"]
+        ),
+    )
+
+
+class BulkSellView(SafeView):
+    def __init__(self, author_id: int, summary: dict):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+
+        for mode in ("common", "uncommon", "rare"):
+            btn = discord.ui.Button(
+                label=BULK_SELL_LABELS[mode],
+                emoji=get_emoji("_sell"),
+                style=discord.ButtonStyle.primary,
+                row=0,
+                disabled=summary[mode]["count"] == 0,
+            )
+            btn.callback = self._make_mode(mode)
+            self.add_item(btn)
+
+        dupes = discord.ui.Button(
+            label=BULK_SELL_LABELS["dupes"],
+            emoji=get_emoji("_sell"),
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=summary["dupes"]["count"] == 0,
+        )
+        dupes.callback = self._make_mode("dupes")
+        self.add_item(dupes)
+
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    def _make_mode(self, mode: str):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await open_bulk_sell_confirm(
+                interaction, self.author_id, mode
+            )
+        return callback
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=StorageView(self.author_id, return_to="profile"),
+        )
+
+
+class BulkSellConfirmView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        mode: str,
+        count: int,
+        total: int,
+    ):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.mode = mode
+        self.count = count
+        self.total = total
+
+    @discord.ui.button(
+        label="Продать",
+        emoji=get_emoji("_sell"),
+        style=discord.ButtonStyle.success,
+    )
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        ok, message, _count, _total = await perform_bulk_sell(
+            self.author_id, self.mode
+        )
+        embed = BotEmbed(
+            title="🧹 Быстрая продажа" if ok else "❌ Нельзя продать",
+            description=message,
+            color=0x2ecc71 if ok else 0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=StorageView(self.author_id, return_to="profile"),
+        )
+
+    @discord.ui.button(
+        label="Отмена",
+        emoji=get_emoji("_cancel"),
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await open_bulk_sell_view(interaction, self.author_id)
+
+
+# ============================================================
+#  ⚙️ МАССОВЫЕ ОПЕРАЦИИ ЭНЕРГОСТАНЦИИ
+# ============================================================
+
+MASS_ACTION_LABELS = {
+    "lock": "Заблокировать видимые",
+    "unlock": "Разблокировать видимые",
+    "move_zero": "0★ в хранилище",
+}
+
+
+async def get_inventory_rows(user_id: int, location: str):
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars, i.price,
+               i.rarity, COALESCE(inv.is_locked, 0)
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = ?
+        ORDER BY inv.slot ASC
+    """, (user_id, location)) as c:
+        return await c.fetchall()
+
+
+async def get_profile_rows(user_id: int):
+    return await get_inventory_rows(user_id, "profile")
+
+
+async def mass_lock_location(
+    user_id: int, location: str, filter_mode: str, lock_value: int
+) -> tuple[bool, str, int]:
+    rows = await get_inventory_rows(user_id, location)
+    visible = filter_profile_rows(rows, filter_mode)
+    if not visible:
+        return False, "❌ По фильтру нет предметов.", 0
+    try:
+        async with db_transaction():
+            for slot, item_id, _name, _emoji, stars, _price, _rarity, _locked in visible:
+                await bot.db.execute(
+                    "UPDATE inventory SET is_locked = ? "
+                    "WHERE user_id = ? AND location = ? AND slot = ? "
+                    "AND item_id = ? AND stars = ?",
+                    (lock_value, user_id, location, slot, item_id, stars),
+                )
+    except Exception as e:
+        return False, f"❌ Не удалось изменить блокировки: {e}", 0
+    action = "заблокировано" if lock_value else "разблокировано"
+    return True, f"✅ {action.capitalize()} **{len(visible)}** предметов.", len(visible)
+
+
+async def mass_lock_profile(
+    user_id: int, filter_mode: str, lock_value: int
+) -> tuple[bool, str, int]:
+    return await mass_lock_location(
+        user_id, "profile", filter_mode, lock_value
+    )
+
+
+async def mass_move_zero_star(
+    user_id: int, source: str, target: str
+) -> tuple[bool, str, int]:
+    if {source, target} != {"profile", "storage"}:
+        return False, "❌ Неверное направление переноса.", 0
+    async with bot.db.execute(
+        "SELECT slot, item_id, stars, COALESCE(is_locked, 0) "
+        "FROM inventory WHERE user_id = ? AND location = ? "
+        "AND stars = 0 ORDER BY slot ASC",
+        (user_id, source),
+    ) as c:
+        items = await c.fetchall()
+    if not items:
+        source_label = "энергостанции" if source == "profile" else "хранилище"
+        return False, f"❌ В {source_label} нет 0★ генераторов.", 0
+
+    target_size = (
+        await get_storage_size(user_id)
+        if target == "storage"
+        else await get_grid_size(user_id)
+    )
+    async with bot.db.execute(
+        "SELECT slot FROM inventory WHERE user_id = ? AND location = ?",
+        (user_id, target),
+    ) as c:
+        used = {row[0] for row in await c.fetchall()}
+    free = [slot for slot in range(target_size) if slot not in used]
+    target_label = "хранилище" if target == "storage" else "энергостанции"
+    if len(free) < len(items):
+        return (
+            False,
+            f"❌ В {target_label} не хватает места: нужно {len(items)}, "
+            f"свободно {len(free)}.",
+            0,
+        )
+
+    try:
+        async with db_transaction():
+            for (source_slot, item_id, stars, is_locked), target_slot in zip(
+                items, free
+            ):
+                cur = await bot.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ? "
+                    "AND item_id = ? AND stars = 0",
+                    (user_id, source, source_slot, item_id),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Один из генераторов уже перемещён.")
+                await bot.db.execute(
+                    "INSERT INTO inventory "
+                    "(user_id, slot, item_id, location, stars, is_locked) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, target_slot, item_id, target, stars, is_locked),
+                )
+    except ValueError as e:
+        return False, f"❌ {e}", 0
+
+    await sort_inventory(user_id, "profile")
+    await sort_inventory(user_id, "storage")
+    await update_quest_progress(user_id, "move_2", len(items))
+    await update_quest_progress(user_id, "move_5", len(items))
+    target_text = "в хранилище" if target == "storage" else "на энергостанцию"
+    return (
+        True,
+        f"✅ Перенесено **{len(items)}** генераторов {target_text}.",
+        len(items),
+    )
+
+
+async def mass_move_zero_star_to_storage(
+    user_id: int,
+) -> tuple[bool, str, int]:
+    return await mass_move_zero_star(user_id, "profile", "storage")
+
+
+async def mass_move_zero_star_to_profile(
+    user_id: int,
+) -> tuple[bool, str, int]:
+    return await mass_move_zero_star(user_id, "storage", "profile")
+
+
+async def open_mass_ops_view(
+    interaction: discord.Interaction,
+    author_id: int,
+    filter_mode: str,
+    location: str = "profile",
+):
+    rows = await get_inventory_rows(author_id, location)
+    visible = filter_profile_rows(rows, filter_mode)
+    zero_count = sum(1 for row in rows if (row[4] or 0) == 0)
+    locked_visible = sum(1 for row in visible if row[7])
+    if location == "profile":
+        title = "⚙️ Массовые операции · Энергостанция"
+        move_text = "Перемещение в хранилище затрагивает все 0★."
+    else:
+        title = "⚙️ Массовые операции · Хранилище"
+        move_text = "Перемещение на энергостанцию затрагивает все 0★."
+    embed = BotEmbed(
+        title=title,
+        description=(
+            f"Фильтр: **{STORAGE_FILTERS.get(filter_mode, 'Все')}**\n"
+            f"Видимых предметов: **{len(visible)}** "
+            f"(заблокировано: **{locked_visible}**)\n"
+            f"0★ в этом месте: **{zero_count}**\n\n"
+            "Массовые действия применяются к видимым предметам. "
+            f"{move_text}"
+        ),
+        color=0x3498db,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MassOpsView(
+            author_id,
+            filter_mode,
+            has_visible=bool(visible),
+            zero_count=zero_count,
+            location=location,
+        ),
+    )
+
+
+async def open_mass_ops_confirm(
+    interaction: discord.Interaction,
+    author_id: int,
+    filter_mode: str,
+    action: str,
+    location: str = "profile",
+):
+    rows = await get_inventory_rows(author_id, location)
+    if action == "move_zero":
+        count = sum(1 for row in rows if (row[4] or 0) == 0)
+    else:
+        count = len(filter_profile_rows(rows, filter_mode))
+    if not count:
+        return await interaction.followup.send(
+            "❌ Нет предметов для этой операции.", ephemeral=True
+        )
+    location_label = "энергостанции" if location == "profile" else "хранилища"
+    embed = BotEmbed(
+        title="⚙️ Подтверждение",
+        description=(
+            f"Место: **{location_label}**\n"
+            f"Действие: **{MASS_ACTION_LABELS[action]}**\n"
+            f"Затронуто предметов: **{count}**\n\n"
+            "Продолжить?"
+        ),
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MassOpsConfirmView(
+            author_id, filter_mode, action, location=location
+        ),
+    )
+
+
+class MassOpsView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        filter_mode: str,
+        has_visible: bool,
+        zero_count: int,
+        location: str = "profile",
+    ):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.filter_mode = filter_mode
+        self.location = location
+
+        lock = discord.ui.Button(
+            label="Заблокировать",
+            emoji=get_emoji("_settings"),
+            style=discord.ButtonStyle.primary,
+            row=0,
+            disabled=not has_visible,
+        )
+        lock.callback = self._make_action("lock")
+        self.add_item(lock)
+
+        unlock = discord.ui.Button(
+            label="Разблокировать",
+            emoji=get_emoji("_settings"),
+            style=discord.ButtonStyle.secondary,
+            row=0,
+            disabled=not has_visible,
+        )
+        unlock.callback = self._make_action("unlock")
+        self.add_item(unlock)
+
+        move_label = (
+            "0★ в хранилище" if location == "profile" else "0★ на станцию"
+        )
+        move = discord.ui.Button(
+            label=move_label,
+            emoji=get_emoji("_move"),
+            style=discord.ButtonStyle.success,
+            row=1,
+            disabled=zero_count == 0,
+        )
+        move.callback = self._make_action("move_zero")
+        self.add_item(move)
+
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    def _make_action(self, action: str):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await open_mass_ops_confirm(
+                interaction,
+                self.author_id,
+                self.filter_mode,
+                action,
+                location=self.location,
+            )
+        return callback
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if self.location == "profile":
+            embed = await build_profile_embed(interaction, self.filter_mode)
+            view = ProfileView(self.author_id, self.filter_mode)
+        else:
+            embed = await build_storage_embed(interaction, self.filter_mode)
+            view = StorageView(
+                self.author_id,
+                return_to="profile",
+                filter_mode=self.filter_mode,
+            )
+        await interaction.edit_original_response(embed=embed, view=view)
+
+
+class MassOpsConfirmView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        filter_mode: str,
+        action: str,
+        location: str = "profile",
+    ):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.filter_mode = filter_mode
+        self.action = action
+        self.location = location
+
+    @discord.ui.button(
+        label="Выполнить",
+        emoji=get_emoji("_approve"),
+        style=discord.ButtonStyle.success,
+    )
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        if self.action == "move_zero":
+            if self.location == "profile":
+                ok, message, _count = await mass_move_zero_star_to_storage(
+                    self.author_id
+                )
+            else:
+                ok, message, _count = await mass_move_zero_star_to_profile(
+                    self.author_id
+                )
+        else:
+            ok, message, _count = await mass_lock_location(
+                self.author_id,
+                self.location,
+                self.filter_mode,
+                1 if self.action == "lock" else 0,
+            )
+        embed = BotEmbed(
+            title="⚙️ Готово" if ok else "❌ Ошибка",
+            description=message,
+            color=0x2ecc71 if ok else 0xe74c3c,
+        )
+        if self.location == "profile":
+            view = ProfileView(self.author_id, self.filter_mode)
+        else:
+            view = StorageView(
+                self.author_id,
+                return_to="profile",
+                filter_mode=self.filter_mode,
+            )
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    @discord.ui.button(
+        label="Отмена",
+        emoji=get_emoji("_cancel"),
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await open_mass_ops_view(
+            interaction,
+            self.author_id,
+            self.filter_mode,
+            location=self.location,
+        )
+
+
+# ============================================================
+#  🔒 БЛОКИРОВКА ПРЕДМЕТОВ
+# ============================================================
+
+async def toggle_item_lock(
+    user_id: int, location: str, slot: int, item_id: str, stars: int
+) -> tuple[bool, int, str]:
+    """Переключает блокировку предмета. Возвращает (ok, new_state, message)."""
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT COALESCE(is_locked, 0) FROM inventory "
+                "WHERE user_id = ? AND location = ? AND slot = ? "
+                "AND item_id = ? AND stars = ?",
+                (user_id, location, slot, item_id, stars),
+            ) as c:
+                row = await c.fetchone()
+            if not row:
+                raise ValueError("Предмет не найден.")
+            new_state = 0 if row[0] else 1
+            cur = await bot.db.execute(
+                "UPDATE inventory SET is_locked = ? "
+                "WHERE user_id = ? AND location = ? AND slot = ? "
+                "AND item_id = ? AND stars = ?",
+                (new_state, user_id, location, slot, item_id, stars),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Предмет уже перемещён.")
+    except ValueError as e:
+        return False, 0, f"❌ {e}"
+    return True, new_state, ""
+
+
+async def open_lock_view(
+    interaction: discord.Interaction, author_id: int, page: int = 0
+):
+    async with bot.db.execute("""
+        SELECT inv.slot, inv.item_id, inv.stars, i.name, i.emoji,
+               COALESCE(inv.is_locked, 0)
+        FROM inventory inv
+        JOIN items i ON inv.item_id = i.id
+        WHERE inv.user_id = ? AND inv.location = 'storage'
+        ORDER BY inv.slot ASC
+    """, (author_id,)) as c:
+        rows = await c.fetchall()
+
+    if not rows:
+        return await interaction.followup.send(
+            "❌ В хранилище нет предметов для блокировки.",
+            ephemeral=True,
+        )
+
+    page_size = 10
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * page_size:page * page_size + page_size]
+
+    options = []
+    for slot, item_id, stars, name, default_emoji, locked in chunk:
+        options.append(
+            discord.SelectOption(
+                label=f"{'🔒' if locked else '🔓'} Слот {slot}: {name} ({stars}★)"[:100],
+                value=f"{slot}:{item_id}:{stars}",
+                emoji=parse_emoji_safe(default_emoji),
+            )
+        )
+
+    locked_count = sum(1 for row in rows if row[5])
+    embed = BotEmbed(
+        title="🔒 Блокировка предметов",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            f"Заблокировано: **{locked_count}** из **{len(rows)}**.\n\n"
+            "Заблокированный предмет нельзя продать, выставить на биржу "
+            "или аукцион и отдать в залог. Выбери предмет, чтобы "
+            "переключить блокировку."
+        ),
+        color=0x3498db,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=LockSelectView(author_id, options, page, total_pages),
+    )
+
+
+class LockSelectView(SafeView):
+    def __init__(
+        self,
+        author_id: int,
+        options: list[discord.SelectOption],
+        page: int = 0,
+        total_pages: int = 1,
+    ):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.page = page
+        self.total_pages = total_pages
+        self.add_item(
+            make_select("Выбери предмет", options, self.item_select, row=0)
+        )
+        if total_pages > 1:
+            prev = discord.ui.Button(
+                label="Стр.",
+                emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary,
+                row=1,
+                disabled=page <= 0,
+            )
+            prev.callback = self.prev_page
+            self.add_item(prev)
+            nxt = discord.ui.Button(
+                label="Стр.",
+                emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary,
+                row=1,
+                disabled=page >= total_pages - 1,
+            )
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+        back = discord.ui.Button(
+            label="Назад",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.secondary,
+            row=2,
+        )
+        back.callback = self.back
+        self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self.check_owner(interaction)
+
+    async def item_select(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        slot_str, item_id, stars_str = value.split(":", 2)
+        await interaction.response.defer()
+        ok, new_state, message = await toggle_item_lock(
+            self.author_id,
+            "storage",
+            int(slot_str),
+            item_id,
+            int(stars_str),
+        )
+        if not ok:
+            return await interaction.followup.send(message, ephemeral=True)
+        state_text = "заблокирован" if new_state else "разблокирован"
+        await interaction.followup.send(
+            f"✅ Предмет {state_text}.", ephemeral=True
+        )
+        await open_lock_view(interaction, self.author_id, self.page)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_lock_view(
+            interaction, self.author_id, self.page - 1
+        )
+
+    async def next_page(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await open_lock_view(
+            interaction, self.author_id, self.page + 1
+        )
+
+    async def back(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        embed = await build_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed,
+            view=StorageView(self.author_id, return_to="profile"),
         )
 
 
@@ -17843,12 +18858,14 @@ class SwapSecondView(SafeView):
         await interaction.response.defer()
 
         async with bot.db.execute(
-            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
+            "WHERE user_id = ? AND location = ? AND slot = ?",
             (self.author_id, self.location, self.first_slot)
         ) as c:
             first = await c.fetchone()
         async with bot.db.execute(
-            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
+            "WHERE user_id = ? AND location = ? AND slot = ?",
             (self.author_id, self.location, second_slot)
         ) as c:
             second = await c.fetchone()
@@ -17864,12 +18881,14 @@ class SwapSecondView(SafeView):
             (self.author_id, self.location, self.first_slot, second_slot)
         )
         await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (self.author_id, self.first_slot, second[0], self.location, second[1])
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars, is_locked) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (self.author_id, self.first_slot, second[0], self.location, second[1], second[2])
         )
         await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)",
-            (self.author_id, second_slot, first[0], self.location, first[1])
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars, is_locked) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (self.author_id, second_slot, first[0], self.location, first[1], first[2])
         )
         await commit_if_needed()
         await update_quest_progress(self.author_id, "swap_1")
@@ -18427,12 +19446,16 @@ class MoveView(SafeView):
             target = "storage"
         
         async with bot.db.execute(
-            "SELECT item_id, stars FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+            "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
+            "WHERE user_id = ? AND location = ? AND slot = ?",
             (user_id, self.source, slot)
         ) as c:
             row = await c.fetchone()
         if not row:
             return await interaction.edit_original_response(embed=BotEmbed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c), view=None)
+        item_id = row[0]
+        stars = row[1]
+        is_locked = row[2]
 
         target_size = await (get_storage_size(user_id) if target == "storage" else get_grid_size(user_id))
         async with bot.db.execute("SELECT slot FROM inventory WHERE user_id = ? AND location = ?", (user_id, target)) as c:
@@ -18452,7 +19475,11 @@ class MoveView(SafeView):
 
         new_slot = free[0]
         await bot.db.execute("DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?", (user_id, self.source, slot))
-        await bot.db.execute("INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, ?, ?)", (user_id, new_slot, item_id, target, stars))
+        await bot.db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars, is_locked) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, new_slot, item_id, target, stars, is_locked),
+        )
         await commit_if_needed()
 
         await update_quest_progress(user_id, "move_2")
@@ -18814,7 +19841,8 @@ class CraftConfirmView(SafeView):
                 if success:
                     try:
                         await place_items(
-                            user_id, next_id, 1, commit=False, stars=1
+                            user_id, next_id, 1, commit=False,
+                            stars=CRAFT_RESULT_STARS
                         )
                     except ValueError:
                         # Мы только что освободили слоты — кладём результат
@@ -18823,8 +19851,8 @@ class CraftConfirmView(SafeView):
                         await bot.db.execute(
                             "INSERT INTO inventory "
                             "(user_id, slot, item_id, location, stars) "
-                            "VALUES (?, ?, ?, ?, 1)",
-                            (user_id, slot, next_id, loc),
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (user_id, slot, next_id, loc, CRAFT_RESULT_STARS),
                         )
                 else:
                     # При провале возвращаем одну исходную копию, чтобы
@@ -18893,7 +19921,8 @@ class CraftConfirmView(SafeView):
         if success:
             msg = (
                 f"⚗️ Успех! {CRAFT_COST}×{src_emoji} {src_name} → "
-                f"1×{dst_emoji} {dst_name} 1★\n{chance_str}{gem_str}"
+                f"1×{dst_emoji} {dst_name} "
+                f"{CRAFT_RESULT_STARS}★\n{chance_str}{gem_str}"
             )
         else:
             msg = (
@@ -19273,17 +20302,22 @@ async def take_bank_loan(
         async with db_transaction():
             async with bot.db.execute(
                 "SELECT slot FROM inventory WHERE user_id = ? "
-                "AND location = 'profile' AND item_id = ? AND stars = ? LIMIT 1",
+                "AND location = 'profile' AND item_id = ? AND stars = ? "
+                "AND COALESCE(is_locked, 0) = 0 LIMIT 1",
                 (user_id, item_id, stars),
             ) as c:
                 row = await c.fetchone()
             if not row:
-                raise ValueError("Залоговый предмет не найден на энергостанции.")
+                raise ValueError(
+                    "Залоговый предмет не найден на энергостанции "
+                    "или заблокирован."
+                )
             slot = row[0]
 
             cur = await bot.db.execute(
                 "DELETE FROM inventory WHERE user_id = ? AND location = 'profile' "
-                "AND slot = ? AND item_id = ? AND stars = ?",
+                "AND slot = ? AND item_id = ? AND stars = ? "
+                "AND COALESCE(is_locked, 0) = 0",
                 (user_id, slot, item_id, stars),
             )
             if cur.rowcount == 0:
@@ -19771,6 +20805,7 @@ async def open_auction_sell_select(
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
         WHERE inv.user_id = ? AND inv.location = 'profile'
+              AND COALESCE(inv.is_locked, 0) = 0
               AND inv.item_id NOT IN ({hidden_ph})
               AND (i.buyable = 0 OR inv.stars > 0)
         ORDER BY inv.slot ASC
@@ -19917,7 +20952,8 @@ class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на �
                 async with bot.db.execute(
                     "SELECT slot FROM inventory "
                     "WHERE user_id = ? AND location = 'profile' AND slot = ? "
-                    "AND item_id = ? AND stars = ?",
+                    "AND item_id = ? AND stars = ? "
+                    "AND COALESCE(is_locked, 0) = 0",
                     (self.author_id, self.slot, self.item_id, self.stars),
                 ) as c:
                     row = await c.fetchone()
@@ -19927,7 +20963,8 @@ class AuctionSellDetailsModal(discord.ui.Modal, title="Выставить на �
                 cur = await bot.db.execute(
                     "DELETE FROM inventory "
                     "WHERE user_id = ? AND location = 'profile' AND slot = ? "
-                    "AND item_id = ? AND stars = ?",
+                    "AND item_id = ? AND stars = ? "
+                    "AND COALESCE(is_locked, 0) = 0",
                     (self.author_id, self.slot, self.item_id, self.stars),
                 )
                 if cur.rowcount == 0:
