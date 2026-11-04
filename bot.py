@@ -3698,20 +3698,43 @@ class BotEmbed(discord.Embed):
         )
 
 
+def clip_embed_text(value, limit: int):
+    """Обрезает текст под лимиты Discord, не ломая отправку embed."""
+    text = "" if value is None else str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
 async def fix_embed_emojis(embed: discord.Embed) -> discord.Embed:
     """Проходит по всем полям эмбеда и меняет эмодзи на кастомные."""
     if embed.title:
-        embed.title = replace_emojis_in_text(embed.title)
+        embed.title = clip_embed_text(replace_emojis_in_text(embed.title), 256)
     if embed.description:
-        embed.description = replace_emojis_in_text(embed.description)
+        embed.description = clip_embed_text(
+            replace_emojis_in_text(embed.description), 4096
+        )
     if embed.footer and embed.footer.text:
-        embed.set_footer(text=replace_emojis_in_text(embed.footer.text), icon_url=embed.footer.icon_url)
+        embed.set_footer(
+            text=clip_embed_text(
+                replace_emojis_in_text(embed.footer.text), 2048
+            ),
+            icon_url=embed.footer.icon_url,
+        )
+    if embed.author and embed.author.name:
+        embed.set_author(
+            name=clip_embed_text(
+                replace_emojis_in_text(embed.author.name), 256
+            ),
+            icon_url=embed.author.icon_url,
+            url=embed.author.url,
+        )
     
     for i, field in enumerate(embed.fields):
         embed.set_field_at(
             i,
-            name=replace_emojis_in_text(field.name),
-            value=replace_emojis_in_text(field.value),
+            name=clip_embed_text(replace_emojis_in_text(field.name), 256),
+            value=clip_embed_text(replace_emojis_in_text(field.value), 1024),
             inline=field.inline
         )
     return embed
@@ -9680,10 +9703,22 @@ class GeneratorDetailView(BaseView):
         self.total_pages = total_pages
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
+            prev = discord.ui.Button(
+                label="Пред.",
+                emoji=get_emoji("_back"),
+                style=discord.ButtonStyle.secondary,
+                row=0,
+                disabled=page <= 0,
+            )
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=0)
+            nxt = discord.ui.Button(
+                label="След.",
+                emoji=get_emoji("_forward"),
+                style=discord.ButtonStyle.secondary,
+                row=0,
+                disabled=page >= total_pages - 1,
+            )
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -9712,7 +9747,7 @@ class GeneratorDetailView(BaseView):
             embed=embed, view=GeneratorDetailView(self.author_id, page, total_pages)
         )
 
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
         await interaction.edit_original_response(
