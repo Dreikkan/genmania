@@ -135,6 +135,9 @@ CRAFT_CHAIN = {
 
 CRAFT_COST = 3
 
+# Генераторы, которые нельзя купить даже на бирже/аукционе.
+GEN_SYNTHESIS_ONLY = frozenset({"space_gen", "divine_gen", "legendary_gen"})
+
 # --- БАЛАНС ГЕНЕРАТОРОВ ---
 # Цена растёт быстрее дохода: высокие тиры хуже окупаются, но дают
 # больше дохода на слот. Синтез 2→1 компенсирует потерю слота.
@@ -203,7 +206,7 @@ DUEL_CHALLENGE_TIMEOUT = 120          # сколько ждём согласия
 DUEL_CHALLENGE_DELETE_SECONDS = 30    # автоудаление после результата
 DUEL_CHALLENGE_DECLINE_SECONDS = 15   # автоудаление после отказа/таймаута
 DUEL_COOLDOWN_SECONDS = 300           # КД после завершённой дуэли
-DUEL_MIN_POWER_RATIO = 0.35           # нельзя бить слишком слабого в power-дуэли
+DUEL_POWER_TOLERANCE = 0.15           # power-дуэль: ±15% мощи
 ESPIONAGE_COOLDOWN_SECONDS = 900      # КД шпионажа — 15 минут
 DUEL_MAX_BET_PCT = 0.10               # максимум 10% баланса на ставку
 DUEL_POWER_VARIANCE = 0.15            # разброс мощности в режиме power
@@ -6748,7 +6751,7 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
         ),
         "generators": (
             "🏗️ Генераторы",
-            "**Покупка:** common/uncommon/rare — в «Магазине»; epic+ — только биржа, аукцион или синтез.\n\n"
+            "**Покупка:** common/uncommon/rare — в «Магазине»; epic–mythic — биржа или аукцион; пространственный/божественный/легендарный — только синтез.\n\n"
             f"**Синтез:** {CRAFT_COST} одинаковых → 1 выше уровнем. Шанс зависит от редкости (100% → 12%). "
             f"Стоимость в гемах растёт. Катализатор +{int(CATALYST_BONUS * 100)}%, "
             f"за каждый провал шанс растёт на {int(CRAFT_PITY_BONUS * 100)}%, "
@@ -6818,7 +6821,7 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             f"• Ставка не больше {int(DUEL_MAX_BET_PCT * 100)}% баланса каждого.\n"
             f"• КД после дуэли: {DUEL_COOLDOWN_SECONDS // 60} мин.\n"
             "• Режимы: `dice` (рандом) или `power` (мощь с разбросом).\n"
-            f"• В power-дуэли нельзя бить противника слабее {int(DUEL_MIN_POWER_RATIO * 100)}% твоей мощи.\n"
+            f"• В power-дуэли соперник должен быть в диапазоне ±{int(DUEL_POWER_TOLERANCE * 100)}% твоей мощи.\n"
             "• Победитель забирает банк.\n\n"
             "**Где:** «Социум» → «Рейд» / «Дуэль»."
         ),
@@ -8422,8 +8425,10 @@ async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[
         # --- ЛОГИКА ЦЕНЫ ---
         if buyable:
             price_str = f"Цена: {coin} {format_price(price)}"
-        else:
+        elif item_id in GEN_SYNTHESIS_ONLY:
             price_str = "Цена: `Только синтез`"
+        else:
+            price_str = "Покупка на бирже/аукционе"
             
         embed.add_field(
             name=f"{emoji} {name} (`{item_id}`)",
@@ -9683,8 +9688,8 @@ class GeneratorDetailView(BaseView):
             self.add_item(nxt)
 
         back = discord.ui.Button(
-            label="Назад",
-            emoji=BOT_BTN_EMOJIS.get("_back", "◀️"),
+            label="В замок",
+            emoji=get_emoji("_castle"),
             style=discord.ButtonStyle.secondary,
             row=1,
         )
@@ -9744,16 +9749,7 @@ class ShopHubView(BaseView):
     @discord.ui.button(label="Катализаторы", emoji=get_emoji("_catalyst"), style=discord.ButtonStyle.primary, row=1)
     async def btn_catalysts(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = BotEmbed(
-            title="🧪 Катализатор",
-            description=(
-                f"Цена: 💎 {CATALYST_PRICE} за штуку.\n"
-                f"Эффект: +{int(CATALYST_BONUS * 100)}% к шансу следующего синтеза.\n\n"
-                f"Выбери количество:"
-            ),
-            color=0x3498db
-        )
-        await interaction.edit_original_response(embed=embed, view=CatalystSelectView(self.author_id))
+        await open_catalyst_shop(interaction, self.author_id, return_to="shop")
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -11582,15 +11578,6 @@ class MarketSellModal(discord.ui.Modal, title="Продать на бирже"):
 
 
 class SocialView(BaseView):
-    @discord.ui.button(label="Рейд", emoji=get_emoji("_raid"), style=discord.ButtonStyle.primary, row=0)
-    async def btn_raid(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await open_raid_menu(interaction, self.author_id)
-
-    @discord.ui.button(label="Дуэль", emoji=get_emoji("_duel"), style=discord.ButtonStyle.success, row=0)
-    async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_duel_setup(interaction, self.author_id)
-
     @discord.ui.button(label="Клан", emoji=get_emoji("_clan"), style=discord.ButtonStyle.success, row=0)
     async def btn_clan(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -11607,13 +11594,13 @@ class SocialView(BaseView):
             view = NoClanView(self.author_id)
         await interaction.edit_original_response(embed=embed, view=view)
 
-    @discord.ui.button(label="Топы", emoji=get_emoji("_leaderboards"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Топы", emoji=get_emoji("_leaderboards"), style=discord.ButtonStyle.primary, row=0)
     async def btn_tops(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_top_embed(interaction, "coins", 10)
         await interaction.edit_original_response(embed=embed, view=TopView(self.author_id, "coins", 10))
 
-    @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Аукцион", emoji=get_emoji("_market"), style=discord.ButtonStyle.primary, row=0)
     async def btn_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_auction_view(interaction, self.author_id)
@@ -11627,12 +11614,12 @@ class SocialView(BaseView):
             view=MarketView(self.author_id, total_pages=total_pages),
         )
 
-    @discord.ui.button(label="Банк", emoji=get_emoji("_bank"), style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Банк", emoji=get_emoji("_bank"), style=discord.ButtonStyle.primary, row=1)
     async def btn_bank(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_bank_view(interaction, self.author_id)
 
-    @discord.ui.button(label="PvP", emoji=get_emoji("_raid"), style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="PvP", emoji=get_emoji("_raid"), style=discord.ButtonStyle.danger, row=1)
     async def btn_pvp(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_pvp_hub(interaction, self.author_id)
@@ -11662,12 +11649,12 @@ class SocialView(BaseView):
         embed = BotEmbed(title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=SocialView(self.author_id))
 
-    @discord.ui.button(label="Шпионаж", emoji=get_emoji("_info"), style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Шпионаж", emoji=get_emoji("_info"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_espionage(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_espionage_select(interaction, self.author_id)
 
-    @discord.ui.button(label="Профиль", emoji=get_emoji("_profile"), style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Профиль", emoji=get_emoji("_profile"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_view_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_profile_select(interaction, self.author_id)
@@ -14573,15 +14560,27 @@ async def set_espionage_cooldown(user_id: int):
     )
 
 
+def power_duel_allowed(challenger_power: int, opponent_power: int) -> bool:
+    """Проверяет ±15% мощи без ошибок округления float."""
+    if challenger_power <= 0 or opponent_power <= 0:
+        return False
+    percent = int(round(DUEL_POWER_TOLERANCE * 100))
+    return (
+        challenger_power * (100 - percent)
+        <= opponent_power * 100
+        <= challenger_power * (100 + percent)
+    )
+
+
 async def validate_power_duel(challenger_id: int, opponent_id: int) -> tuple[bool, str]:
     p1 = await get_combat_power(challenger_id)
     p2 = await get_combat_power(opponent_id)
     if p1 <= 0 or p2 <= 0:
         return False, "У одного из игроков нет генераторов для дуэли."
-    if p1 > p2 and p2 < p1 * DUEL_MIN_POWER_RATIO:
+    if not power_duel_allowed(p1, p2):
         return False, (
-            "❌ Слишком слабый противник для power-дуэли. "
-            f"Нужно не меньше {int(DUEL_MIN_POWER_RATIO * 100)}% твоей мощи."
+            "❌ Для power-дуэли нужен противник в диапазоне "
+            f"±{int(DUEL_POWER_TOLERANCE * 100)}% твоей мощи."
         )
     return True, ""
 
@@ -14713,9 +14712,8 @@ class DuelTargetSelectView(SafeView):
             return await interaction.response.send_message(
                 "❌ Нельзя вызвать самого себя.", ephemeral=True
             )
-        await interaction.response.send_modal(
-            DuelBetModal(self.author_id, target_id)
-        )
+        await interaction.response.defer()
+        await open_duel_lobby(interaction, self.author_id, target_id)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -14913,9 +14911,10 @@ async def resolve_duel(
                 p2 = await get_combat_power(opponent_id)
                 if p1 <= 0 or p2 <= 0:
                     raise ValueError("У одного из игроков нет генераторов для дуэли.")
-                if p1 > p2 and p2 < p1 * DUEL_MIN_POWER_RATIO:
+                if not power_duel_allowed(p1, p2):
                     raise ValueError(
-                        "Слишком слабый противник для power-дуэли."
+                        "Для power-дуэли нужен противник в диапазоне "
+                        f"±{int(DUEL_POWER_TOLERANCE * 100)}% мощи."
                     )
                 r1 = int(p1 * random.uniform(
                     1 - DUEL_POWER_VARIANCE, 1 + DUEL_POWER_VARIANCE
@@ -15052,38 +15051,56 @@ async def build_pvp_hub_embed(user_id: int) -> discord.Embed:
     )
 
 
-async def build_battle_log_embed(user_id: int) -> discord.Embed:
+async def build_battle_log_embed(
+    user_id: int, filter_type: str = "all"
+) -> discord.Embed:
     events = []
-    async with bot.db.execute(
-        "SELECT winner_id, loser_id, bet, type, timestamp FROM duel_history "
-        "WHERE winner_id = ? OR loser_id = ? ORDER BY id DESC LIMIT 10",
-        (user_id, user_id),
-    ) as c:
-        for winner, loser, bet, mode, ts in await c.fetchall():
-            won = winner == user_id
-            opponent = loser if won else winner
-            events.append((
-                _parse_db_time(ts) or datetime.datetime.min,
-                (
-                    f"{'🏆' if won else '💥'} Дуэль ({mode}) "
-                    f"против <@{opponent}> · ставка 🪙 {bet}"
-                ),
-            ))
-    async with bot.db.execute(
-        "SELECT target_id, amount, timestamp FROM raid_loot_log "
-        "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
-        (user_id,),
-    ) as c:
-        for target, amount, ts in await c.fetchall():
-            events.append((
-                _parse_db_time(ts) or datetime.datetime.min,
-                f"🏰 Рейд: украдено 🪙 {amount} у <@{target}>",
-            ))
+    if filter_type in ("all", "duel"):
+        async with bot.db.execute(
+            "SELECT winner_id, loser_id, bet, type, timestamp FROM duel_history "
+            "WHERE winner_id = ? OR loser_id = ? ORDER BY id DESC LIMIT 10",
+            (user_id, user_id),
+        ) as c:
+            for winner, loser, bet, mode, ts in await c.fetchall():
+                won = winner == user_id
+                opponent = loser if won else winner
+                events.append((
+                    _parse_db_time(ts) or datetime.datetime.min,
+                    (
+                        f"{'🏆' if won else '💥'} Дуэль ({mode}) "
+                        f"против <@{opponent}> · ставка 🪙 {bet}"
+                    ),
+                ))
+    if filter_type in ("all", "raid"):
+        async with bot.db.execute(
+            "SELECT target_id, amount, timestamp FROM raid_loot_log "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+            (user_id,),
+        ) as c:
+            for target, amount, ts in await c.fetchall():
+                events.append((
+                    _parse_db_time(ts) or datetime.datetime.min,
+                    f"🏰 Рейд: украдено 🪙 {amount} у <@{target}>",
+                ))
 
     events.sort(key=lambda item: item[0], reverse=True)
+    filter_labels = {"all": "все", "duel": "дуэли", "raid": "рейды"}
+    description = (
+        f"Последние 10 событий · режим: "
+        f"{filter_labels.get(filter_type, filter_type)}."
+    )
+    raid_cd = await get_raid_cooldown_seconds(user_id)
+    duel_cd = await get_duel_cooldown_seconds(user_id)
+    cooldown_parts = []
+    if raid_cd:
+        cooldown_parts.append(f"Рейд: **{format_cooldown(raid_cd)}**")
+    if duel_cd:
+        cooldown_parts.append(f"Дуэль: **{format_cooldown(duel_cd)}**")
+    if cooldown_parts:
+        description += "\n" + " · ".join(cooldown_parts)
     embed = BotEmbed(
         title="📜 Боевой журнал",
-        description="Последние 10 событий.",
+        description=description,
         color=0xe74c3c,
     )
     if not events:
@@ -15100,6 +15117,125 @@ async def build_battle_log_embed(user_id: int) -> discord.Embed:
     return embed
 
 
+async def get_pvp_targets(viewer_id: int, mode: str = "raid") -> list[dict]:
+    """Список целей для PvP с учётом силы, щита и кулдаунов."""
+    viewer_power = await get_combat_power(viewer_id)
+    rows = await get_top_players("coins", 50)
+    now = datetime.datetime.now()
+    targets = []
+    for uid, coins in rows:
+        if uid == viewer_id:
+            continue
+        power = await get_combat_power(uid)
+        if power <= 0:
+            continue
+        if mode == "duel":
+            if not power_duel_allowed(viewer_power, power):
+                continue
+        else:
+            if power < viewer_power * RAID_MIN_TARGET_POWER_RATIO:
+                continue
+
+        async with bot.db.execute(
+            "SELECT last_raid_time, last_attacked_time FROM raid_cooldowns "
+            "WHERE user_id = ?",
+            (uid,),
+        ) as c:
+            cd_row = await c.fetchone()
+        last_raid = _parse_db_time(cd_row[0]) if cd_row else None
+        last_attacked = _parse_db_time(cd_row[1]) if cd_row else None
+        raid_cd = max(
+            0,
+            int(3600 - (now - last_raid).total_seconds()) if last_raid else 0,
+        )
+        shield = max(
+            0,
+            int(
+                RAID_TARGET_SHIELD_HOURS * 3600
+                - (now - last_attacked).total_seconds()
+            ) if last_attacked else 0,
+        )
+        duel_cd = await get_duel_cooldown_seconds(uid)
+        targets.append({
+            "user_id": uid,
+            "coins": coins or 0,
+            "power": power,
+            "raid_cd": raid_cd,
+            "shield": shield,
+            "duel_cd": duel_cd,
+        })
+        if len(targets) >= 10:
+            break
+    return targets
+
+
+async def build_pvp_targets_embed(
+    viewer_id: int, mode: str = "raid"
+) -> discord.Embed:
+    viewer_power = await get_combat_power(viewer_id)
+    targets = await get_pvp_targets(viewer_id, mode)
+    if mode == "duel":
+        subtitle = (
+            f"Power-дуэли: ±{int(DUEL_POWER_TOLERANCE * 100)}% "
+            f"от твоей мощи **{viewer_power}**."
+        )
+    else:
+        subtitle = (
+            f"Рейды: цель не слабее {int(RAID_MIN_TARGET_POWER_RATIO * 100)}% "
+            f"твоей мощи **{viewer_power}**."
+        )
+    embed = BotEmbed(
+        title="🎯 PvP-цели",
+        description=f"{subtitle}\nЦелей найдено: **{len(targets)}**.",
+        color=0xe74c3c,
+    )
+    raid_cd = await get_raid_cooldown_seconds(viewer_id)
+    duel_cd = await get_duel_cooldown_seconds(viewer_id)
+    cooldown_parts = []
+    if raid_cd:
+        cooldown_parts.append(f"Твой рейд: **{format_cooldown(raid_cd)}**")
+    if duel_cd:
+        cooldown_parts.append(f"Твоя дуэль: **{format_cooldown(duel_cd)}**")
+    if cooldown_parts:
+        embed.description += "\n" + " · ".join(cooldown_parts)
+    if not targets:
+        embed.description += "\n\nПодходящих целей нет. Попробуй другой режим."
+        return embed
+    for target in targets:
+        shield = format_cooldown(target["shield"]) if target["shield"] else "нет"
+        raid_cd = format_cooldown(target["raid_cd"]) if target["raid_cd"] else "готов"
+        duel_cd = format_cooldown(target["duel_cd"]) if target["duel_cd"] else "готов"
+        embed.add_field(
+            name=f"<@{target['user_id']}> · ⚔️ {target['power']}",
+            value=(
+                f"🪙 {format_price(target['coins'])} | "
+                f"Щит: **{shield}**\n"
+                f"Рейд: **{raid_cd}** | Дуэль: **{duel_cd}**"
+            ),
+            inline=False,
+        )
+    return embed
+
+
+async def open_pvp_targets(
+    interaction: discord.Interaction, author_id: int, mode: str = "raid"
+):
+    targets = await get_pvp_targets(author_id, mode)
+    embed = await build_pvp_targets_embed(author_id, mode)
+    viewer_raid_cd = await get_raid_cooldown_seconds(author_id)
+    viewer_duel_cd = await get_duel_cooldown_seconds(author_id)
+    await interaction.edit_original_response(
+        embed=embed,
+        view=PvPTargetsView(
+            author_id,
+            targets,
+            mode,
+            viewer_raid_cd=viewer_raid_cd,
+            viewer_duel_cd=viewer_duel_cd,
+        ),
+    )
+
+
 async def open_pvp_hub(interaction: discord.Interaction, author_id: int):
     embed = await build_pvp_hub_embed(author_id)
     await interaction.edit_original_response(
@@ -15107,10 +15243,343 @@ async def open_pvp_hub(interaction: discord.Interaction, author_id: int):
     )
 
 
-async def open_battle_log(interaction: discord.Interaction, author_id: int):
-    embed = await build_battle_log_embed(author_id)
+async def get_last_duel(user_id: int) -> tuple[int, str] | None:
+    async with bot.db.execute(
+        "SELECT winner_id, loser_id, type FROM duel_history "
+        "WHERE winner_id = ? OR loser_id = ? ORDER BY id DESC LIMIT 1",
+        (user_id, user_id),
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return None
+    winner, loser, mode = row
+    opponent = loser if winner == user_id else winner
+    return opponent, (mode or "dice")
+
+
+async def get_last_duel_opponent(user_id: int) -> int | None:
+    last = await get_last_duel(user_id)
+    return last[0] if last else None
+
+
+async def get_last_raid_target(user_id: int) -> int | None:
+    async with bot.db.execute(
+        "SELECT target_id FROM raid_loot_log WHERE user_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ) as c:
+        row = await c.fetchone()
+    return row[0] if row else None
+
+
+async def open_duel_lobby(
+    interaction: discord.Interaction,
+    author_id: int,
+    target_id: int,
+    initial_mode: str = "dice",
+):
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+    if target_id == author_id:
+        return await interaction.followup.send(
+            "❌ Нельзя вызвать самого себя.", ephemeral=True
+        )
+    async with bot.db.execute(
+        "SELECT coins FROM players WHERE user_id = ?", (author_id,)
+    ) as c:
+        row1 = await c.fetchone()
+    async with bot.db.execute(
+        "SELECT coins FROM players WHERE user_id = ?", (target_id,)
+    ) as c:
+        row2 = await c.fetchone()
+    if not row1 or not row2:
+        return await interaction.followup.send(
+            "❌ Игрок не найден.", ephemeral=True
+        )
+    c1 = (row1[0] or 0)
+    c2 = (row2[0] or 0)
+    max_bet = max(1, int(min(c1, c2) * DUEL_MAX_BET_PCT))
+    p1 = await get_combat_power(author_id)
+    p2 = await get_combat_power(target_id)
+    can_power = power_duel_allowed(p1, p2)
+    embed = BotEmbed(
+        title="⚔️ Дуэльное лобби",
+        description=(
+            f"Противник: <@{target_id}>\n"
+            f"Мощь: **{p1}** против **{p2}**\n"
+            f"Максимальная ставка: 🪙 **{max_bet}** "
+            f"({int(DUEL_MAX_BET_PCT * 100)}% баланса)\n"
+            f"Power-режим: {'доступен' if can_power else 'недоступен'}."
+        ),
+        color=0xf1c40f,
+    )
     await interaction.edit_original_response(
-        embed=embed, view=BattleLogView(author_id)
+        embed=embed,
+        view=DuelLobbyView(
+            author_id, target_id, max_bet, can_power, initial_mode=initial_mode
+        ),
+    )
+
+
+class DuelLobbyView(BaseView):
+    home_row = 3
+
+    def __init__(
+        self,
+        author_id: int,
+        target_id: int,
+        max_bet: int,
+        can_power: bool,
+        initial_mode: str = "dice",
+    ):
+        super().__init__(author_id, timeout=300)
+        self.target_id = target_id
+        self.max_bet = max_bet
+        self.can_power = can_power
+        self.selected_bet: int | None = None
+        self.mode = initial_mode if initial_mode in ("dice", "power") else "dice"
+        if self.mode == "power" and not can_power:
+            self.mode = "dice"
+        self.btn_power.label = f"Режим: {self.mode}"
+        self.btn_power.disabled = not can_power
+        self.btn_call.disabled = True
+
+    def _select_bet(self, bet: int):
+        self.selected_bet = min(max(1, bet), self.max_bet)
+        self.btn_call.disabled = False
+
+    @discord.ui.button(label="100", emoji=get_emoji("_coin"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_100(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._select_bet(100)
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="500", emoji=get_emoji("_coin"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_500(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._select_bet(500)
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="1000", emoji=get_emoji("_coin"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_1000(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._select_bet(1000)
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="10%", emoji=get_emoji("_coin"), style=discord.ButtonStyle.secondary, row=0)
+    async def btn_max(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._select_bet(self.max_bet)
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Своя ставка", emoji=get_emoji("_buy"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            DuelBetModal(self.author_id, self.target_id)
+        )
+
+    @discord.ui.button(label="Режим: dice", emoji=get_emoji("_duel"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_power(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.mode = "power" if self.mode == "dice" else "dice"
+        self.btn_power.label = f"Режим: {self.mode}"
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Вызвать", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success, row=2)
+    async def btn_call(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.selected_bet is None:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери ставку.", ephemeral=True
+            )
+        if self.mode == "power" and not self.can_power:
+            return await interaction.response.send_message(
+                "❌ Power-режим недоступен для этой цели.", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+        await create_duel_challenge(
+            interaction, self.author_id, self.target_id, self.selected_bet, self.mode
+        )
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_pvp_targets(interaction, self.author_id, "duel")
+
+
+class PvPTargetModal(discord.ui.Modal, title="Цель по ID"):
+    target_id = discord.ui.TextInput(label="ID игрока", required=True)
+
+    def __init__(self, author_id: int):
+        super().__init__()
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.target_id.value)
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ ID должен быть числом.", ephemeral=True
+            )
+        if target_id == self.author_id:
+            return await interaction.response.send_message(
+                "❌ Нельзя вызвать самого себя.", ephemeral=True
+            )
+        await interaction.response.defer()
+        await open_duel_lobby(interaction, self.author_id, target_id)
+
+
+class PvPTargetsView(BaseView):
+    home_row = 3
+
+    def __init__(
+        self,
+        author_id: int,
+        targets: list[dict],
+        mode: str,
+        viewer_raid_cd: int = 0,
+        viewer_duel_cd: int = 0,
+    ):
+        super().__init__(author_id, timeout=300)
+        self.targets = targets
+        self.mode = mode
+        self.viewer_raid_cd = viewer_raid_cd
+        self.viewer_duel_cd = viewer_duel_cd
+        self.selected_id: int | None = None
+        self.selected = None
+        if targets:
+            options = [
+                discord.SelectOption(
+                    label=f"ID {target['user_id']} · ⚔️ {target['power']}"[:100],
+                    value=str(target["user_id"]),
+                    description=f"🪙 {format_price(target['coins'])}",
+                    emoji=get_emoji("_raid"),
+                )
+                for target in targets
+            ]
+            self.add_item(make_select("Выбери цель", options, self.select_target, row=0))
+        user_select = discord.ui.UserSelect(
+            placeholder="Найти игрока по имени...",
+            min_values=1,
+            max_values=1,
+            row=4,
+        )
+        user_select.callback = self.select_user
+        self.add_item(user_select)
+        self.btn_attack.disabled = True
+        self.btn_duel.disabled = True
+        self.btn_profile.disabled = True
+
+    async def select_user(self, interaction: discord.Interaction):
+        target_id = int(interaction.data["values"][0])
+        if target_id == self.author_id:
+            return await interaction.response.send_message(
+                "❌ Нельзя вызвать самого себя.", ephemeral=True
+            )
+        await interaction.response.defer()
+        await open_duel_lobby(interaction, self.author_id, target_id)
+
+    async def enter_id(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PvPTargetModal(self.author_id))
+
+    async def select_target(self, interaction: discord.Interaction):
+        target_id = int(interaction.data["values"][0])
+        self.selected = next(
+            (target for target in self.targets if target["user_id"] == target_id),
+            None,
+        )
+        self.btn_profile.disabled = False
+        self.btn_attack.disabled = not (
+            self.selected
+            and not self.selected["shield"]
+            and not self.selected["raid_cd"]
+            and not self.viewer_raid_cd
+        )
+        self.btn_duel.disabled = not (
+            self.selected
+            and not self.selected["duel_cd"]
+            and not self.viewer_duel_cd
+        )
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(
+            f"Выбрана цель <@{target_id}>.", ephemeral=True
+        )
+
+    @discord.ui.button(label="Атаковать", emoji=get_emoji("_raid"), style=discord.ButtonStyle.danger, row=1)
+    async def btn_attack(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери цель.", ephemeral=True
+            )
+        await interaction.response.defer()
+        result, error = await perform_raid(
+            [self.author_id], self.selected["user_id"]
+        )
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await send_raid_result(interaction, result)
+
+    @discord.ui.button(label="Дуэль", emoji=get_emoji("_duel"), style=discord.ButtonStyle.success, row=1)
+    async def btn_duel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери цель.", ephemeral=True
+            )
+        await open_duel_lobby(
+            interaction, self.author_id, self.selected["user_id"]
+        )
+
+    @discord.ui.button(label="Профиль", emoji=get_emoji("_profile"), style=discord.ButtonStyle.secondary, row=1)
+    async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.selected:
+            return await interaction.response.send_message(
+                "❌ Сначала выбери цель.", ephemeral=True
+            )
+        await interaction.response.defer()
+        embed = await build_public_profile_embed(
+            self.selected["user_id"], detailed=False
+        )
+        await interaction.edit_original_response(
+            embed=embed,
+            view=PublicProfileView(self.author_id, self.selected["user_id"], False),
+        )
+
+    @discord.ui.button(label="Сменить режим", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary, row=2)
+    async def btn_mode(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        mode = "duel" if self.mode == "raid" else "raid"
+        await open_pvp_targets(interaction, self.author_id, mode)
+
+    @discord.ui.button(label="Ввести ID", emoji=get_emoji("_info"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_enter_id(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.enter_id(interaction)
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_pvp_targets(interaction, self.author_id, self.mode)
+
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
+    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_pvp_hub(interaction, self.author_id)
+
+
+async def open_battle_log(
+    interaction: discord.Interaction, author_id: int, filter_type: str = "all"
+):
+    embed = await build_battle_log_embed(author_id, filter_type)
+    last_duel = await get_last_duel(author_id)
+    rematch_duel = last_duel[0] if last_duel else None
+    rematch_mode = last_duel[1] if last_duel else "dice"
+    rematch_raid = await get_last_raid_target(author_id)
+    viewer_duel_cd = await get_duel_cooldown_seconds(author_id)
+    viewer_raid_cd = await get_raid_cooldown_seconds(author_id)
+    await interaction.edit_original_response(
+        embed=embed,
+        view=BattleLogView(
+            author_id,
+            filter_type,
+            rematch_duel,
+            rematch_raid,
+            viewer_duel_cd=viewer_duel_cd,
+            viewer_raid_cd=viewer_raid_cd,
+            rematch_duel_mode=rematch_mode,
+        ),
     )
 
 
@@ -15136,6 +15605,11 @@ class PvPHubView(BaseView):
         await interaction.response.defer()
         await open_battle_log(interaction, self.author_id)
 
+    @discord.ui.button(label="Цели", emoji=get_emoji("_raid"), style=discord.ButtonStyle.primary, row=1)
+    async def btn_targets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_pvp_targets(interaction, self.author_id, "raid")
+
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -15146,14 +15620,80 @@ class PvPHubView(BaseView):
 
 
 class BattleLogView(BaseView):
-    home_row = 2
+    home_row = 3
 
-    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary, row=0)
+    def __init__(
+        self,
+        author_id: int,
+        filter_type: str = "all",
+        rematch_duel: int | None = None,
+        rematch_raid: int | None = None,
+        viewer_duel_cd: int = 0,
+        viewer_raid_cd: int = 0,
+        rematch_duel_mode: str = "dice",
+    ):
+        super().__init__(author_id, timeout=300)
+        self.filter_type = filter_type
+        self.rematch_duel = rematch_duel
+        self.rematch_raid = rematch_raid
+        self.rematch_duel_mode = rematch_duel_mode
+        self.viewer_duel_cd = viewer_duel_cd
+        self.viewer_raid_cd = viewer_raid_cd
+        filter_options = [
+            discord.SelectOption(
+                label="Все события", value="all", emoji=get_emoji("_stats")
+            ),
+            discord.SelectOption(
+                label="Только дуэли", value="duel", emoji=get_emoji("_duel")
+            ),
+            discord.SelectOption(
+                label="Только рейды", value="raid", emoji=get_emoji("_raid")
+            ),
+        ]
+        self.add_item(make_select("Фильтр истории", filter_options, self.select_filter, row=0))
+        self.btn_duel_rematch.disabled = (
+            rematch_duel is None or viewer_duel_cd > 0
+        )
+        self.btn_raid_rematch.disabled = (
+            rematch_raid is None or viewer_raid_cd > 0
+        )
+
+    async def select_filter(self, interaction: discord.Interaction):
+        filter_type = interaction.data["values"][0]
+        await interaction.response.defer()
+        await open_battle_log(interaction, self.author_id, filter_type)
+
+    @discord.ui.button(label="Реванш", emoji=get_emoji("_duel"), style=discord.ButtonStyle.success, row=1)
+    async def btn_duel_rematch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.rematch_duel is None:
+            return await interaction.response.send_message(
+                "❌ Нет соперника для реванша.", ephemeral=True
+            )
+        await open_duel_lobby(
+            interaction,
+            self.author_id,
+            self.rematch_duel,
+            initial_mode=self.rematch_duel_mode,
+        )
+
+    @discord.ui.button(label="Повторить рейд", emoji=get_emoji("_raid"), style=discord.ButtonStyle.danger, row=1)
+    async def btn_raid_rematch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.rematch_raid is None:
+            return await interaction.response.send_message(
+                "❌ Нет цели для повторного рейда.", ephemeral=True
+            )
+        await interaction.response.defer()
+        result, error = await perform_raid([self.author_id], self.rematch_raid)
+        if error:
+            return await interaction.followup.send(error, ephemeral=True)
+        await send_raid_result(interaction, result)
+
+    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary, row=2)
     async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await open_battle_log(interaction, self.author_id)
+        await open_battle_log(interaction, self.author_id, self.filter_type)
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_pvp_hub(interaction, self.author_id)
@@ -16268,8 +16808,7 @@ class ProfileView(BaseView):
     @discord.ui.button(label="Катализатор", emoji=get_emoji("_catalyst"), style=discord.ButtonStyle.secondary, row=1)
     async def catalyst_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = BotEmbed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
-        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
+        await open_catalyst_shop(interaction, self.author_id, return_to="profile")
 
     @discord.ui.button(label="Переместить", emoji=get_emoji("_move"), style=discord.ButtonStyle.primary, row=1)
     async def move_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -16295,18 +16834,18 @@ class ProfileView(BaseView):
             embed=embed, view=GeneratorDetailView(self.author_id, 0, total_pages)
         )
 
-    @discord.ui.button(label="Сеты", emoji=get_emoji("_inventory"), style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="Сеты", emoji=get_emoji("_inventory"), style=discord.ButtonStyle.primary, row=2)
     async def sets_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_sets_embed(self.author_id)
         await interaction.edit_original_response(embed=embed, view=SetsView(self.author_id))
 
-    @discord.ui.button(label="Почта", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Почта", emoji=get_emoji("_storage"), style=discord.ButtonStyle.secondary, row=3)
     async def mailbox_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_mailbox_view(interaction, self.author_id)
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_main_embed(interaction)
@@ -17124,11 +17663,13 @@ async def open_star_view(
     custom = settings["custom_emojis"]
 
     async with bot.db.execute("""
-        SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
+        SELECT inv.location, inv.slot, inv.item_id, i.name, i.emoji, inv.stars
         FROM inventory inv
         JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'profile' AND inv.stars < 5
-        ORDER BY inv.slot ASC
+        WHERE inv.user_id = ? AND inv.location IN ('profile', 'storage')
+              AND inv.stars < 5
+        ORDER BY CASE inv.location WHEN 'profile' THEN 0 ELSE 1 END,
+                 inv.slot ASC
     """, (user_id,)) as c:
         rows = await c.fetchall()
 
@@ -17142,19 +17683,25 @@ async def open_star_view(
     chunk = rows[page * page_size:(page + 1) * page_size]
 
     options = []
-    for slot, item_id, name, default_emoji, stars in chunk:
+    for location, slot, item_id, name, default_emoji, stars in chunk:
         emoji_str = custom.get(item_id, default_emoji)
         emoji_obj = parse_emoji_safe(emoji_str)
         next_star = stars + 1
         need = STAR_UPGRADE[next_star]["copies"]
         async with bot.db.execute(
-            "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile' AND item_id = ? AND stars = ?",
+            "SELECT COUNT(*) FROM inventory WHERE user_id = ? "
+            "AND location IN ('profile', 'storage') "
+            "AND item_id = ? AND stars = ?",
             (user_id, item_id, stars)
         ) as c:
             have = (await c.fetchone())[0]
+        location_label = "Замок" if location == "profile" else "Хранилище"
         options.append(discord.SelectOption(
-            label=f"Слот {slot}: {name} {stars}★ → {next_star}★ ({have}/{need})",
-            value=f"{slot}:{item_id}:{stars}",
+            label=(
+                f"{location_label} · слот {slot}: {name} "
+                f"{stars}★ → {next_star}★ ({have}/{need})"
+            )[:100],
+            value=f"{location}:{slot}:{item_id}:{stars}",
             emoji=emoji_obj
         ))
 
@@ -17168,7 +17715,7 @@ async def open_star_view(
             f"5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
             f"Чтобы поднять звезду, нужно **несколько копий** того же генератора с такой же звёздностью.\n"
             f"При провале сгорает одна копия, но звезда **не понижается**.\n\n"
-            f"Выбери генератор:"
+            f"Выбери генератор в замке или хранилище:"
         ),
         color=0xf1c40f
     )
@@ -17227,11 +17774,15 @@ class StarSelectView(SafeView):
     async def item_select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
         
-        # Парсинг для звезд: "slot:item_id:stars"
+        # Парсинг: "location:slot:item_id:stars" (старый формат — без location).
         parts = value.split(":")
-        slot = int(parts[0])
-        item_id = parts[1]
-        stars = int(parts[2]) if len(parts) > 2 else 0
+        if len(parts) >= 4:
+            location, slot_str, item_id, stars_str = parts[:4]
+        else:
+            location = "profile"
+            slot_str, item_id, stars_str = parts[:3]
+        slot = int(slot_str)
+        stars = int(stars_str) if stars_str else 0
         
         next_star = stars + 1
         if next_star > 5:
@@ -17240,7 +17791,15 @@ class StarSelectView(SafeView):
             return
             
         await interaction.response.defer()
-        await show_star_confirm(interaction, slot, item_id, stars, next_star, self.author_id)
+        await show_star_confirm(
+            interaction,
+            slot,
+            item_id,
+            stars,
+            next_star,
+            self.author_id,
+            location=location,
+        )
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -17248,7 +17807,15 @@ class StarSelectView(SafeView):
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
 
-async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id: str, current_stars: int, next_star: int, author_id: int):
+async def show_star_confirm(
+    interaction: discord.Interaction,
+    slot: int,
+    item_id: str,
+    current_stars: int,
+    next_star: int,
+    author_id: int,
+    location: str = "profile",
+):
     guild_id = interaction.guild_id
     settings = await get_settings(guild_id)
     custom = settings["custom_emojis"]
@@ -17259,7 +17826,9 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
 
     settings_star = STAR_UPGRADE[next_star]
     async with bot.db.execute(
-        "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile' AND item_id = ? AND stars = ?",
+        "SELECT COUNT(*) FROM inventory WHERE user_id = ? "
+        "AND location IN ('profile', 'storage') "
+        "AND item_id = ? AND stars = ?",
         (interaction.user.id, item_id, current_stars)
     ) as c:
         have = (await c.fetchone())[0]
@@ -17276,12 +17845,14 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
         if pity
         else ""
     )
+    location_label = "Замок" if location == "profile" else "Хранилище"
 
     embed = BotEmbed(
         title=f"⭐ Улучшение до {next_star}★",
         description=(
-            f"Генератор: {emoji} **{name}** (слот {slot}, {current_stars}★)\n\n"
-            f"Нужно копий: **{have}/{need}**\n"
+            f"Генератор: {emoji} **{name}** "
+            f"({location_label}, слот {slot}, {current_stars}★)\n\n"
+            f"Нужно копий: **{have}/{need}** (замок + хранилище)\n"
             f"Шанс успеха: **{chance_str}**{pity_str}\n"
             f"Стоимость: **💎 {settings_star['gems']}**\n"
             f"Новый суммарный бонус: **+{int(STAR_BONUS[next_star] * 100)}%** к доходу.\n\n"
@@ -17291,18 +17862,34 @@ async def show_star_confirm(interaction: discord.Interaction, slot: int, item_id
     )
     await interaction.edit_original_response(
         embed=embed,
-        view=StarConfirmView(author_id, slot, item_id, current_stars, next_star)
+        view=StarConfirmView(
+            author_id,
+            slot,
+            item_id,
+            current_stars,
+            next_star,
+            location=location,
+        )
     )
 
 
 class StarConfirmView(SafeView):
-    def __init__(self, author_id: int, slot: int, item_id: str, current_stars: int, next_star: int):
+    def __init__(
+        self,
+        author_id: int,
+        slot: int,
+        item_id: str,
+        current_stars: int,
+        next_star: int,
+        location: str = "profile",
+    ):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.slot = slot
         self.item_id = item_id
         self.current_stars = current_stars
         self.next_star = next_star
+        self.location = location
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -17325,8 +17912,8 @@ class StarConfirmView(SafeView):
             async with db_transaction():
                 async with bot.db.execute(
                     "SELECT item_id, stars FROM inventory "
-                    "WHERE user_id = ? AND location = 'profile' AND slot = ?",
-                    (user_id, self.slot),
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (user_id, self.location, self.slot),
                 ) as c:
                     row = await c.fetchone()
                 if not row:
@@ -17336,12 +17923,14 @@ class StarConfirmView(SafeView):
                     raise ValueError("Данные изменились, попробуй снова.")
 
                 async with bot.db.execute(
-                    "SELECT slot FROM inventory "
-                    "WHERE user_id = ? AND location = 'profile' AND item_id = ? AND stars = ? "
-                    "ORDER BY slot ASC",
+                    "SELECT location, slot FROM inventory "
+                    "WHERE user_id = ? AND item_id = ? AND stars = ? "
+                    "AND location IN ('profile', 'storage') "
+                    "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
+                    "slot ASC",
                     (user_id, self.item_id, self.current_stars),
                 ) as c:
-                    copies = [r[0] for r in await c.fetchall()]
+                    copies = [(r[0], r[1]) for r in await c.fetchall()]
 
                 if len(copies) < need:
                     raise ValueError(f"Нужно {need} копий, у тебя {len(copies)}.")
@@ -17355,21 +17944,23 @@ class StarConfirmView(SafeView):
                     if cur.rowcount == 0:
                         raise ValueError(f"Нужно 💎 {cost}.")
 
-                keep_slot = self.slot if self.slot in copies else copies[0]
-                to_delete = [s for s in copies if s != keep_slot][:need - 1]
+                selected = (self.location, self.slot)
+                keep = selected if selected in copies else copies[0]
+                to_delete = [copy for copy in copies if copy != keep][:need - 1]
 
-                for s in to_delete:
+                for copy_location, copy_slot in to_delete:
                     await bot.db.execute(
-                        "DELETE FROM inventory WHERE user_id = ? AND location = 'profile' AND slot = ?",
-                        (user_id, s),
+                        "DELETE FROM inventory WHERE user_id = ? "
+                        "AND location = ? AND slot = ?",
+                        (user_id, copy_location, copy_slot),
                     )
 
                 success = guaranteed or random.random() < final_chance
                 if success:
                     await bot.db.execute(
                         "UPDATE inventory SET stars = ? "
-                        "WHERE user_id = ? AND location = 'profile' AND slot = ?",
-                        (self.next_star, user_id, keep_slot),
+                        "WHERE user_id = ? AND location = ? AND slot = ?",
+                        (self.next_star, user_id, keep[0], keep[1]),
                     )
                     await bot.db.execute(
                         "INSERT OR IGNORE INTO player_star_collection "
@@ -17396,8 +17987,10 @@ class StarConfirmView(SafeView):
             await update_story_quests(self.author_id, "stars", 1)
             await update_quest_progress(self.author_id, "star_up_1")
             unlocked = await check_achievements(user_id)
+            location_label = "Замок" if keep[0] == "profile" else "Хранилище"
             desc = (
-                f"Генератор в слоте {keep_slot} улучшен до **{self.next_star}★**.\n"
+                f"Генератор улучшен до **{self.next_star}★** "
+                f"({location_label}, слот {keep[1]}).\n"
                 f"Суммарный бонус к доходу: **+{int(STAR_BONUS[self.next_star] * 100)}%**.\n"
                 f"Сгорело копий: **{len(to_delete)}**."
             )
@@ -17697,7 +18290,8 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
         if not src or not dst:
             continue
         async with bot.db.execute(
-            "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND item_id = ? AND stars = 0",
+            "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND item_id = ? "
+            "AND stars = 0 AND location IN ('profile', 'storage')",
             (user_id, item_id)
         ) as c:
             count = (await c.fetchone())[0]
@@ -17721,7 +18315,11 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
 
     embed = BotEmbed(
         title="⚗️ Синтез",
-        description=f"Страница {page + 1}/{total_pages}\nВыбери предмет для синтеза:",
+        description=(
+            f"Страница {page + 1}/{total_pages}\n"
+            "Копии берутся из замка и хранилища.\n"
+            "Выбери предмет для синтеза:"
+        ),
         color=0x3498db
     )
     await interaction.edit_original_response(
@@ -17852,7 +18450,9 @@ class CraftConfirmView(SafeView):
                 async with bot.db.execute(
                     "SELECT location, slot FROM inventory "
                     "WHERE user_id = ? AND item_id = ? AND stars = 0 "
-                    "ORDER BY location, slot LIMIT ?",
+                    "AND location IN ('profile', 'storage') "
+                    "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
+                    "slot LIMIT ?",
                     (user_id, item_id, CRAFT_COST),
                 ) as c:
                     owned = await c.fetchall()
@@ -18018,10 +18618,29 @@ class CraftConfirmView(SafeView):
 #  🧪 КАТАЛИЗАТОР
 # ============================================================
 
+async def open_catalyst_shop(
+    interaction: discord.Interaction, author_id: int, return_to: str = "shop"
+):
+    embed = BotEmbed(
+        title="🧪 Катализатор",
+        description=(
+            f"Цена: 💎 {CATALYST_PRICE} за штуку.\n"
+            f"Эффект: +{int(CATALYST_BONUS * 100)}% к шансу следующего синтеза.\n\n"
+            f"Выбери количество:"
+        ),
+        color=0x3498db,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=CatalystSelectView(author_id, return_to=return_to),
+    )
+
+
 class CatalystSelectView(SafeView):
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, return_to: str = "shop"):
         super().__init__(timeout=120)
         self.author_id = author_id
+        self.return_to = "profile" if return_to == "profile" else "shop"
         options = [
             discord.SelectOption(
                 label=f"{q} шт — {CATALYST_PRICE * q} гемов",
@@ -18072,18 +18691,45 @@ class CatalystSelectView(SafeView):
             ),
             color=0x2ecc71,
         )
-        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        if self.return_to == "profile":
+            await interaction.edit_original_response(
+                embed=await build_profile_embed(interaction),
+                view=ProfileView(self.author_id),
+            )
+        else:
+            await interaction.edit_original_response(
+                embed=BotEmbed(
+                    title="🛒 Магазин",
+                    description="Выбери раздел:",
+                    color=0xf1c40f,
+                ),
+                view=ShopHubView(self.author_id),
+            )
 
     async def fail(self, interaction: discord.Interaction, msg: str):
         embed = BotEmbed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(
-            embed=embed, view=CatalystSelectView(self.author_id)
+            embed=embed,
+            view=CatalystSelectView(self.author_id, return_to=self.return_to),
         )
 
     async def cancel(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        embed = BotEmbed(title="🛒 Магазин", description="Выбери раздел:", color=0xf1c40f)
-        await interaction.edit_original_response(embed=embed, view=ShopHubView(self.author_id))
+        if self.return_to == "profile":
+            await interaction.edit_original_response(
+                embed=await build_profile_embed(interaction),
+                view=ProfileView(self.author_id),
+            )
+        else:
+            await interaction.edit_original_response(
+                embed=BotEmbed(
+                    title="🛒 Магазин",
+                    description="Выбери раздел:",
+                    color=0xf1c40f,
+                ),
+                view=ShopHubView(self.author_id),
+            )
 
 
 # ============================================================
