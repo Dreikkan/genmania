@@ -56,6 +56,8 @@
   (all top types and the 5-minute cache).
 - Refactor slice 15: extracted `gen_mania.services.raid_combat`
   (raid combat, loot caps and finalization).
+- Refactor slice 16: extracted `gen_mania.services.top_exclusion`
+  (self-grant top exclusion and audit notice).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

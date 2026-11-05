@@ -82,6 +82,10 @@ from gen_mania.services.raid_combat import (
     make_raid_combat_layer,
 )
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
+from gen_mania.services.top_exclusion import (
+    TopExclusionRuntime,
+    make_top_exclusion_layer,
+)
 
 
 log = logging.getLogger("gen_mania")
@@ -4418,6 +4422,17 @@ RAID_COMBAT_RUNTIME.configure(
 )
 perform_raid, finalize_raid = make_raid_combat_layer(RAID_COMBAT_RUNTIME)
 
+TOP_EXCLUSION_RUNTIME = TopExclusionRuntime()
+TOP_EXCLUSION_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    commit_getter=lambda: commit_if_needed,
+    cache_clear=lambda: _top_cache.clear(),
+    audit_getter=lambda: log_admin_action,
+    notice=TOP_EXCLUSION_NOTICE,
+    logger=log,
+)
+enforce_top_exclusion = make_top_exclusion_layer(TOP_EXCLUSION_RUNTIME)
+
 
 def _role_has_administrator(role) -> bool:
     permissions = getattr(role, "permissions", None)
@@ -6799,36 +6814,6 @@ async def get_notifications(user_id: int) -> dict:
     for ntype, enabled, last_sent in rows:
         result[ntype] = (enabled, last_sent)
     return result
-
-async def enforce_top_exclusion(
-    interaction: discord.Interaction,
-    target_id: int,
-    reason: str,
-) -> bool:
-    """Исключает админа/владельца из топов после выдачи ресурса себе."""
-    if target_id != interaction.user.id:
-        return False
-    cur = await bot.db.execute(
-        "UPDATE players SET top_excluded = 1 "
-        "WHERE user_id = ? AND COALESCE(top_excluded, 0) = 0",
-        (target_id,),
-    )
-    await commit_if_needed()
-    _top_cache.clear()
-    if cur.rowcount == 0:
-        return False
-    await log_admin_action(
-        target_id,
-        target_id,
-        "top_exclusion",
-        reason,
-        guild_id=getattr(interaction, "guild_id", None),
-    )
-    try:
-        await interaction.followup.send(TOP_EXCLUSION_NOTICE, ephemeral=True)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        pass
-    return True
 
 async def get_advent_state(user_id: int) -> tuple:
     """Возвращает (last_opened_day, last_opened_date, event_key)."""
