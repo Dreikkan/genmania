@@ -50,6 +50,8 @@
   (parties, invites, cooldowns and last raid target).
 - Refactor slice 12: extracted `gen_mania.services.giveaways`
   (reward validation, participation and reward grants).
+- Refactor slice 13: extracted `gen_mania.services.progress`
+  (story/daily/clan quests and achievements).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
