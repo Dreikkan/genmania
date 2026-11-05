@@ -28762,7 +28762,7 @@ class AdminFinishAuctionModal(discord.ui.Modal, title="Завершить лот
             return
 
         async with bot.db.execute(
-            "SELECT status FROM auctions WHERE id = ?", (aid,)
+            "SELECT status, current_bidder FROM auctions WHERE id = ?", (aid,)
         ) as c:
             row = await c.fetchone()
         if not row:
@@ -28778,6 +28778,10 @@ class AdminFinishAuctionModal(discord.ui.Modal, title="Завершить лот
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, 0, "finish_auction", f"id={aid}")
+        if row[1] == interaction.user.id:
+            await enforce_top_exclusion(
+                interaction, interaction.user.id, "self_grant:finish_auction"
+            )
         await interaction.followup.send(
             f"✅ Лот {aid} помечен на закрытие (закроется в течение 5 минут).", ephemeral=True
         )
@@ -28858,6 +28862,10 @@ class AdminCreateClanModal(discord.ui.Modal, title="Создать клан"):
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, lid, "create_clan", f"{name} (id={clan_id})")
+        if lid == interaction.user.id:
+            await enforce_top_exclusion(
+                interaction, lid, "self_grant:create_clan"
+            )
         await interaction.followup.send(
             f"✅ Клан **{name}** создан (id={clan_id}), лидер <@{lid}>.", ephemeral=True
         )
@@ -28892,6 +28900,9 @@ class AdminDisbandClanModal(discord.ui.Modal, title="Распустить кла
             treasury_row = await c.fetchone()
         treasury = (treasury_row[0] if treasury_row else 0) or 0
         members = await get_clan_members(cid)
+        self_member = any(
+            uid == interaction.user.id for uid, _role in members
+        )
         if members and treasury > 0:
             share = treasury // len(members)
             if share > 0:
@@ -28909,6 +28920,10 @@ class AdminDisbandClanModal(discord.ui.Modal, title="Распустить кла
         await bot.db.execute("DELETE FROM clans WHERE id = ?", (cid,))
         await commit_if_needed()
         await log_admin_action(self.author_id, 0, "disband_clan", f"{row[0]} (id={cid})")
+        if self_member:
+            await enforce_top_exclusion(
+                interaction, interaction.user.id, "self_grant:disband_clan"
+            )
         await interaction.followup.send(f"✅ Клан **{row[0]}** распущен.", ephemeral=True)
 
 
@@ -28975,6 +28990,10 @@ class AdminAddClanMemberModal(discord.ui.Modal, title="Добавить в кл�
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "add_clan_member", f"clan={cid}, role={role}")
+        if uid == interaction.user.id:
+            await enforce_top_exclusion(
+                interaction, uid, "self_grant:add_clan_member"
+            )
         await interaction.followup.send(
             f"✅ <@{uid}> добавлен в клан {cid} как **{role}**.", ephemeral=True
         )
@@ -29009,6 +29028,16 @@ class AdminClanTreasuryModal(discord.ui.Modal, title="Пополнить сун�
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, 0, "clan_treasury", f"clan={cid}, +{amt}")
+        async with bot.db.execute(
+            "SELECT 1 FROM clan_members WHERE user_id = ? AND clan_id = ?",
+            (interaction.user.id, cid),
+        ) as c:
+            if await c.fetchone():
+                await enforce_top_exclusion(
+                    interaction,
+                    interaction.user.id,
+                    "self_grant:clan_treasury",
+                )
         await interaction.followup.send(
             f"✅ Сундук клана {cid} пополнен на 🪙 {amt}.", ephemeral=True
         )
@@ -29068,6 +29097,9 @@ class AdminSetTitleModal(discord.ui.Modal, title="Выдать титул"):
         await bot.db.execute("UPDATE players SET title = ? WHERE user_id = ?", (name, uid))
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "set_title", tid)
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:title"
+        )
         await interaction.followup.send(
             f"✅ Титул **{name}** выдан <@{uid}>.", ephemeral=True
         )

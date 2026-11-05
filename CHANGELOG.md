@@ -13,8 +13,11 @@
   calculation (3 queries for 300 candidates instead of ~1 200),
   tax collector uses a one-pass guild tax map and cached tax rates,
   and top-user names are fetched with bounded concurrency.
+- P1 security: indirect admin self-actions now flag top exclusion:
+  self titles, own clan treasury/create/join/disband, and early
+  auction finish while being the current bidder.
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + critical ruff profile.
 
-Current test status: **221 passed**, 59 test files.
+Current test status: **227 passed**, 60 test files.
