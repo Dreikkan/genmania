@@ -256,8 +256,6 @@ GIVEAWAY_MAX_COINS = 1_000_000
 GIVEAWAY_MAX_GEMS = 100_000
 GIVEAWAY_MAX_ITEMS = 100
 GIVEAWAY_MAX_CATALYSTS = 100
-GIVEAWAY_PET_LEVEL_COST_GEMS = 30
-GIVEAWAY_CLAN_LEVEL_COST_GEMS = 500
 GIVEAWAY_REWARDS = {
     "coins": {
         "name": "Монеты",
@@ -348,7 +346,7 @@ RETENTION_LIMITS = {
 }
 
 # Schema migrations: увеличивать при изменении структуры таблиц.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Content migrations: увеличивать при изменении items/achievements/shop.
 CONTENT_VERSION = 6
@@ -1495,6 +1493,7 @@ class CastleBot(commands.Bot):
         self.backup_dir = None
         self.background_tasks = []
         self._closing = False
+        self._guild_access_synced = False
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -2819,6 +2818,20 @@ class CastleBot(commands.Bot):
                 PRIMARY KEY (giveaway_id, guild_id)
             )
         """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_access (
+                guild_id INTEGER PRIMARY KEY,
+                owner_id INTEGER,
+                owner_name TEXT,
+                admin_role_id INTEGER,
+                admin_role_name TEXT,
+                admin_role_ids TEXT DEFAULT '[]',
+                roles_json TEXT DEFAULT '[]',
+                member_count INTEGER DEFAULT 0,
+                bot_permissions INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
         # --- БАНК ---
         await self.db.execute("""
@@ -3929,6 +3942,249 @@ async def get_tax_rate_for_user(user_id: int) -> float:
     return max(0.0, min(1.0, max(rates)))
 
 
+def _role_has_administrator(role) -> bool:
+    permissions = getattr(role, "permissions", None)
+    return bool(getattr(permissions, "administrator", False))
+
+
+async def resolve_guild_member(guild, user):
+    """Достаёт Member даже при пустом кэше участников.
+
+    interaction.user на серверных interaction'ах уже является Member
+    и содержит актуальные роли, поэтому кэш/интенты не обязательны.
+    """
+    if user is None or guild is None:
+        return None
+    user_guild = getattr(user, "guild", None)
+    if user_guild is not None:
+        if getattr(user_guild, "id", None) == getattr(guild, "id", None):
+            return user
+    elif hasattr(user, "roles") and hasattr(user, "guild_permissions"):
+        # interaction.user уже содержит актуальные роли, даже если кэш пуст.
+        return user
+
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        return None
+    get_member = getattr(guild, "get_member", None)
+    if get_member is not None:
+        member = get_member(user_id)
+        if member is not None:
+            return member
+    fetch_member = getattr(guild, "fetch_member", None)
+    if fetch_member is not None:
+        try:
+            return await fetch_member(user_id)
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+            AttributeError,
+            TypeError,
+        ):
+            return None
+    return None
+
+
+async def read_member_access(guild, user) -> dict:
+    """API чтения ролей и прав участника без зависимости от кэша."""
+    member = await resolve_guild_member(guild, user)
+    user_id = getattr(user, "id", None)
+    roles = list(getattr(member, "roles", ()) or getattr(user, "roles", ()) or ())
+    permissions = getattr(member, "guild_permissions", None)
+    if permissions is None:
+        permissions = getattr(user, "guild_permissions", None)
+    role_ids = [
+        getattr(role, "id", None)
+        for role in roles
+        if getattr(role, "id", None) is not None
+    ]
+    admin_role_ids = [
+        getattr(role, "id", None)
+        for role in roles
+        if _role_has_administrator(role)
+    ]
+    return {
+        "user_id": user_id,
+        "member": member,
+        "is_owner": getattr(guild, "owner_id", None) == user_id,
+        "is_administrator": bool(
+            getattr(permissions, "administrator", False)
+        ),
+        "role_ids": role_ids,
+        "role_names": [
+            str(getattr(role, "name", ""))
+            for role in roles
+            if getattr(role, "name", None)
+        ],
+        "admin_role_ids": admin_role_ids,
+    }
+
+
+async def sync_guild_access(guild, reason: str = "join") -> dict | None:
+    """Считывает владельца, роли и права бота при заходе на сервер."""
+    guild_id = getattr(guild, "id", None)
+    if guild_id is None:
+        return None
+    try:
+        await bot.db.execute(
+            "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",
+            (guild_id,),
+        )
+        await commit_if_needed()
+    except Exception:
+        log.exception("GUILD_ACCESS: не удалось создать настройки %s", guild_id)
+    _settings_cache.pop(guild_id, None)
+    try:
+        settings = await get_settings(guild_id)
+    except Exception:
+        settings = {}
+
+    owner_id = getattr(guild, "owner_id", None)
+    owner = getattr(guild, "owner", None)
+    if owner is None and owner_id is not None:
+        fetch_member = getattr(guild, "fetch_member", None)
+        if fetch_member is not None:
+            try:
+                owner = await fetch_member(owner_id)
+            except (
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+                AttributeError,
+                TypeError,
+            ):
+                owner = None
+    owner_name = (
+        getattr(owner, "display_name", None)
+        or getattr(owner, "name", None)
+        or ""
+    )
+
+    roles = list(getattr(guild, "roles", ()) or ())
+    roles_data = [
+        {
+            "id": getattr(role, "id", None),
+            "name": str(getattr(role, "name", "")),
+            "position": int(getattr(role, "position", 0) or 0),
+            "administrator": _role_has_administrator(role),
+            "permissions": int(
+                getattr(getattr(role, "permissions", None), "value", 0) or 0
+            ),
+        }
+        for role in roles
+    ]
+    admin_role_ids = [
+        item["id"]
+        for item in roles_data
+        if item["administrator"] and item["id"] is not None
+    ]
+    admin_role_id = settings.get("admin_role_id")
+    admin_role_name = next(
+        (
+            item["name"]
+            for item in roles_data
+            if item["id"] == admin_role_id
+        ),
+        None,
+    )
+    bot_member = getattr(guild, "me", None)
+    bot_permissions = int(
+        getattr(getattr(bot_member, "guild_permissions", None), "value", 0) or 0
+    )
+    member_count = int(getattr(guild, "member_count", 0) or 0)
+
+    try:
+        await bot.db.execute("""
+            INSERT INTO guild_access
+                (guild_id, owner_id, owner_name, admin_role_id,
+                 admin_role_name, admin_role_ids, roles_json,
+                 member_count, bot_permissions, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                owner_name = excluded.owner_name,
+                admin_role_id = excluded.admin_role_id,
+                admin_role_name = excluded.admin_role_name,
+                admin_role_ids = excluded.admin_role_ids,
+                roles_json = excluded.roles_json,
+                member_count = excluded.member_count,
+                bot_permissions = excluded.bot_permissions,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            guild_id,
+            owner_id,
+            owner_name,
+            admin_role_id,
+            admin_role_name,
+            json.dumps(admin_role_ids),
+            json.dumps(roles_data, ensure_ascii=False),
+            member_count,
+            bot_permissions,
+        ))
+        await commit_if_needed()
+    except Exception:
+        log.exception("GUILD_ACCESS: не удалось сохранить снимок %s", guild_id)
+
+    snapshot = {
+        "guild_id": guild_id,
+        "owner_id": owner_id,
+        "owner_name": owner_name,
+        "admin_role_id": admin_role_id,
+        "admin_role_name": admin_role_name,
+        "admin_role_ids": admin_role_ids,
+        "role_count": len(roles_data),
+        "member_count": member_count,
+        "bot_permissions": bot_permissions,
+    }
+    log.info(
+        "GUILD_ACCESS: guild=%s owner=%s admin_roles=%s roles=%s reason=%s",
+        guild_id,
+        owner_id,
+        admin_role_ids,
+        len(roles_data),
+        reason,
+    )
+    return snapshot
+
+
+async def sync_all_guild_access():
+    """Снимок ролей/прав для всех серверов после старта."""
+    for guild in getattr(bot, "guilds", ()) or ():
+        try:
+            await sync_guild_access(guild, reason="startup")
+        except Exception:
+            log.exception(
+                "GUILD_ACCESS: ошибка синхронизации сервера %s",
+                getattr(guild, "id", None),
+            )
+
+
+async def get_guild_access_snapshot(guild_id: int) -> dict | None:
+    """Читает сохранённый снимок ролей и прав сервера."""
+    async with bot.db.execute(
+        "SELECT guild_id, owner_id, owner_name, admin_role_id, "
+        "admin_role_name, admin_role_ids, roles_json, member_count, "
+        "bot_permissions, updated_at FROM guild_access WHERE guild_id = ?",
+        (guild_id,),
+    ) as c:
+        row = await c.fetchone()
+    if not row:
+        return None
+    return {
+        "guild_id": row[0],
+        "owner_id": row[1],
+        "owner_name": row[2],
+        "admin_role_id": row[3],
+        "admin_role_name": row[4],
+        "admin_role_ids": json.loads(row[5] or "[]"),
+        "roles": json.loads(row[6] or "[]"),
+        "member_count": row[7],
+        "bot_permissions": row[8],
+        "updated_at": row[9],
+    }
+
+
 async def has_admin_access(interaction: discord.Interaction) -> bool:
     """Проверяет права администратора гильдии в момент callback."""
     guild = getattr(interaction, "guild", None)
@@ -3942,25 +4198,20 @@ async def has_admin_access(interaction: discord.Interaction) -> bool:
     _CURRENT_IS_BOT_OWNER.set(is_bot_owner)
     if is_bot_owner:
         return True
+
+    user_id = getattr(interaction.user, "id", None)
+    if user_id is not None and getattr(guild, "owner_id", None) == user_id:
+        return True
+
+    access = await read_member_access(guild, interaction.user)
+    if access["is_administrator"]:
+        return True
+
     settings = await get_settings(guild_id)
-    member = guild.get_member(interaction.user.id)
-    if member is None:
-        return False
-
-    if getattr(guild, "owner_id", None) == interaction.user.id:
-        return True
-
-    permissions = getattr(member, "guild_permissions", None)
-    if permissions and getattr(permissions, "administrator", False):
-        return True
-
     admin_role_id = settings.get("admin_role_id")
     if not admin_role_id:
         return False
-    return any(
-        getattr(role, "id", None) == admin_role_id
-        for role in getattr(member, "roles", ())
-    )
+    return admin_role_id in access["role_ids"]
 
 
 async def is_global_owner(interaction: discord.Interaction) -> bool:
@@ -13999,26 +14250,19 @@ async def giveaway_validate_reward(
     except (TypeError, ValueError):
         return None, "❌ Количество должно быть числом."
 
-    currency = "coins"
-    unit_cost = 0
     summary = ""
 
     if reward_type == "coins":
         if not 1 <= amount_int <= GIVEAWAY_MAX_COINS:
             return None, f"❌ Монет: от 1 до {format_price(GIVEAWAY_MAX_COINS)}."
-        unit_cost = amount_int
         summary = f"{get_emoji('_coin')} **{format_price(amount_int)}** монет"
     elif reward_type == "gems":
         if not 1 <= amount_int <= GIVEAWAY_MAX_GEMS:
             return None, f"❌ Гемов: от 1 до {format_price(GIVEAWAY_MAX_GEMS)}."
-        unit_cost = amount_int
-        currency = "gems"
         summary = f"{get_emoji('_gem')} **{format_price(amount_int)}** гемов"
     elif reward_type == "catalysts":
         if not 1 <= amount_int <= GIVEAWAY_MAX_CATALYSTS:
             return None, f"❌ Катализаторов: от 1 до {GIVEAWAY_MAX_CATALYSTS}."
-        unit_cost = amount_int
-        currency = "catalysts"
         summary = f"{get_emoji('_catalyst')} **{amount_int}** катализаторов"
     elif reward_type == "generator":
         if not 1 <= amount_int <= GIVEAWAY_MAX_ITEMS:
@@ -14029,16 +14273,12 @@ async def giveaway_validate_reward(
             item = await c.fetchone()
         if not item:
             return None, "❌ Генератор с таким ID не найден."
-        unit_cost = amount_int
-        currency = "items"
         summary = f"{item[1] or get_emoji('_generators')} **{item[0]}** ×{amount_int}"
     elif reward_type == "pet":
         pet = PET_TYPES.get(reward_id)
         if not pet:
             return None, "❌ Питомец с таким ID не найден."
         amount_int = 1
-        unit_cost = pet["price_gems"]
-        currency = "gems"
         summary = f"{pet['emoji']} **{pet['name']}**"
     elif reward_type == "pet_level":
         pet = PET_TYPES.get(reward_id)
@@ -14046,8 +14286,6 @@ async def giveaway_validate_reward(
             return None, "❌ Питомец с таким ID не найден."
         if not 1 <= amount_int <= PET_MAX_LEVEL:
             return None, f"❌ Уровней: от 1 до {PET_MAX_LEVEL}."
-        unit_cost = amount_int * GIVEAWAY_PET_LEVEL_COST_GEMS
-        currency = "gems"
         summary = (
             f"{pet['emoji']} **{pet['name']}** +{amount_int} ур."
         )
@@ -14056,11 +14294,6 @@ async def giveaway_validate_reward(
             return None, "❌ Статус: vip / gold / platinum / diamond."
         if amount_int not in STATUS_DURATIONS:
             return None, "❌ Срок статуса: 1, 3, 7 или 30 дней."
-        price = status_price(reward_id, amount_int)
-        if price is None:
-            return None, "❌ Не удалось рассчитать цену статуса."
-        unit_cost = price
-        currency = "gems"
         summary = (
             f"{get_emoji('_' + reward_id)} **{STATUS_NAMES[reward_id]}** "
             f"на {STATUS_DURATION_LABELS[amount_int]}"
@@ -14068,71 +14301,15 @@ async def giveaway_validate_reward(
     elif reward_type == "clan_level":
         if not 1 <= amount_int <= CLAN_MAX_LEVEL:
             return None, f"❌ Уровней клана: от 1 до {CLAN_MAX_LEVEL}."
-        unit_cost = amount_int * GIVEAWAY_CLAN_LEVEL_COST_GEMS
-        currency = "gems"
         summary = f"{get_emoji('_clan')} **+{amount_int} ур. клана**"
 
     return {
         "reward_type": reward_type,
         "reward_id": reward_id,
         "amount": amount_int,
-        "currency": currency,
-        "unit_cost": unit_cost,
         "summary": summary,
         "info": info,
     }, ""
-
-
-async def giveaway_reserve_reward(creator_id: int, meta: dict, winners: int):
-    total = meta["unit_cost"] * winners
-    currency = meta["currency"]
-    if currency == "items":
-        async with bot.db.execute(
-            "SELECT slot FROM inventory WHERE user_id = ? "
-            "AND location = 'storage' AND item_id = ? AND stars = 0 "
-            "AND COALESCE(is_locked, 0) = 0 "
-            "ORDER BY slot ASC LIMIT ?",
-            (creator_id, meta["reward_id"], total),
-        ) as c:
-            slots = [row[0] for row in await c.fetchall()]
-        if len(slots) < total:
-            raise ValueError(
-                f"В хранилище только {len(slots)} шт., нужно {total}."
-            )
-        for slot in slots:
-            await bot.db.execute(
-                "DELETE FROM inventory WHERE user_id = ? "
-                "AND location = 'storage' AND slot = ? AND item_id = ?",
-                (creator_id, slot, meta["reward_id"]),
-            )
-        return
-
-    if currency not in ("coins", "gems", "catalysts"):
-        raise ValueError("Неизвестная валюта резерва.")
-    cur = await bot.db.execute(
-        f"UPDATE players SET {currency} = {currency} - ? "
-        f"WHERE user_id = ? AND {currency} >= ?",
-        (total, creator_id, total),
-    )
-    if cur.rowcount == 0:
-        raise ValueError(f"Недостаточно {currency} для резерва.")
-
-
-async def giveaway_refund_reward(creator_id: int, meta: dict, count: int):
-    if count <= 0:
-        return
-    total = meta["unit_cost"] * count
-    currency = meta["currency"]
-    if currency == "items":
-        await grant_item_or_compensation(
-            creator_id, meta["reward_id"], total
-        )
-    elif currency in ("coins", "gems", "catalysts"):
-        await bot.db.execute(
-            f"UPDATE players SET {currency} = {currency} + ? "
-            f"WHERE user_id = ?",
-            (total, creator_id),
-        )
 
 
 async def grant_pet_reward(user_id: int, pet_id: str, levels: int = 0) -> int:
@@ -14412,7 +14589,6 @@ async def _insert_giveaway_record(
     title_prefix: str,
 ) -> int:
     async with db_transaction():
-        await giveaway_reserve_reward(creator_id, meta, winners_int)
         ends_at = (
             datetime.datetime.now()
             + datetime.timedelta(hours=hours_int)
@@ -14537,7 +14713,6 @@ async def create_giveaway(
             pass
         try:
             async with db_transaction():
-                await giveaway_refund_reward(creator_id, meta, winners_int)
                 await bot.db.execute(
                     "DELETE FROM giveaways WHERE id = ?", (giveaway_id,)
                 )
@@ -14619,7 +14794,6 @@ async def create_global_giveaway(
     if sent == 0:
         try:
             async with db_transaction():
-                await giveaway_refund_reward(creator_id, meta, winners_int)
                 await bot.db.execute(
                     "DELETE FROM giveaways WHERE id = ?", (giveaway_id,)
                 )
@@ -14677,7 +14851,7 @@ async def finish_giveaway(giveaway_id: int):
         giveaway = await get_giveaway(giveaway_id)
         if not giveaway or giveaway[10] != "active":
             return
-        meta, error = await giveaway_validate_reward(
+        _meta, error = await giveaway_validate_reward(
             giveaway[6], giveaway[7], giveaway[8]
         )
         if error:
@@ -14701,9 +14875,6 @@ async def finish_giveaway(giveaway_id: int):
         for uid in winners:
             if await giveaway_grant_reward(uid, giveaway):
                 granted.append(uid)
-        unused = max(0, (giveaway[9] or 0) - len(granted))
-        if unused:
-            await giveaway_refund_reward(giveaway[4], meta, unused)
         await bot.db.execute(
             "UPDATE giveaways SET status = 'finished', winner_ids = ? "
             "WHERE id = ?",
@@ -14773,64 +14944,6 @@ class GiveawayFinishedView(SafeView):
         self.add_item(button)
 
 
-async def open_giveaways(interaction: discord.Interaction, author_id: int):
-    guild_id = interaction.guild_id
-    async with bot.db.execute(
-        "SELECT id, title, reward_type, reward_id, amount, winners_count, "
-        "status, ends_at, creator_id, scope FROM giveaways "
-        "WHERE status = 'active' AND (scope = 'global' OR guild_id = ?) "
-        "ORDER BY ends_at ASC LIMIT 5",
-        (guild_id,),
-    ) as c:
-        rows = await c.fetchall()
-    embed = BotEmbed(
-        title="🎁 Розыгрыши",
-        description=(
-            "Создай свой розыгрыш и выбери награду.\n"
-            "Награда выдаётся каждому победителю."
-        ),
-        color=0x9b59b6,
-    )
-    if not rows:
-        embed.add_field(
-            name="Активных розыгрышей нет",
-            value="Стань первым — нажми «Создать».",
-            inline=False,
-        )
-    for (
-        gid, title, rtype, rid, amount, winners_count, status, ends_at,
-        creator_id, scope,
-    ) in rows:
-        meta, _ = await giveaway_validate_reward(rtype, rid, amount)
-        summary = meta["summary"] if meta else f"{rtype} ×{amount}"
-        async with bot.db.execute(
-            "SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id = ?",
-            (gid,),
-        ) as c:
-            count = (await c.fetchone())[0] or 0
-        try:
-            until = f"<t:{int(datetime.datetime.fromisoformat(ends_at).timestamp())}:R>"
-        except (TypeError, ValueError):
-            until = "—"
-        scope_text = (
-            f"{get_emoji('_advent')} Глобальный · "
-            if scope == GIVEAWAY_SCOPE_GLOBAL
-            else ""
-        )
-        embed.add_field(
-            name=f"🎁 {title}"[:256],
-            value=(
-                f"{summary}\n"
-                f"{scope_text}Создал <@{creator_id}> · до {until}\n"
-                f"Участников: **{count}** · победителей: **{winners_count}**"
-            ),
-            inline=False,
-        )
-    await interaction.edit_original_response(
-        embed=embed, view=GiveawaysView(author_id)
-    )
-
-
 async def open_admin_giveaways(
     interaction: discord.Interaction, author_id: int
 ):
@@ -14847,8 +14960,8 @@ async def open_admin_giveaways(
     embed = BotEmbed(
         title="🎁 Розыгрыши сервера",
         description=(
-            "Создай розыгрыш для этого сервера. Награда резервируется "
-            "из твоего баланса или хранилища и выдаётся каждому победителю."
+            "Создай розыгрыш для этого сервера. Награда выдаётся каждому "
+            "победителю; баланс и хранилище не списываются."
         ),
         color=0x9b59b6,
     )
@@ -14888,24 +15001,21 @@ async def open_admin_giveaways(
 
 
 async def open_giveaway_create(
-    interaction: discord.Interaction, author_id: int, source: str = "social"
+    interaction: discord.Interaction, author_id: int, source: str = "admin"
 ):
-    if source == "admin":
-        title = "🎁 Новый розыгрыш сервера"
-        description = (
-            "Выбери тип награды. Сообщение будет отправлено в этот канал.\n"
-            "Награда резервируется из твоего баланса или хранилища."
-        )
-    elif source == "owner":
+    if source == "owner":
         title = "🎁 Глобальный розыгрыш"
         description = (
             "Выбери тип награды. Сообщение будет отправлено на все серверы, "
             "где включена функция «Розыгрыши».\n"
-            "Награда резервируется из твоего баланса или хранилища."
+            "Баланс и хранилище создателя не списываются."
         )
     else:
-        title = "🎁 Новый розыгрыш"
-        description = "Выбери тип награды, затем нажми «Настроить»."
+        title = "🎁 Новый розыгрыш сервера"
+        description = (
+            "Выбери тип награды. Сообщение будет отправлено в этот канал.\n"
+            "Баланс и хранилище создателя не списываются."
+        )
     embed = BotEmbed(
         title=title,
         description=description,
@@ -14913,53 +15023,6 @@ async def open_giveaway_create(
     )
     await interaction.edit_original_response(
         embed=embed, view=GiveawayCreateTypeView(author_id, source=source)
-    )
-
-
-async def open_my_giveaways(interaction: discord.Interaction, author_id: int):
-    async with bot.db.execute(
-        "SELECT id, title, reward_type, reward_id, amount, winners_count, "
-        "status, ends_at, winner_ids FROM giveaways "
-        "WHERE creator_id = ? ORDER BY id DESC LIMIT 10",
-        (author_id,),
-    ) as c:
-        rows = await c.fetchall()
-    embed = BotEmbed(
-        title="🎁 Мои розыгрыши",
-        description="Последние созданные розыгрыши.",
-        color=0x9b59b6,
-    )
-    if not rows:
-        embed.description = "Ты ещё не создавал розыгрыши."
-    for gid, title, rtype, rid, amount, winners_count, status, ends_at, winner_ids in rows:
-        meta, _ = await giveaway_validate_reward(rtype, rid, amount)
-        summary = meta["summary"] if meta else f"{rtype} ×{amount}"
-        status_text = {
-            "active": "активен",
-            "finished": "завершён",
-            "cancelled": "отменён",
-        }.get(status, status)
-        winners = []
-        if status == "finished":
-            try:
-                winners = json.loads(winner_ids or "[]")
-            except (TypeError, ValueError):
-                winners = []
-        embed.add_field(
-            name=f"🎁 {title}"[:256],
-            value=(
-                f"{summary}\n"
-                f"Статус: **{status_text}** · победителей: **{winners_count}**\n"
-                + (
-                    "Победители: " + ", ".join(f"<@{uid}>" for uid in winners)
-                    if winners
-                    else "Победителей пока нет."
-                )
-            ),
-            inline=False,
-        )
-    await interaction.edit_original_response(
-        embed=embed, view=MyGiveawaysView(author_id)
     )
 
 
@@ -15001,53 +15064,11 @@ class AdminGiveawaysView(AdminView):
         )
 
 
-class GiveawaysView(BaseView):
-    feature_key = "giveaways"
-
-    def __init__(self, author_id: int, timeout: int = 300):
-        super().__init__(author_id, timeout)
-
-    @discord.ui.button(
-        label="Создать",
-        emoji=get_emoji("_buy"),
-        style=discord.ButtonStyle.success,
-        row=0,
-    )
-    async def btn_create(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await open_giveaway_create(interaction, self.author_id)
-
-    @discord.ui.button(
-        label="Мои",
-        emoji=get_emoji("_profile"),
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def btn_mine(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await open_my_giveaways(interaction, self.author_id)
-
-    @discord.ui.button(
-        label="Назад",
-        emoji=get_emoji("_back"),
-        style=discord.ButtonStyle.secondary,
-        row=1,
-    )
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = BotEmbed(
-            title="⚔️ Социум", description="Выбери действие:", color=0xe74c3c
-        )
-        await interaction.edit_original_response(
-            embed=embed, view=SocialView(self.author_id)
-        )
-
-
 class GiveawayCreateTypeView(BaseView):
     feature_key = "giveaways"
 
     def __init__(
-        self, author_id: int, timeout: int = 300, source: str = "social"
+        self, author_id: int, timeout: int = 300, source: str = "admin"
     ):
         super().__init__(author_id, timeout)
         self.reward_type = None
@@ -15112,9 +15133,7 @@ class GiveawayCreateTypeView(BaseView):
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if self.source == "admin":
-            await open_admin_giveaways(interaction, self.author_id)
-        elif self.source == "owner":
+        if self.source == "owner":
             embed = BotEmbed(
                 title="⭐ Только для владельца бота",
                 description=(
@@ -15127,7 +15146,7 @@ class GiveawayCreateTypeView(BaseView):
                 embed=embed, view=OwnerPanelView(self.author_id)
             )
         else:
-            await open_giveaways(interaction, self.author_id)
+            await open_admin_giveaways(interaction, self.author_id)
 
 
 class GiveawayCreateModal(discord.ui.Modal, title="Настроить розыгрыш"):
@@ -15174,6 +15193,9 @@ class GiveawayCreateModal(discord.ui.Modal, title="Настроить розыг
             self.amount.placeholder = "количество каждому"
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.scope != GIVEAWAY_SCOPE_GLOBAL:
+            if await deny_if_disabled(interaction, "giveaways"):
+                return
         await interaction.response.defer(ephemeral=True)
         if self.scope == GIVEAWAY_SCOPE_GLOBAL:
             ok, message = await create_global_giveaway(
@@ -15196,23 +15218,6 @@ class GiveawayCreateModal(discord.ui.Modal, title="Настроить розыг
                 self.duration_hours.value,
             )
         await interaction.followup.send(message, ephemeral=True)
-
-
-class MyGiveawaysView(BaseView):
-    feature_key = "giveaways"
-
-    def __init__(self, author_id: int, timeout: int = 300):
-        super().__init__(author_id, timeout)
-
-    @discord.ui.button(
-        label="Назад",
-        emoji=get_emoji("_back"),
-        style=discord.ButtonStyle.secondary,
-        row=0,
-    )
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await open_giveaways(interaction, self.author_id)
 
 
 class SocialView(BaseView):
@@ -15313,13 +15318,6 @@ class SocialView(BaseView):
     async def btn_view_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_profile_select(interaction, self.author_id)
-
-    @discord.ui.button(label="Розыгрыши", emoji=get_emoji("_advent"), style=discord.ButtonStyle.primary, row=3)
-    async def btn_giveaways(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await deny_if_disabled(interaction, "giveaways"):
-            return
-        await interaction.response.defer()
-        await open_giveaways(interaction, self.author_id)
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -30620,6 +30618,34 @@ async def admin_panel(interaction: discord.Interaction):
     )
     view = AdminPanelView(interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# ============================================================
+#  🌐 СОБЫТИЯ СЕРВЕРОВ
+# ============================================================
+
+@bot.event
+async def on_ready():
+    """Один раз за процесс считывает роли/права всех серверов."""
+    if bot._guild_access_synced:
+        return
+    bot._guild_access_synced = True
+    await sync_all_guild_access()
+
+
+@bot.event
+async def on_guild_join(guild):
+    await sync_guild_access(guild, reason="join")
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    await sync_guild_access(after.guild, reason="role_update")
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    await sync_guild_access(role.guild, reason="role_delete")
 
 
 # ============================================================
