@@ -31,8 +31,10 @@
 - Refactor slice 3: extracted `gen_mania.repositories.settings`
   (`get_settings`, `save_setting`) and `gen_mania.services.taxes`
   (per-user and per-guild tax rate calculation).
+- Refactor slice 4: extracted `gen_mania.repositories.players`
+  (accessibility, player stats, prestige points).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
 
-Current test status: **237 passed**, 63 test files.
+Current test status: **238 passed**, 63 test files.

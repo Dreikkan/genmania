@@ -39,6 +39,7 @@ from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
 )
+from gen_mania.repositories.players import PlayerRuntime, make_player_layer
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS,  # noqa: F401 - re-export
     SettingsRuntime,
@@ -4155,6 +4156,25 @@ TAX_RUNTIME.configure(
 )
 get_tax_rate_for_user, get_tax_rate_map = make_tax_layer(TAX_RUNTIME)
 
+PLAYER_RUNTIME = PlayerRuntime()
+PLAYER_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    commit_getter=lambda: commit_if_needed,
+    settings_getter=lambda: get_settings,
+    status_bonus_getter=lambda: get_status_bonus,
+    start_grid=START_GRID,
+    storage_size=STORAGE_SIZE,
+    default_start_coins=DEFAULT_START_COINS,
+    logger=log,
+)
+(
+    is_accessibility_mode,
+    toggle_accessibility_mode,
+    get_player_stats,
+    get_prestige_points,
+) = make_player_layer(PLAYER_RUNTIME)
+
 
 def _role_has_administrator(role) -> bool:
     permissions = getattr(role, "permissions", None)
@@ -4687,30 +4707,6 @@ async def get_star_emoji(item_id: str, stars: int, default_emoji: str) -> str:
         return f"{default_emoji}({stars}⭐)"
     return default_emoji
 
-async def is_accessibility_mode(user_id: int) -> bool:
-    async with bot.db.execute(
-        "SELECT COALESCE(accessibility_mode, 0) FROM players WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-    return bool(row[0]) if row else False
-
-
-async def toggle_accessibility_mode(user_id: int) -> bool:
-    async with db_transaction():
-        async with bot.db.execute(
-            "SELECT COALESCE(accessibility_mode, 0) FROM players WHERE user_id = ?",
-            (user_id,),
-        ) as c:
-            row = await c.fetchone()
-        new_value = 0 if (row and row[0]) else 1
-        await bot.db.execute(
-            "UPDATE players SET accessibility_mode = ? WHERE user_id = ?",
-            (new_value, user_id),
-        )
-    return bool(new_value)
-
-
 async def is_command_disabled(guild_id: int, command_key: str) -> bool:
     settings = await get_settings(guild_id)
     return command_key in settings["disabled_commands"]
@@ -4877,34 +4873,6 @@ def make_select(placeholder: str, options: list[discord.SelectOption], callback,
     select = discord.ui.Select(placeholder=placeholder, options=options, row=row, **kwargs)
     select.callback = callback
     return select
-
-async def get_player_stats(user_id: int, guild_id: int = None):
-    async with bot.db.execute(
-        "SELECT grid_size, gems, coins FROM players WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-
-    if not row:
-        start = DEFAULT_START_COINS
-        if guild_id:
-            settings = await get_settings(guild_id)
-            start = settings["start_coins"]
-        await bot.db.execute(
-            "INSERT OR IGNORE INTO players "
-            "(user_id, coins, grid_size, storage_size, last_gem_collected, last_tax_time) "
-            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-            (user_id, start, START_GRID, STORAGE_SIZE)
-        )
-        await commit_if_needed()
-        return START_GRID, 0.0, 0, start
-
-    return (
-        row[0] or START_GRID,
-        await get_status_bonus(user_id),
-        row[1] or 0,
-        row[2] or 0,
-    )
 
 # ============================================================
 #  🗓️ СЕЗОНЫ / BATTLE PASS
@@ -7939,14 +7907,6 @@ async def get_total_bonus_percent(user_id: int) -> int:
 # ============================================================
 #  🔁 ПРЕСТИЖ
 # ============================================================
-
-async def get_prestige_points(user_id: int) -> int:
-    async with bot.db.execute(
-        "SELECT prestige_points FROM players WHERE user_id = ?", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    return (row[0] if row else 0) or 0
-
 
 async def get_prestige_bonus(user_id: int) -> float:
     points = await get_prestige_points(user_id)

@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import pathlib
 import sys
@@ -9,6 +10,7 @@ from gen_mania.config import (
 )
 from gen_mania.db.transaction import TransactionRuntime
 from gen_mania.metrics import METRICS, MetricsRegistry
+from gen_mania.repositories.players import PlayerRuntime
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS as REPOSITORY_SETTING_COLUMNS,
 )
@@ -37,6 +39,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.DB_RUNTIME, TransactionRuntime)
     assert isinstance(m.SETTINGS_RUNTIME, SettingsRuntime)
     assert isinstance(m.TAX_RUNTIME, TaxRuntime)
+    assert isinstance(m.PLAYER_RUNTIME, PlayerRuntime)
     assert m._settings_cache is m.SETTINGS_RUNTIME.settings_cache
     assert m._tax_rate_cache is m.SETTINGS_RUNTIME.tax_cache
     assert m._tax_rate_cache is m.TAX_RUNTIME.tax_cache
@@ -51,3 +54,17 @@ def test_runtime_cache_getters_follow_reassigned_globals(monkeypatch):
     assert m.SETTINGS_RUNTIME.settings_cache is new_settings_cache
     assert m.SETTINGS_RUNTIME.tax_cache is new_tax_cache
     assert m.TAX_RUNTIME.tax_cache is new_tax_cache
+
+
+def test_player_runtime_uses_current_services(monkeypatch):
+    async def fake_settings(guild_id):
+        return {"start_coins": 77}
+
+    async def fake_status_bonus(user_id):
+        return 0.5
+
+    monkeypatch.setattr(m, "get_settings", fake_settings)
+    monkeypatch.setattr(m, "get_status_bonus", fake_status_bonus)
+
+    assert asyncio.run(m.PLAYER_RUNTIME.get_settings(1)) == {"start_coins": 77}
+    assert asyncio.run(m.PLAYER_RUNTIME.get_status_bonus(1)) == 0.5
