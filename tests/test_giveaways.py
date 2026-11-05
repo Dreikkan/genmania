@@ -536,3 +536,44 @@ def test_old_giveaways_table_gets_scope_column():
             m._settings_cache.clear()
 
     asyncio.run(run())
+
+
+def test_global_giveaway_send_concurrency_is_bounded():
+    async def run():
+        db = await _init(coins=10_000)
+        original_guilds = m.global_giveaway_guilds
+        original_send = m.send_giveaway_message
+        try:
+            channels = {
+                500 + index: FakeChannel(500 + index) for index in range(12)
+            }
+            guilds = [
+                FakeGuild(100 + index, channels[500 + index])
+                for index in range(12)
+            ]
+            m.global_giveaway_guilds = lambda: guilds
+            active = 0
+            max_active = 0
+
+            async def fake_send(channel, giveaway_id):
+                nonlocal active, max_active
+                active += 1
+                max_active = max(max_active, active)
+                await asyncio.sleep(0.02)
+                active -= 1
+                return FakeMessage(channel.id)
+
+            m.send_giveaway_message = fake_send
+            ok, message = await m.create_global_giveaway(
+                1, "gems", "", "100", "1", "24"
+            )
+            assert ok, message
+            assert "12" in message
+            assert max_active <= m.GIVEAWAY_GLOBAL_SEND_CONCURRENCY
+            assert max_active >= 2
+        finally:
+            m.global_giveaway_guilds = original_guilds
+            m.send_giveaway_message = original_send
+            await _close(db)
+
+    asyncio.run(run())

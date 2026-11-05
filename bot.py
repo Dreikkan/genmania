@@ -254,6 +254,7 @@ GIVEAWAY_MAX_COINS = 1_000_000
 GIVEAWAY_MAX_GEMS = 100_000
 GIVEAWAY_MAX_ITEMS = 100
 GIVEAWAY_MAX_CATALYSTS = 100
+GIVEAWAY_GLOBAL_SEND_CONCURRENCY = 5
 GIVEAWAY_REWARDS = {
     "coins": {
         "name": "Монеты",
@@ -15217,6 +15218,39 @@ async def create_giveaway(
     return True, f"✅ Розыгрыш создан: {message.jump_url}"
 
 
+async def _send_global_giveaway_to_guild(guild, giveaway_id: int) -> bool:
+    """Отправляет глобальный розыгрыш на один сервер."""
+    guild_id = getattr(guild, "id", None)
+    if guild_id is None:
+        return False
+    try:
+        if await is_command_disabled(guild_id, "giveaways"):
+            return False
+        channel = select_giveaway_channel(guild)
+        if channel is None:
+            log.debug("Глобальный розыгрыш: нет канала на сервере %s", guild_id)
+            return False
+        message = await send_giveaway_message(channel, giveaway_id)
+        async with db_transaction():
+            await bot.db.execute(
+                "INSERT OR REPLACE INTO giveaway_messages "
+                "(giveaway_id, guild_id, channel_id, message_id) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    giveaway_id,
+                    guild_id,
+                    getattr(channel, "id", None),
+                    message.id,
+                ),
+            )
+        return True
+    except Exception:
+        log.exception(
+            "Глобальный розыгрыш: ошибка отправки на сервер %s", guild_id
+        )
+        return False
+
+
 async def create_global_giveaway(
     creator_id: int,
     reward_type: str,
@@ -15254,36 +15288,15 @@ async def create_global_giveaway(
         log.exception("Не удалось создать глобальный розыгрыш")
         return False, "❌ Не удалось создать глобальный розыгрыш."
 
-    sent = 0
-    for guild in global_giveaway_guilds():
-        guild_id = getattr(guild, "id", None)
-        if guild_id is None:
-            continue
-        try:
-            if await is_command_disabled(guild_id, "giveaways"):
-                continue
-            channel = select_giveaway_channel(guild)
-            if channel is None:
-                log.debug("Глобальный розыгрыш: нет канала на сервере %s", guild_id)
-                continue
-            message = await send_giveaway_message(channel, giveaway_id)
-            await bot.db.execute(
-                "INSERT OR REPLACE INTO giveaway_messages "
-                "(giveaway_id, guild_id, channel_id, message_id) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    giveaway_id,
-                    guild_id,
-                    getattr(channel, "id", None),
-                    message.id,
-                ),
-            )
-            await commit_if_needed()
-            sent += 1
-        except Exception:
-            log.exception(
-                "Глобальный розыгрыш: ошибка отправки на сервер %s", guild_id
-            )
+    guilds = global_giveaway_guilds()
+    semaphore = asyncio.Semaphore(GIVEAWAY_GLOBAL_SEND_CONCURRENCY)
+
+    async def send_to_guild(guild):
+        async with semaphore:
+            return await _send_global_giveaway_to_guild(guild, giveaway_id)
+
+    results = await asyncio.gather(*(send_to_guild(guild) for guild in guilds))
+    sent = sum(1 for result in results if result)
 
     if sent == 0:
         try:

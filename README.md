@@ -62,7 +62,7 @@ python -m pytest -q
 ruff check --select F821,F811,F401 bot.py tests
 ```
 
-Текущий статус: **227 passed**, 60 test files.
+Текущий статус: **228 passed**, 60 test files.
 
 ## CI
 
