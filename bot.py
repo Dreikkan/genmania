@@ -75,6 +75,10 @@ from gen_mania.services.market import (
     market_sparkline,
 )
 from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
+from gen_mania.services.prestige import (
+    PrestigeRuntime,
+    make_prestige_layer,
+)
 from gen_mania.services.progress import ProgressRuntime, make_progress_layer
 from gen_mania.services.pvp import PvpRuntime, make_pvp_layer
 from gen_mania.services.raid_combat import (
@@ -4433,6 +4437,35 @@ TOP_EXCLUSION_RUNTIME.configure(
 )
 enforce_top_exclusion = make_top_exclusion_layer(TOP_EXCLUSION_RUNTIME)
 
+PRESTIGE_RUNTIME = PrestigeRuntime()
+PRESTIGE_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    settings_getter=lambda: get_settings,
+    release_bids_getter=lambda: release_active_auction_bids,
+    statuses_getter=lambda: get_active_statuses,
+    status_bonus_getter=lambda: best_status_bonus,
+    season_xp_getter=lambda: add_season_xp,
+    season_xp_amount_getter=lambda: season_xp_amount,
+    prestige_points_getter=lambda: get_prestige_points,
+    emoji_getter=lambda: get_emoji,
+    default_start_coins=DEFAULT_START_COINS,
+    base_requirement=PRESTIGE_BASE_REQUIREMENT,
+    step_requirement=PRESTIGE_STEP_REQUIREMENT,
+    bonus_per_point=PRESTIGE_BONUS_PER_POINT,
+    bonus_cap=PRESTIGE_BONUS_CAP,
+    start_grid=START_GRID,
+    storage_size=STORAGE_SIZE,
+    logger=log,
+)
+(
+    prestige_point_cost,
+    prestige_gain_from_lifetime,
+    prestige_points_from_lifetime,
+    calculate_prestige_gain,
+    do_prestige,
+) = make_prestige_layer(PRESTIGE_RUNTIME)
+
 
 def _role_has_administrator(role) -> bool:
     permissions = getattr(role, "permissions", None)
@@ -7945,186 +7978,6 @@ def prestige_required_total(points: int) -> int:
         + PRESTIGE_STEP_REQUIREMENT * points * (points - 1) // 2
     )
 
-
-def prestige_point_cost(points_earned: int) -> int:
-    """Стоимость следующего очка с учётом уже полученных."""
-    return PRESTIGE_BASE_REQUIREMENT + max(0, int(points_earned)) * PRESTIGE_STEP_REQUIREMENT
-
-
-def prestige_gain_from_lifetime(lifetime: int, existing_points: int) -> int:
-    """Сколько новых очков даёт текущее производство с учётом старых очков."""
-    remaining = max(0, int(lifetime or 0))
-    points = max(0, int(existing_points or 0))
-    gain = 0
-    while remaining >= prestige_point_cost(points):
-        remaining -= prestige_point_cost(points)
-        points += 1
-        gain += 1
-    return gain
-
-
-def prestige_points_from_lifetime(total: int) -> int:
-    """Сколько всего очков заработано при данном объёме производства."""
-    return prestige_gain_from_lifetime(total, 0)
-
-
-async def calculate_prestige_gain(user_id: int) -> int:
-    async with bot.db.execute(
-        "SELECT lifetime_production, prestige_points FROM players WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return 0
-    total, points = row
-    return prestige_gain_from_lifetime(total or 0, points or 0)
-
-
-async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, str, int, int]:
-    settings = await get_settings(guild_id) if guild_id else {
-        "start_coins": DEFAULT_START_COINS,
-    }
-    start_coins = settings["start_coins"]
-    points = await get_prestige_points(user_id)
-    released_bids = 0
-
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT lifetime_production, prestige_points FROM players WHERE user_id = ?",
-                (user_id,),
-            ) as c:
-                row = await c.fetchone()
-            if not row:
-                raise ValueError("Профиль не найден.")
-
-            total, points = row
-            points = points or 0
-            gain = prestige_gain_from_lifetime(total or 0, points)
-            if gain <= 0:
-                need = prestige_point_cost(points) - (total or 0)
-                raise ValueError(
-                    f"Нужно ещё 🪙 {max(0, need)} производства для "
-                    f"следующего очка."
-                )
-
-            for label, sql in (
-                ("вклад", "SELECT 1 FROM bank_deposits WHERE user_id = ?"),
-                (
-                    "кредит",
-                    "SELECT 1 FROM bank_loans WHERE user_id = ? "
-                    "AND COALESCE(status, 'active') = 'active'",
-                ),
-                (
-                    "ордера",
-                    "SELECT 1 FROM market_orders WHERE user_id = ? "
-                    "AND status = 'active'",
-                ),
-            ):
-                async with bot.db.execute(sql, (user_id,)) as c:
-                    if await c.fetchone():
-                        raise ValueError(
-                            f"Сначала закрой {label}: перерождение не должно "
-                            "терять активные обязательства."
-                        )
-
-            # Снимаем ставки игрока на чужих лотах: после сброса
-            # он не должен остаться лидером аукциона с обнулённым балансом.
-            released_bids, _refunded = await release_active_auction_bids(user_id)
-
-            # Закрываем активные лоты игрока и возвращаем ставки.
-            async with bot.db.execute(
-                "SELECT id, current_bidder, current_bid FROM auctions "
-                "WHERE seller_id = ? AND status = 'active'",
-                (user_id,),
-            ) as c:
-                lots = await c.fetchall()
-            for aid, bidder, bid in lots:
-                if bidder and bid:
-                    await bot.db.execute(
-                        "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-                        (bid, bidder),
-                    )
-                await bot.db.execute(
-                    "DELETE FROM auction_bids WHERE auction_id = ?", (aid,)
-                )
-                await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
-
-            now_iso = datetime.datetime.now().isoformat()
-            try:
-                await bot.db.execute(
-                    "DELETE FROM player_upgrades WHERE user_id = ? "
-                    "AND upgrade_id IN ('vip','gold','platinum','diamond') "
-                    "AND expires_at IS NOT NULL "
-                    "AND datetime(expires_at) <= datetime(?)",
-                    (user_id, now_iso),
-                )
-            except aiosqlite.OperationalError:
-                # Совместимость с очень старыми/упрощёнными схемами.
-                pass
-            active_statuses = await get_active_statuses(user_id)
-            status_bonus = best_status_bonus(active_statuses.keys())
-
-            await bot.db.execute("""
-                UPDATE players SET
-                    coins = ?,
-                    grid_size = 9,
-                    storage_size = 36,
-                    income_bonus = ?,
-                    catalysts = 0,
-                    lifetime_production = 0,
-                    prestige_points = prestige_points + ?,
-                    daily_quest_date = NULL,
-                    daily_quest_progress = '{}',
-                    daily_quest_claimed = '[]',
-                    last_collected = CURRENT_TIMESTAMP,
-                    last_gem_collected = CURRENT_TIMESTAMP,
-                    last_tax_time = CURRENT_TIMESTAMP
-                WHERE user_id = ?
-            """, (start_coins, status_bonus, gain, user_id))
-
-            await bot.db.execute("DELETE FROM inventory WHERE user_id = ?", (user_id,))
-            await bot.db.execute(
-                "DELETE FROM market_orders WHERE user_id = ?", (user_id,)
-            )
-            # Сетки сбрасываются вместе с энергостанцией, а активные
-            # временные статусы сохраняются до своего expires_at.
-            await bot.db.execute(
-                "DELETE FROM player_upgrades WHERE user_id = ? "
-                "AND (upgrade_id IS NULL OR upgrade_id NOT IN "
-                "('vip','gold','platinum','diamond'))",
-                (user_id,),
-            )
-            await bot.db.execute(
-                "DELETE FROM bank_deposits WHERE user_id = ?", (user_id,)
-            )
-            await bot.db.execute(
-                "DELETE FROM bank_loans WHERE user_id = ?", (user_id,)
-            )
-    except ValueError as e:
-        return False, f"❌ {e}", 0, points
-
-    await add_season_xp(user_id, season_xp_amount("prestige"), guild_id, action="prestige")
-    new_points = points + gain
-    bid_note = ""
-    if released_bids:
-        bid_note = (
-            f"\n🏛️ Сняты активные ставки на аукционах: **{released_bids}**."
-        )
-    return (
-        True,
-        f"{get_emoji('_rebirth')} Перерождение завершено! Получено **{gain}** очков престижа.\n"
-        f"Всего очков: **{new_points}** "
-        f"(+{int(min(new_points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100)}% к доходу)."
-        f"{bid_note}",
-        gain,
-        new_points,
-    )
-
-
-# ============================================================
-#  🏆 ДОСТИЖЕНИЯ
-# ============================================================
 
 async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
