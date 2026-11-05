@@ -48,6 +48,8 @@
   (clan reads, capacity, levels and active war lookup).
 - Refactor slice 11: extracted `gen_mania.repositories.raids`
   (parties, invites, cooldowns and last raid target).
+- Refactor slice 12: extracted `gen_mania.services.giveaways`
+  (reward validation, participation and reward grants).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

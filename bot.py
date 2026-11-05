@@ -54,6 +54,11 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
+from gen_mania.services.giveaways import (
+    GIVEAWAY_COLUMNS,  # noqa: F401 - re-export
+    GiveawayRuntime,
+    make_giveaway_layer,
+)
 from gen_mania.services.market import (
     MARKET_MAX_RATIO,  # noqa: F401 - re-export
     MARKET_MIN_RATIO,  # noqa: F401 - re-export
@@ -4287,6 +4292,47 @@ RAID_RUNTIME.configure(
     get_raid_cooldown_seconds,
     get_last_raid_target,
 ) = make_raid_layer(RAID_RUNTIME)
+
+GIVEAWAY_RUNTIME = GiveawayRuntime()
+GIVEAWAY_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    clan_getter=lambda: get_clan,
+    compensation_getter=lambda: grant_item_or_compensation,
+    status_sync_getter=lambda: sync_status_bonus,
+    emoji_getter=lambda: get_emoji,
+    price_formatter=lambda value: format_price(value),
+    rewards=GIVEAWAY_REWARDS,
+    pet_types=PET_TYPES,
+    status_bonuses=STATUS_BONUSES,
+    status_names=STATUS_NAMES,
+    status_durations=STATUS_DURATIONS,
+    status_duration_labels=STATUS_DURATION_LABELS,
+    max_coins=GIVEAWAY_MAX_COINS,
+    max_gems=GIVEAWAY_MAX_GEMS,
+    max_items=GIVEAWAY_MAX_ITEMS,
+    max_catalysts=GIVEAWAY_MAX_CATALYSTS,
+    pet_max_level=PET_MAX_LEVEL,
+    clan_max_level=CLAN_MAX_LEVEL,
+    max_winners=GIVEAWAY_MAX_WINNERS,
+    min_hours=GIVEAWAY_MIN_HOURS,
+    max_hours=GIVEAWAY_MAX_HOURS,
+    scope_server=GIVEAWAY_SCOPE_SERVER,
+    scope_global=GIVEAWAY_SCOPE_GLOBAL,
+    logger=log,
+)
+(
+    get_giveaway,
+    giveaway_scope,
+    is_global_giveaway,
+    giveaway_validate_reward,
+    parse_giveaway_options,
+    grant_pet_reward,
+    grant_status_reward,
+    grant_clan_levels,
+    join_giveaway,
+    giveaway_grant_reward,
+) = make_giveaway_layer(GIVEAWAY_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -14413,306 +14459,6 @@ class MarketSellModal(discord.ui.Modal, title="Продать на бирже"):
 # ============================================================
 #  🎁 РОЗЫГРЫШИ (СЕРВЕРНЫЕ И ГЛОБАЛЬНЫЕ)
 # ============================================================
-
-GIVEAWAY_COLUMNS = (
-    "id, guild_id, channel_id, message_id, creator_id, title, "
-    "reward_type, reward_id, amount, winners_count, status, "
-    "created_at, ends_at, winner_ids, scope"
-)
-
-
-async def get_giveaway(giveaway_id: int):
-    async with bot.db.execute(
-        f"SELECT {GIVEAWAY_COLUMNS} FROM giveaways WHERE id = ?",
-        (giveaway_id,),
-    ) as c:
-        return await c.fetchone()
-
-
-def giveaway_scope(giveaway) -> str:
-    """Возвращает scope розыгрыша с fallback для старых строк."""
-    if not giveaway:
-        return GIVEAWAY_SCOPE_SERVER
-    try:
-        scope = giveaway[14]
-    except (IndexError, TypeError):
-        scope = None
-    return scope or GIVEAWAY_SCOPE_SERVER
-
-
-def is_global_giveaway(giveaway) -> bool:
-    return giveaway_scope(giveaway) == GIVEAWAY_SCOPE_GLOBAL
-
-
-async def giveaway_validate_reward(
-    reward_type: str, reward_id: str | None, amount
-) -> tuple[dict | None, str]:
-    info = GIVEAWAY_REWARDS.get(reward_type)
-    if not info:
-        return None, "❌ Неизвестный тип награды."
-    reward_id = (reward_id or "").strip().lower()
-    try:
-        amount_int = int(str(amount).strip())
-    except (TypeError, ValueError):
-        return None, "❌ Количество должно быть числом."
-
-    summary = ""
-
-    if reward_type == "coins":
-        if not 1 <= amount_int <= GIVEAWAY_MAX_COINS:
-            return None, f"❌ Монет: от 1 до {format_price(GIVEAWAY_MAX_COINS)}."
-        summary = f"{get_emoji('_coin')} **{format_price(amount_int)}** монет"
-    elif reward_type == "gems":
-        if not 1 <= amount_int <= GIVEAWAY_MAX_GEMS:
-            return None, f"❌ Гемов: от 1 до {format_price(GIVEAWAY_MAX_GEMS)}."
-        summary = f"{get_emoji('_gem')} **{format_price(amount_int)}** гемов"
-    elif reward_type == "catalysts":
-        if not 1 <= amount_int <= GIVEAWAY_MAX_CATALYSTS:
-            return None, f"❌ Катализаторов: от 1 до {GIVEAWAY_MAX_CATALYSTS}."
-        summary = f"{get_emoji('_catalyst')} **{amount_int}** катализаторов"
-    elif reward_type == "generator":
-        if not 1 <= amount_int <= GIVEAWAY_MAX_ITEMS:
-            return None, f"❌ Предметов: от 1 до {GIVEAWAY_MAX_ITEMS}."
-        async with bot.db.execute(
-            "SELECT name, emoji FROM items WHERE id = ?", (reward_id,)
-        ) as c:
-            item = await c.fetchone()
-        if not item:
-            return None, "❌ Генератор с таким ID не найден."
-        summary = f"{item[1] or get_emoji('_generators')} **{item[0]}** ×{amount_int}"
-    elif reward_type == "pet":
-        pet = PET_TYPES.get(reward_id)
-        if not pet:
-            return None, "❌ Питомец с таким ID не найден."
-        amount_int = 1
-        summary = f"{pet['emoji']} **{pet['name']}**"
-    elif reward_type == "pet_level":
-        pet = PET_TYPES.get(reward_id)
-        if not pet:
-            return None, "❌ Питомец с таким ID не найден."
-        if not 1 <= amount_int <= PET_MAX_LEVEL:
-            return None, f"❌ Уровней: от 1 до {PET_MAX_LEVEL}."
-        summary = (
-            f"{pet['emoji']} **{pet['name']}** +{amount_int} ур."
-        )
-    elif reward_type == "status":
-        if reward_id not in STATUS_BONUSES:
-            return None, "❌ Статус: vip / gold / platinum / diamond."
-        if amount_int not in STATUS_DURATIONS:
-            return None, "❌ Срок статуса: 1, 3, 7 или 30 дней."
-        summary = (
-            f"{get_emoji('_' + reward_id)} **{STATUS_NAMES[reward_id]}** "
-            f"на {STATUS_DURATION_LABELS[amount_int]}"
-        )
-    elif reward_type == "clan_level":
-        if not 1 <= amount_int <= CLAN_MAX_LEVEL:
-            return None, f"❌ Уровней клана: от 1 до {CLAN_MAX_LEVEL}."
-        summary = f"{get_emoji('_clan')} **+{amount_int} ур. клана**"
-
-    return {
-        "reward_type": reward_type,
-        "reward_id": reward_id,
-        "amount": amount_int,
-        "summary": summary,
-        "info": info,
-    }, ""
-
-
-async def grant_pet_reward(user_id: int, pet_id: str, levels: int = 0) -> int:
-    if pet_id not in PET_TYPES:
-        return 0
-    async with db_transaction():
-        async with bot.db.execute(
-            "SELECT level FROM user_pets_v2 "
-            "WHERE user_id = ? AND pet_id = ?",
-            (user_id, pet_id),
-        ) as c:
-            row = await c.fetchone()
-        if row:
-            current_level = row[0] or 1
-            if current_level >= PET_MAX_LEVEL:
-                return 0
-            # Повторный питомец не пропадает: он превращается в уровень.
-            gain = max(1, levels)
-            new_level = min(PET_MAX_LEVEL, current_level + gain)
-            await bot.db.execute(
-                "UPDATE user_pets_v2 SET level = ? "
-                "WHERE user_id = ? AND pet_id = ?",
-                (new_level, user_id, pet_id),
-            )
-        else:
-            new_level = min(PET_MAX_LEVEL, 1 + levels)
-            await bot.db.execute(
-                "INSERT INTO user_pets_v2 "
-                "(user_id, pet_id, level, last_fed) VALUES (?, ?, ?, NULL)",
-                (user_id, pet_id, new_level),
-            )
-    return new_level
-
-
-async def grant_status_reward(user_id: int, status_id: str, days: int) -> bool:
-    if status_id not in STATUS_BONUSES or days not in STATUS_DURATIONS:
-        return False
-    now = datetime.datetime.now()
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT expires_at FROM player_upgrades "
-                "WHERE user_id = ? AND upgrade_id = ?",
-                (user_id, status_id),
-            ) as c:
-                row = await c.fetchone()
-            base = now
-            if row and row[0]:
-                try:
-                    current = datetime.datetime.fromisoformat(row[0])
-                except (TypeError, ValueError):
-                    current = None
-                if current and current > now:
-                    base = current
-            new_expiry = base + datetime.timedelta(days=days)
-            await bot.db.execute("""
-                INSERT INTO player_upgrades
-                    (user_id, upgrade_id, level, purchased_at, expires_at)
-                VALUES (?, ?, 1, CURRENT_TIMESTAMP, ?)
-                ON CONFLICT(user_id, upgrade_id) DO UPDATE SET
-                    expires_at = excluded.expires_at,
-                    purchased_at = CURRENT_TIMESTAMP
-            """, (user_id, status_id, new_expiry.isoformat()))
-            await sync_status_bonus(user_id)
-    except Exception:
-        log.exception("Не удалось выдать статус %s игроку %s", status_id, user_id)
-        return False
-    return True
-
-
-async def grant_clan_levels(clan_id: int, levels: int) -> int | None:
-    async with db_transaction():
-        async with bot.db.execute(
-            "SELECT level FROM clans WHERE id = ?", (clan_id,)
-        ) as c:
-            row = await c.fetchone()
-        if not row:
-            return None
-        current_level = row[0] or 1
-        if current_level >= CLAN_MAX_LEVEL:
-            return None
-        new_level = min(CLAN_MAX_LEVEL, current_level + levels)
-        bonus = min(0.20, (new_level - 1) * 0.01)
-        await bot.db.execute(
-            "UPDATE clans SET level = ?, bonus = ? WHERE id = ?",
-            (new_level, bonus, clan_id),
-        )
-    return new_level
-
-
-def parse_giveaway_options(winners, duration_hours):
-    """Валидирует число победителей и длительность розыгрыша."""
-    try:
-        winners_int = int(str(winners).strip())
-        hours_int = int(str(duration_hours).strip())
-    except (TypeError, ValueError):
-        return None, None, "❌ Победители и длительность должны быть числами."
-    if not 1 <= winners_int <= GIVEAWAY_MAX_WINNERS:
-        return None, None, (
-            f"❌ Победителей: от 1 до {GIVEAWAY_MAX_WINNERS}."
-        )
-    if not GIVEAWAY_MIN_HOURS <= hours_int <= GIVEAWAY_MAX_HOURS:
-        return None, None, (
-            f"❌ Длительность: от {GIVEAWAY_MIN_HOURS} "
-            f"до {GIVEAWAY_MAX_HOURS} часов."
-        )
-    return winners_int, hours_int, ""
-
-
-async def join_giveaway(
-    giveaway_id: int, user_id: int, guild_id: int | None
-) -> tuple[bool, str]:
-    """Записывает игрока в розыгрыш с проверкой scope и правил."""
-    async with db_transaction():
-        giveaway = await get_giveaway(giveaway_id)
-        if not giveaway or giveaway[10] != "active":
-            return False, "❌ Розыгрыш уже завершён."
-        scope = giveaway_scope(giveaway)
-        if scope == GIVEAWAY_SCOPE_GLOBAL:
-            if guild_id is None:
-                return False, "❌ Участвовать можно только на сервере."
-        elif guild_id != giveaway[1]:
-            return False, "❌ Этот розыгрыш проводится на другом сервере."
-
-        ends_at = giveaway[12]
-        try:
-            ends_dt = datetime.datetime.fromisoformat(ends_at)
-        except (TypeError, ValueError):
-            ends_dt = None
-        if ends_dt and ends_dt <= datetime.datetime.now():
-            return False, "❌ Время розыгрыша истекло."
-
-        if giveaway[4] == user_id:
-            return False, "❌ Нельзя участвовать в своём розыгрыше."
-        if giveaway[6] == "clan_level" and not await get_clan(user_id):
-            return False, "❌ Для этой награды нужно состоять в клане."
-
-        async with bot.db.execute(
-            "SELECT 1 FROM players WHERE user_id = ?", (user_id,)
-        ) as c:
-            if not await c.fetchone():
-                return False, "❌ Сначала зарегистрируйся в игре."
-
-        async with bot.db.execute(
-            "SELECT 1 FROM giveaway_entries "
-            "WHERE giveaway_id = ? AND user_id = ?",
-            (giveaway_id, user_id),
-        ) as c:
-            if await c.fetchone():
-                return False, "❌ Ты уже участвуешь."
-
-        await bot.db.execute(
-            "INSERT INTO giveaway_entries (giveaway_id, user_id) "
-            "VALUES (?, ?)",
-            (giveaway_id, user_id),
-        )
-    return True, "✅ Ты участвуешь в розыгрыше. Удачи!"
-
-
-async def giveaway_grant_reward(winner_id: int, giveaway) -> bool:
-    reward_type = giveaway[6]
-    reward_id = giveaway[7]
-    amount = giveaway[8] or 0
-    if reward_type == "coins":
-        cur = await bot.db.execute(
-            "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-            (amount, winner_id),
-        )
-        return cur.rowcount > 0
-    if reward_type == "gems":
-        cur = await bot.db.execute(
-            "UPDATE players SET gems = gems + ? WHERE user_id = ?",
-            (amount, winner_id),
-        )
-        return cur.rowcount > 0
-    if reward_type == "catalysts":
-        cur = await bot.db.execute(
-            "UPDATE players SET catalysts = catalysts + ? WHERE user_id = ?",
-            (amount, winner_id),
-        )
-        return cur.rowcount > 0
-    if reward_type == "generator":
-        await grant_item_or_compensation(winner_id, reward_id, amount)
-        return True
-    if reward_type == "pet":
-        return await grant_pet_reward(winner_id, reward_id, 0) > 0
-    if reward_type == "pet_level":
-        return await grant_pet_reward(winner_id, reward_id, amount) > 0
-    if reward_type == "status":
-        return await grant_status_reward(winner_id, reward_id, amount)
-    if reward_type == "clan_level":
-        clan = await get_clan(winner_id)
-        if not clan:
-            return False
-        return await grant_clan_levels(clan[0], amount) is not None
-    return False
-
 
 async def build_giveaway_embed(giveaway) -> discord.Embed:
     if not giveaway:
