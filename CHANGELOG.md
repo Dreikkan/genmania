@@ -38,6 +38,8 @@
 - Refactor slice 6: extracted `gen_mania.services.market`
   (pure pricing/sparkline helpers) and
   `gen_mania.repositories.market` (price history).
+- Refactor slice 7: extracted `gen_mania.services.auction`
+  (bids, buyout, bid refunds and lot history).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
