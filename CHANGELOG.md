@@ -26,6 +26,8 @@
   owner-only `/health`.
 - Refactor slice 1: extracted `gen_mania.config` and
   `gen_mania.metrics`; `bot.py` keeps compatibility re-exports.
+- Refactor slice 2: extracted `gen_mania.db.transaction`
+  (`TransactionRuntime`, `db_transaction`, commit/rollback helpers).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
