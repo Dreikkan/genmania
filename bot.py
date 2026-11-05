@@ -18,9 +18,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import asyncio
 import contextvars
-from contextlib import asynccontextmanager
 import math
-import time
 
 from gen_mania.config import (
     BACKUP_INTERVAL_HOURS,
@@ -38,6 +36,10 @@ from gen_mania.config import (
     UTC,
 )
 from gen_mania.metrics import METRICS, MetricsRegistry  # noqa: F401 - re-export
+from gen_mania.db.transaction import (
+    TransactionRuntime,
+    make_transaction_layer,
+)
 
 
 log = logging.getLogger("gen_mania")
@@ -4089,34 +4091,24 @@ _DB_WRITE_LOCK = asyncio.Lock()
 _DB_TX_OWNER: asyncio.Task | None = None
 
 
-def _managed_tx_owner_is_self() -> bool:
-    try:
-        current = asyncio.current_task()
-    except RuntimeError:
-        return False
-    return _DB_TX_OWNER is not None and _DB_TX_OWNER is current
+def _set_db_tx_owner(owner) -> None:
+    global _DB_TX_OWNER
+    _DB_TX_OWNER = owner
 
 
-async def commit_if_needed():
-    """Коммитит только вне managed-транзакции текущей задачи."""
-    if _managed_tx_owner_is_self():
-        return
-    if _DB_TX_OWNER is not None:
-        async with _DB_WRITE_LOCK:
-            await bot.db.commit()
-        return
-    await bot.db.commit()
-
-
-async def rollback_if_needed():
-    """Откатывает только вне managed-транзакции текущей задачи."""
-    if _managed_tx_owner_is_self():
-        return
-    if _DB_TX_OWNER is not None:
-        async with _DB_WRITE_LOCK:
-            await bot.db.rollback()
-        return
-    await bot.db.rollback()
+DB_RUNTIME = TransactionRuntime()
+DB_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    lock_getter=lambda: _DB_WRITE_LOCK,
+    owner_getter=lambda: _DB_TX_OWNER,
+    owner_setter=_set_db_tx_owner,
+    metrics=METRICS,
+    slow_ms=SLOW_DB_TX_MS,
+    logger=log,
+)
+db_transaction, commit_if_needed, rollback_if_needed = make_transaction_layer(
+    DB_RUNTIME
+)
 
 
 async def get_settings(guild_id: int) -> dict:
@@ -5044,69 +5036,6 @@ async def get_player_stats(user_id: int, guild_id: int = None):
         row[1] or 0,
         row[2] or 0,
     )
-
-@asynccontextmanager
-async def db_transaction():
-    """Контекстный менеджер для транзакций SQLite.
-
-    Внешняя транзакция сериализуется writer-lock'ом и всегда завершается
-    COMMIT/ROLLBACK. Вложенные вызовы используют SAVEPOINT.
-    """
-    global _DB_TX_OWNER
-    current = asyncio.current_task()
-    if _DB_TX_OWNER is current:
-        await bot.db.execute("SAVEPOINT gen_mania_sp")
-        try:
-            yield
-            await bot.db.execute("RELEASE SAVEPOINT gen_mania_sp")
-        except BaseException:
-            await bot.db.execute("ROLLBACK TO SAVEPOINT gen_mania_sp")
-            await bot.db.execute("RELEASE SAVEPOINT gen_mania_sp")
-            raise
-        return
-
-    async with _DB_WRITE_LOCK:
-        tx_started = time.perf_counter()
-        # После исправления get_settings() это не должно срабатывать.
-        # Оставляем защиту от старых незакоммиченных DML.
-        if bot.db.in_transaction:
-            log.debug("Найдена незавершённая транзакция перед BEGIN — коммитим")
-            await bot.db.commit()
-
-        # Сырые DML-вызовы вне db_transaction могут открыть неявную
-        # транзакцию между проверкой in_transaction и BEGIN. Повторяем
-        # BEGIN после коммита, чтобы не падать на гонке.
-        for attempt in range(3):
-            try:
-                await bot.db.execute("BEGIN IMMEDIATE")
-                break
-            except aiosqlite.OperationalError as exc:
-                if (
-                    "cannot start a transaction within a transaction"
-                    not in str(exc)
-                    or attempt == 2
-                ):
-                    raise
-                log.warning(
-                    "db_transaction: гонка с незавершённой транзакцией, "
-                    "коммитим и повторяем BEGIN"
-                )
-                await bot.db.commit()
-        _DB_TX_OWNER = current
-        tx_ok = True
-        try:
-            yield
-            await bot.db.commit()
-        except BaseException:
-            tx_ok = False
-            await bot.db.rollback()
-            raise
-        finally:
-            _DB_TX_OWNER = None
-            elapsed_ms = (time.perf_counter() - tx_started) * 1000
-            METRICS.record_db_tx(elapsed_ms, ok=tx_ok)
-            if elapsed_ms >= SLOW_DB_TX_MS:
-                log.warning("SLOW_DB_TX: %.1f ms", elapsed_ms)
 
 # ============================================================
 #  🗓️ СЕЗОНЫ / BATTLE PASS
