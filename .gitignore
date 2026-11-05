@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Secrets and local config
+.env
+dev/.env
+*.local
+
+# Databases and runtime data
+*.db
+*.db-wal
+*.db-shm
+castle*.db
+dev/data/
+data/
+backups/
+
+# Local artifacts
+bot_backup_*.py
+bot_changes_*.diff
+*.log
