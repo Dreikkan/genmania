@@ -5,6 +5,8 @@ import sys
 import discord
 
 BOT_PATH = pathlib.Path(__file__).resolve().parent.parent / "bot.py"
+if str(BOT_PATH.parent) not in sys.path:
+    sys.path.insert(0, str(BOT_PATH.parent))
 spec = importlib.util.spec_from_file_location("gen_mania_button_test", BOT_PATH)
 m = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = m

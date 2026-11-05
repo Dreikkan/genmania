@@ -4,7 +4,11 @@ import pathlib
 import re
 import sys
 
-PATH = pathlib.Path(__file__).resolve().parent.parent / "bot.py"
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+PATH = ROOT / "bot.py"
 EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]+"
 )

@@ -8,5 +8,7 @@ omit =
     venv/*
 
 [report]
-include = bot.py
+include =
+    bot.py
+    gen_mania/*
 skip_empty = True
