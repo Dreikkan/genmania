@@ -12,7 +12,6 @@ import json
 import os
 import re
 import signal
-import copy
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -40,6 +39,12 @@ from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
 )
+from gen_mania.repositories.settings import (
+    SETTING_COLUMNS,  # noqa: F401 - re-export
+    SettingsRuntime,
+    make_settings_layer,
+)
+from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 
 
 log = logging.getLogger("gen_mania")
@@ -4111,132 +4116,44 @@ db_transaction, commit_if_needed, rollback_if_needed = make_transaction_layer(
 )
 
 
-async def get_settings(guild_id: int) -> dict:
-    defaults = {
-        "bot_name": DEFAULT_BOT_NAME,
-        "custom_emojis": {},
-        "currency_coins": DEFAULT_CURRENCY_COINS,
-        "currency_gems": DEFAULT_CURRENCY_GEMS,
-        "prefix": "/",
-        "start_coins": DEFAULT_START_COINS,
-        "disabled_commands": [],
-        "status_roles": {},
-        "battlepass_enabled": True,
-        "admin_role_id": None,
-        "tax_rate": DEFAULT_TAX_RATE,
-    }
-    if not guild_id:
-        return defaults
+_SETTINGS_DEFAULTS = {
+    "bot_name": DEFAULT_BOT_NAME,
+    "custom_emojis": {},
+    "currency_coins": DEFAULT_CURRENCY_COINS,
+    "currency_gems": DEFAULT_CURRENCY_GEMS,
+    "prefix": "/",
+    "start_coins": DEFAULT_START_COINS,
+    "disabled_commands": [],
+    "status_roles": {},
+    "battlepass_enabled": True,
+    "admin_role_id": None,
+    "tax_rate": DEFAULT_TAX_RATE,
+}
 
-    now_ts = datetime.datetime.now().timestamp()
-    cached = _settings_cache.get(guild_id)
-    if cached and (now_ts - cached[0]) < _SETTINGS_CACHE_TTL:
-        return copy.deepcopy(cached[1])
+SETTINGS_RUNTIME = SettingsRuntime()
+SETTINGS_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    commit_getter=lambda: commit_if_needed,
+    actor_id_getter=lambda: _CURRENT_ACTOR_ID.get(),
+    audit_getter=lambda: log_admin_action,
+    settings_cache_getter=lambda: _settings_cache,
+    tax_cache_getter=lambda: _tax_rate_cache,
+    settings_ttl=_SETTINGS_CACHE_TTL,
+    defaults=_SETTINGS_DEFAULTS,
+    logger=log,
+)
+get_settings, save_setting = make_settings_layer(SETTINGS_RUNTIME)
 
-    async with bot.db.execute("""
-        SELECT bot_name, custom_emojis, currency_coins, currency_gems, prefix,
-               gem_cap, start_coins, passive_limit, disabled_commands, status_roles,
-               battlepass_enabled, admin_role_id, tax_rate, inflation_rate,
-               auction_fee
-        FROM guild_settings WHERE guild_id = ?
-    """, (guild_id,)) as c:
-        row = await c.fetchone()
-
-    if not row:
-        return defaults
-
-    result = {
-        "bot_name": row[0] or DEFAULT_BOT_NAME,
-        "custom_emojis": json.loads(row[1] or "{}"),
-        "currency_coins": row[2] or DEFAULT_CURRENCY_COINS,
-        "currency_gems": row[3] or DEFAULT_CURRENCY_GEMS,
-        "prefix": row[4] or "/",
-        "start_coins": row[6] or DEFAULT_START_COINS,
-        "disabled_commands": json.loads(row[8] or "[]"),
-        "status_roles": json.loads(row[9] or "{}"),
-        "battlepass_enabled": bool(row[10]) if row[10] is not None else True,
-        "admin_role_id": row[11],
-        "tax_rate": row[12] if row[12] is not None else DEFAULT_TAX_RATE,
-    }
-    _settings_cache[guild_id] = (now_ts, result)
-    return copy.deepcopy(result)
-
-
-async def get_tax_rate_for_user(user_id: int) -> float:
-    """Ставка налога: максимум по общим гильдиям, иначе дефолт.
-
-    Профиль игрока глобальный, поэтому нельзя брать настройку одной
-    случайной гильдии: иначе можно укрыться в гильдии с нулевым налогом.
-    """
-    now_ts = datetime.datetime.now().timestamp()
-    cached = _tax_rate_cache.get(user_id)
-    if cached and (now_ts - cached[0]) < _TAX_RATE_CACHE_TTL:
-        return cached[1]
-
-    rates = []
-    for guild in getattr(bot, "guilds", []) or []:
-        try:
-            member = guild.get_member(user_id)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(user_id)
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                    AttributeError,
-                    TypeError,
-                ):
-                    member = None
-            if member is None:
-                continue
-        except Exception:
-            continue
-        settings = await get_settings(guild.id)
-        rate = settings.get("tax_rate", DEFAULT_TAX_RATE)
-        if rate is not None:
-            rates.append(float(rate))
-    if not rates:
-        rate = DEFAULT_TAX_RATE
-    else:
-        rate = max(0.0, min(1.0, max(rates)))
-    _tax_rate_cache[user_id] = (now_ts, rate)
-    return rate
-
-
-async def get_tax_rate_map() -> dict[int, float]:
-    """Ставки налогов по всем участникам гильдий за один проход.
-
-    tax_collector не должен делать отдельный обход гильдий на каждого
-    игрока: один проход по guild.members строит максимум по гильдиям.
-    """
-    rates: dict[int, float] = {}
-    for guild in getattr(bot, "guilds", []) or []:
-        try:
-            settings = await get_settings(guild.id)
-            rate = float(settings.get("tax_rate", DEFAULT_TAX_RATE) or 0.0)
-            rate = max(0.0, min(1.0, rate))
-            for member in getattr(guild, "members", ()) or ():
-                uid = getattr(member, "id", None)
-                if uid is None:
-                    continue
-                current = rates.get(uid)
-                if current is None or rate > current:
-                    rates[uid] = rate
-        except (
-            aiosqlite.Error,
-            AttributeError,
-            TypeError,
-            ValueError,
-            IndexError,
-        ) as exc:
-            log.debug(
-                "TAX_MAP: пропуск гильдии %s: %s",
-                getattr(guild, "id", None),
-                exc,
-            )
-            continue
-    return rates
+TAX_RUNTIME = TaxRuntime()
+TAX_RUNTIME.configure(
+    bot_getter=lambda: bot,
+    settings_getter=lambda: get_settings,
+    tax_cache_getter=lambda: _tax_rate_cache,
+    cache_ttl=_TAX_RATE_CACHE_TTL,
+    default_tax_rate=DEFAULT_TAX_RATE,
+    logger=log,
+)
+get_tax_rate_for_user, get_tax_rate_map = make_tax_layer(TAX_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -4792,54 +4709,6 @@ async def toggle_accessibility_mode(user_id: int) -> bool:
             (new_value, user_id),
         )
     return bool(new_value)
-
-
-SETTING_COLUMNS = {
-    "bot_name": "bot_name",
-    "custom_emojis": "custom_emojis",
-    "currency_coins": "currency_coins",
-    "currency_gems": "currency_gems",
-    "prefix": "prefix",
-    "start_coins": "start_coins",
-    "disabled_commands": "disabled_commands",
-    "status_roles": "status_roles",
-    "battlepass_enabled": "battlepass_enabled",
-    "admin_role_id": "admin_role_id",
-    "tax_rate": "tax_rate",
-}
-
-
-async def save_setting(guild_id: int, key: str, value, actor_id: int | None = None):
-    column = SETTING_COLUMNS.get(key)
-    if not column:
-        log.warning("Неизвестный ключ настройки: %s", key)
-        return
-    if isinstance(value, (dict, list)):
-        value = json.dumps(value)
-    await bot.db.execute(
-        "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (guild_id,)
-    )
-    await bot.db.execute(
-        f"UPDATE guild_settings SET {column} = ? WHERE guild_id = ?",
-        (value, guild_id),
-    )
-    await commit_if_needed()
-    _settings_cache.pop(guild_id, None)
-    if key == "tax_rate":
-        _tax_rate_cache.clear()
-
-    actor_id = actor_id or _CURRENT_ACTOR_ID.get()
-    if actor_id:
-        rendered = str(value)
-        if len(rendered) > 200:
-            rendered = rendered[:197] + "..."
-        await log_admin_action(
-            actor_id,
-            0,
-            "setting_change",
-            f"{key}={rendered}",
-            guild_id=guild_id,
-        )
 
 
 async def is_command_disabled(guild_id: int, command_key: str) -> bool:

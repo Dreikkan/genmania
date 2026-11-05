@@ -28,8 +28,11 @@
   `gen_mania.metrics`; `bot.py` keeps compatibility re-exports.
 - Refactor slice 2: extracted `gen_mania.db.transaction`
   (`TransactionRuntime`, `db_transaction`, commit/rollback helpers).
+- Refactor slice 3: extracted `gen_mania.repositories.settings`
+  (`get_settings`, `save_setting`) and `gen_mania.services.taxes`
+  (per-user and per-guild tax rate calculation).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
 
-Current test status: **235 passed**, 63 test files.
+Current test status: **237 passed**, 63 test files.
