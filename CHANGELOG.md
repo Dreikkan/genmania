@@ -35,6 +35,9 @@
   (accessibility, player stats, prestige points).
 - Refactor slice 5: extracted `gen_mania.repositories.inventory`
   (inventory rows, sorting, reslotting and item locks).
+- Refactor slice 6: extracted `gen_mania.services.market`
+  (pure pricing/sparkline helpers) and
+  `gen_mania.repositories.market` (price history).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
