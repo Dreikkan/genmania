@@ -29,6 +29,7 @@ from gen_mania.services.market import (
 )
 from gen_mania.services.progress import ProgressRuntime
 from gen_mania.services.pvp import PvpRuntime
+from gen_mania.services.raid_combat import RaidCombatRuntime
 from gen_mania.services.taxes import TaxRuntime
 
 BOT_PATH = pathlib.Path(__file__).resolve().parent.parent / "bot.py"
@@ -61,6 +62,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.GIVEAWAY_RUNTIME, GiveawayRuntime)
     assert isinstance(m.PROGRESS_RUNTIME, ProgressRuntime)
     assert isinstance(m.LEADERBOARD_RUNTIME, LeaderboardRuntime)
+    assert isinstance(m.RAID_COMBAT_RUNTIME, RaidCombatRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)

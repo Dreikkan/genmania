@@ -77,6 +77,10 @@ from gen_mania.services.market import (
 from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
 from gen_mania.services.progress import ProgressRuntime, make_progress_layer
 from gen_mania.services.pvp import PvpRuntime, make_pvp_layer
+from gen_mania.services.raid_combat import (
+    RaidCombatRuntime,
+    make_raid_combat_layer,
+)
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 
 
@@ -4386,6 +4390,33 @@ LEADERBOARD_RUNTIME.configure(
 get_top_players, get_top_players_cached = make_leaderboard_layer(
     LEADERBOARD_RUNTIME
 )
+
+RAID_COMBAT_RUNTIME = RaidCombatRuntime()
+RAID_COMBAT_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    commit_getter=lambda: commit_if_needed,
+    parse_time_getter=lambda: _parse_db_time,
+    combat_power_getter=lambda: get_combat_power,
+    pet_bonus_getter=lambda: get_pet_bonus,
+    title_bonus_getter=lambda: get_title_bonus,
+    today_str_getter=lambda: today_str,
+    quest_progress_getter=lambda: update_quest_progress,
+    clan_getter=lambda: get_clan,
+    clan_quest_getter=lambda: update_clan_quest,
+    story_quest_getter=lambda: update_story_quests,
+    achievements_getter=lambda: check_achievements,
+    season_xp_getter=lambda: add_season_xp,
+    season_xp_amount_getter=lambda: season_xp_amount,
+    group_synergy=RAID_GROUP_SYNERGY,
+    min_target_power_ratio=RAID_MIN_TARGET_POWER_RATIO,
+    target_shield_hours=RAID_TARGET_SHIELD_HOURS,
+    daily_loss_cap=RAID_DAILY_LOSS_CAP,
+    loot_rate=RAID_LOOT_RATE,
+    cooldown_seconds=3600,
+    logger=log,
+)
+perform_raid, finalize_raid = make_raid_combat_layer(RAID_COMBAT_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -16734,267 +16765,6 @@ async def _handle_modal_error(interaction: discord.Interaction, error: Exception
             )
     except discord.HTTPException:
         pass
-
-
-async def perform_raid(attacker_ids: list[int], target_id: int):
-    """Проводит рейд. Возвращает (result, error).
-
-    result — словарь с деталями боя, error — текст ошибки для пользователя.
-    """
-    members = []
-    for uid in attacker_ids:
-        if uid not in members:
-            members.append(uid)
-
-    if not members:
-        return None, "❌ В отряде нет участников."
-    if target_id in members:
-        return None, "❌ Нельзя атаковать участника своего отряда."
-
-    now = datetime.datetime.now()
-    result = {
-        "members": members,
-        "target_id": target_id,
-        "powers": {},
-        "team_power": 0,
-        "def_power": 0,
-        "roll_atk": 0,
-        "roll_def": 0,
-        "success": False,
-        "loot": {},
-        "capped": [],
-        "target_capped": False,
-        "daily": {},
-        "synergy_pct": int(round(RAID_GROUP_SYNERGY * 100 * (len(members) - 1))),
-    }
-
-    try:
-        async with db_transaction():
-            # --- Цель ---
-            async with bot.db.execute(
-                "SELECT coins FROM players WHERE user_id = ?", (target_id,)
-            ) as c:
-                target_row = await c.fetchone()
-            if not target_row:
-                raise ValueError("❌ Цель не найдена.")
-            target_coins = max(0, target_row[0] or 0)
-            today = today_str()
-            async with bot.db.execute(
-                "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log "
-                "WHERE target_id = ? AND date = ?",
-                (target_id, today),
-            ) as c:
-                target_lost_today = (await c.fetchone())[0] or 0
-
-            # --- Кулдауны атакующих ---
-            placeholders = ",".join("?" for _ in members)
-            async with bot.db.execute(
-                f"SELECT user_id, last_raid_time FROM raid_cooldowns "
-                f"WHERE user_id IN ({placeholders})",
-                members,
-            ) as c:
-                cooldown_rows = await c.fetchall()
-            cooldowns = {uid: last for uid, last in cooldown_rows}
-
-            on_cooldown = []
-            for uid in members:
-                last_raid = _parse_db_time(cooldowns.get(uid))
-                if not last_raid:
-                    continue
-                remain = 3600 - (now - last_raid).total_seconds()
-                if remain > 0:
-                    on_cooldown.append(f"<@{uid}> (~{max(1, int(remain // 60) + 1)} мин.)")
-            if on_cooldown:
-                raise ValueError(
-                    "❌ Кулдаун рейда: " + ", ".join(on_cooldown) + "."
-                )
-
-            # Щит цели после предыдущей атаки.
-            async with bot.db.execute(
-                "SELECT last_attacked_time FROM raid_cooldowns WHERE user_id = ?",
-                (target_id,),
-            ) as c:
-                shield_row = await c.fetchone()
-            last_attacked = _parse_db_time(shield_row[0]) if shield_row else None
-            if last_attacked:
-                shield_left = RAID_TARGET_SHIELD_HOURS * 3600 - (
-                    now - last_attacked
-                ).total_seconds()
-                if shield_left > 0:
-                    minutes = max(1, int(shield_left // 60) + 1)
-                    raise ValueError(
-                        f"❌ У цели действует щит ещё {minutes} мин. "
-                        "Её недавно атаковали."
-                    )
-
-            # --- Мощь ---
-            powers = {}
-            for uid in members:
-                power = await get_combat_power(uid)
-                if power <= 0:
-                    raise ValueError(
-                        f"❌ У <@{uid}> нет генераторов на энергостанции (мощь 0)."
-                    )
-                powers[uid] = power
-
-            def_power = await get_combat_power(target_id)
-            if def_power <= 0:
-                raise ValueError("❌ У цели нет генераторов. Атаковать нечего.")
-
-            team_power = sum(powers.values())
-            if len(members) > 1:
-                team_power = int(
-                    team_power * (1 + RAID_GROUP_SYNERGY * (len(members) - 1))
-                )
-            if def_power < team_power * RAID_MIN_TARGET_POWER_RATIO:
-                raise ValueError(
-                    "❌ Цель слишком слабая для твоего отряда. "
-                    "Выбери противника, сопоставимого по силе."
-                )
-
-            roll_atk = random.randint(1, team_power)
-            roll_def = random.randint(1, def_power)
-            success = roll_atk > roll_def
-
-            # --- Кулдауны после рейда ---
-            now_iso = now.isoformat()
-            for uid in members:
-                await bot.db.execute(
-                    "INSERT INTO raid_cooldowns (user_id, last_raid_time) "
-                    "VALUES (?, ?) "
-                    "ON CONFLICT(user_id) DO UPDATE SET last_raid_time = ?",
-                    (uid, now_iso, now_iso),
-                )
-            await bot.db.execute(
-                "INSERT INTO raid_cooldowns (user_id, last_attacked_time) "
-                "VALUES (?, ?) "
-                "ON CONFLICT(user_id) DO UPDATE SET last_attacked_time = ?",
-                (target_id, now_iso, now_iso),
-            )
-
-            # --- Добыча ---
-            loot = {}
-            capped = []
-            daily = {}
-            target_capped = False
-            if success and target_coins > 0:
-                total_loot = 0
-                target_budget = max(
-                    0,
-                    int(target_coins * RAID_DAILY_LOSS_CAP) - target_lost_today,
-                )
-                wanted_by_uid = {}
-                for uid in members:
-                    bonus = (
-                        await get_pet_bonus(uid, "raid_loot")
-                        + await get_title_bonus(uid, "raid_loot")
-                    )
-                    wanted_by_uid[uid] = (
-                        int(target_coins * (RAID_LOOT_RATE + bonus))
-                        // len(members)
-                    )
-
-                total_wanted = sum(wanted_by_uid.values())
-                scale = 1.0
-                if total_wanted > target_budget:
-                    scale = (target_budget / total_wanted) if total_wanted else 0.0
-                    target_capped = True
-
-                for uid, base_wanted in wanted_by_uid.items():
-                    wanted = int(base_wanted * scale)
-
-                    async with bot.db.execute(
-                        "SELECT COALESCE(SUM(amount), 0) FROM raid_loot_log "
-                        "WHERE user_id = ? AND date = ?",
-                        (uid, today),
-                    ) as c:
-                        used = (await c.fetchone())[0] or 0
-
-                    async with bot.db.execute(
-                        "SELECT coins FROM players WHERE user_id = ?", (uid,)
-                    ) as c:
-                        row = await c.fetchone()
-                    my_coins = (row[0] if row else 0) or 0
-                    limit = max(1000, my_coins // 2)
-                    remaining = max(0, limit - used)
-                    actual = min(wanted, remaining)
-
-                    if actual < wanted:
-                        capped.append(uid)
-                    daily[uid] = (used, limit)
-                    if actual > 0:
-                        loot[uid] = actual
-                        total_loot += actual
-
-                if total_loot > 0:
-                    cur = await bot.db.execute(
-                        "UPDATE players SET coins = coins - ? "
-                        "WHERE user_id = ? AND coins >= ?",
-                        (total_loot, target_id, total_loot),
-                    )
-                    if cur.rowcount == 0:
-                        raise ValueError(
-                            "❌ Кошелёк цели изменился. Попробуй рейд ещё раз."
-                        )
-
-                    for uid, amount in loot.items():
-                        await bot.db.execute(
-                            "UPDATE players SET coins = coins + ?, "
-                            "total_coins_earned = total_coins_earned + ? "
-                            "WHERE user_id = ?",
-                            (amount, amount, uid),
-                        )
-                        await bot.db.execute(
-                            "INSERT INTO raid_loot_log "
-                            "(user_id, target_id, amount, date) VALUES (?, ?, ?, ?)",
-                            (uid, target_id, amount, today),
-                        )
-
-            result.update({
-                "powers": powers,
-                "team_power": team_power,
-                "def_power": def_power,
-                "roll_atk": roll_atk,
-                "roll_def": roll_def,
-                "success": success,
-                "loot": loot,
-                "capped": capped,
-                "target_capped": target_capped,
-                "daily": daily,
-            })
-    except ValueError as e:
-        return None, str(e)
-
-    return result, None
-
-
-async def finalize_raid(result: dict):
-    """Обновляет квесты, победы и достижения всех участников рейда."""
-    for uid in result["members"]:
-        try:
-            await update_quest_progress(uid, "raid_1")
-
-            clan = await get_clan(uid)
-            if clan:
-                await update_clan_quest(clan[0], "raid", 1)
-
-            if result["success"]:
-                await update_story_quests(uid, "raid_win", 1)
-                await bot.db.execute(
-                    "UPDATE players SET raid_wins = raid_wins + 1 WHERE user_id = ?",
-                    (uid,),
-                )
-                await commit_if_needed()
-                await check_achievements(uid)
-            await add_season_xp(
-                uid,
-                season_xp_amount(
-                    "raid_win" if result["success"] else "raid_loss"
-                ),
-                action="raid_win" if result["success"] else "raid_loss",
-            )
-        except Exception:
-            log.exception("Не удалось обновить прогресс рейда для %s", uid)
 
 
 def build_raid_result_embed(result: dict) -> discord.Embed:
