@@ -60,6 +60,8 @@
   (self-grant top exclusion and audit notice).
 - Refactor slice 17: extracted `gen_mania.services.prestige`
   (point math, rebirth validation and reset).
+- Refactor slice 18: extracted `gen_mania.services.clan_wars`
+  (war declaration, attacks, cooldowns and rewards).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

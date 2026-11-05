@@ -54,6 +54,7 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
+from gen_mania.services.clan_wars import ClanWarRuntime, make_clan_war_layer
 from gen_mania.services.giveaways import (
     GIVEAWAY_COLUMNS,  # noqa: F401 - re-export
     GiveawayRuntime,
@@ -4285,6 +4286,26 @@ CLAN_RUNTIME.configure(
     get_active_clan_war,
 ) = make_clan_layer(CLAN_RUNTIME)
 
+CLAN_WAR_RUNTIME = ClanWarRuntime()
+CLAN_WAR_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    active_war_getter=lambda: get_active_clan_war,
+    clan_power_getter=lambda: get_clan_power,
+    clan_level_getter=lambda: get_clan_level_info,
+    combat_power_getter=lambda: get_combat_power,
+    log_clan_getter=lambda: log_clan,
+    add_clan_xp_getter=lambda: add_clan_xp,
+    clan_quest_getter=lambda: update_clan_quest,
+    parse_time_getter=lambda: _parse_market_datetime,
+    declare_cost=CLAN_WAR_DECLARE_COST,
+    reward=CLAN_WAR_REWARD,
+    attack_cooldown_hours=CLAN_WAR_ATTACK_COOLDOWN_HOURS,
+    damage_rate=CLAN_WAR_DAMAGE_RATE,
+    logger=log,
+)
+start_clan_war, attack_clan_war = make_clan_war_layer(CLAN_WAR_RUNTIME)
+
 RAID_RUNTIME = RaidRuntime()
 RAID_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -5550,180 +5571,6 @@ async def get_combat_power_many(user_ids: list[int]) -> dict[int, int]:
                 base_power.get(uid, 0) * (1 + pet_bonus + title_bonus)
             )
     return result
-
-
-async def start_clan_war(clan_id: int, enemy_id: int) -> int:
-    if clan_id == enemy_id:
-        raise ValueError("Нельзя объявить войну самому себе.")
-    async with db_transaction():
-        if await get_active_clan_war(clan_id):
-            raise ValueError("У твоего клана уже есть активная война.")
-        if await get_active_clan_war(enemy_id):
-            raise ValueError("У этого клана уже есть активная война.")
-        async with bot.db.execute(
-            "SELECT treasury FROM clans WHERE id = ?", (clan_id,)
-        ) as c:
-            row = await c.fetchone()
-        if not row:
-            raise ValueError("Клан не найден.")
-        if (row[0] or 0) < CLAN_WAR_DECLARE_COST:
-            raise ValueError(
-                f"Нужно 🪙 {CLAN_WAR_DECLARE_COST} в сундуке для объявления войны."
-            )
-        async with bot.db.execute(
-            "SELECT 1 FROM clans WHERE id = ?", (enemy_id,)
-        ) as c:
-            if not await c.fetchone():
-                raise ValueError("Клан-противник не найден.")
-
-        p1 = await get_clan_power(clan_id)
-        p2 = await get_clan_power(enemy_id)
-        hp1 = max(100, int(p1 * 0.5))
-        hp2 = max(100, int(p2 * 0.5))
-
-        await bot.db.execute(
-            "UPDATE clans SET treasury = treasury - ? WHERE id = ?",
-            (CLAN_WAR_DECLARE_COST, clan_id),
-        )
-        cursor = await bot.db.execute("""
-            INSERT INTO clan_wars
-            (clan1_id, clan2_id, start_time, status,
-             clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
-             clan1_damage, clan2_damage)
-            VALUES (?, ?, ?, 'active', ?, ?, ?, ?, 0, 0)
-        """, (
-            clan_id, enemy_id, datetime.datetime.now().isoformat(),
-            hp1, hp2, hp1, hp2,
-        ))
-        war_id = cursor.lastrowid
-
-    await log_clan(clan_id, "war_declared", f"Против клана {enemy_id}")
-    await log_clan(enemy_id, "war_declared", f"Война с кланом {clan_id}")
-    return war_id
-
-
-async def attack_clan_war(war_id: int, user_id: int) -> tuple[bool, str, bool]:
-    damage = 0
-    new_enemy_hp = 0
-    finished = False
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT clan_id FROM clan_members "
-                "WHERE user_id = ? LIMIT 1",
-                (user_id,),
-            ) as c:
-                member = await c.fetchone()
-            if not member:
-                raise ValueError("❌ Ты не в клане.")
-            clan_id = member[0]
-
-            async with bot.db.execute("""
-                SELECT id, clan1_id, clan2_id, status,
-                       clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
-                       clan1_damage, clan2_damage
-                FROM clan_wars WHERE id = ?
-            """, (war_id,)) as c:
-                war = await c.fetchone()
-            if not war:
-                raise ValueError("❌ Война не найдена.")
-            (_, c1, c2, status, c1_hp, c2_hp, c1_max, c2_max,
-             c1_dmg, c2_dmg) = war
-            c1_hp = c1_hp or 0
-            c2_hp = c2_hp or 0
-            c1_dmg = c1_dmg or 0
-            c2_dmg = c2_dmg or 0
-            if status != "active":
-                raise ValueError("❌ Война уже завершена.")
-            if clan_id not in (c1, c2):
-                raise ValueError("❌ Твой клан не участвует в этой войне.")
-
-            async with bot.db.execute("""
-                SELECT timestamp FROM clan_war_attacks
-                WHERE war_id = ? AND attacker_id = ?
-                ORDER BY id DESC LIMIT 1
-            """, (war_id, user_id)) as c:
-                last_attack = await c.fetchone()
-            now = datetime.datetime.now()
-            if last_attack and last_attack[0]:
-                last = _parse_market_datetime(last_attack[0])
-                if last:
-                    left = (
-                        CLAN_WAR_ATTACK_COOLDOWN_HOURS * 3600
-                        - (now - last).total_seconds()
-                    )
-                    if left > 0:
-                        raise ValueError(
-                            f"⏳ Атака будет доступна через {int(left // 60)} мин."
-                        )
-
-            power = await get_combat_power(user_id)
-            if power <= 0:
-                raise ValueError("❌ У тебя нет генераторов на энергостанции.")
-
-            level, _, _ = await get_clan_level_info(clan_id)
-            level_mult = 1 + max(0, level - 1) * 0.01
-            damage = max(
-                1,
-                int(
-                    power
-                    * CLAN_WAR_DAMAGE_RATE
-                    * random.uniform(0.8, 1.2)
-                    * level_mult
-                ),
-            )
-
-            if clan_id == c1:
-                new_enemy_hp = max(0, c2_hp - damage)
-                own_damage = c1_dmg + damage
-                await bot.db.execute(
-                    "UPDATE clan_wars SET clan2_hp = ?, clan1_damage = ? "
-                    "WHERE id = ? AND status = 'active'",
-                    (new_enemy_hp, own_damage, war_id),
-                )
-            else:
-                new_enemy_hp = max(0, c1_hp - damage)
-                own_damage = c2_dmg + damage
-                await bot.db.execute(
-                    "UPDATE clan_wars SET clan1_hp = ?, clan2_damage = ? "
-                    "WHERE id = ? AND status = 'active'",
-                    (new_enemy_hp, own_damage, war_id),
-                )
-
-            await bot.db.execute(
-                "INSERT INTO clan_war_attacks "
-                "(war_id, attacker_id, attacker_clan_id, damage, timestamp) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (war_id, user_id, clan_id, damage, now.isoformat()),
-            )
-
-            finished = new_enemy_hp <= 0
-            if finished:
-                await bot.db.execute(
-                    "UPDATE clan_wars SET status = 'finished', winner_id = ?, "
-                    "end_time = ? WHERE id = ? AND status = 'active'",
-                    (clan_id, now.isoformat(), war_id),
-                )
-                await bot.db.execute(
-                    "UPDATE clans SET treasury = treasury + ? WHERE id = ?",
-                    (CLAN_WAR_REWARD, clan_id),
-                )
-    except ValueError as exc:
-        return False, str(exc), False
-
-    if finished:
-        await log_clan(clan_id, "war_win", f"Война #{war_id}, урон {damage}")
-        await add_clan_xp(clan_id, 200)
-        await update_clan_quest(clan_id, "war", 1)
-        return True, (
-            f"🏆 Победа! Урон {damage}. "
-            f"Клан получает 🪙 {CLAN_WAR_REWARD} в сундук."
-        ), True
-
-    return True, (
-        f"⚔️ Удар на **{damage}** урона. "
-        f"У врага осталось **{new_enemy_hp}** HP."
-    ), False
 
 
 def has_clan_permission(role: str, action: str) -> bool:
