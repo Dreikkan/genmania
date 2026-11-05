@@ -18,6 +18,7 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.repositories.settings import SettingsRuntime
 from gen_mania.services.auction import AuctionRuntime
+from gen_mania.services.bank import BankRuntime
 from gen_mania.services.market import (
     SHOP_MARKET_MIN_RATIO,
     market_price_bounds,
@@ -50,6 +51,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.INVENTORY_RUNTIME, InventoryRuntime)
     assert isinstance(m.MARKET_RUNTIME, MarketRuntime)
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
+    assert isinstance(m.BANK_RUNTIME, BankRuntime)
     assert m.market_price_bounds is market_price_bounds
     assert m.SHOP_MARKET_MIN_RATIO == SHOP_MARKET_MIN_RATIO
     assert m._settings_cache is m.SETTINGS_RUNTIME.settings_cache
