@@ -42,6 +42,8 @@
   (bids, buyout, bid refunds and lot history).
 - Refactor slice 8: extracted `gen_mania.services.bank`
   (deposits, loans, collateral and expiry).
+- Refactor slice 9: extracted `gen_mania.services.pvp`
+  (duel resolution, power tolerance and cooldowns).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

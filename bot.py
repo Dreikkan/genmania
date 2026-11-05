@@ -64,6 +64,7 @@ from gen_mania.services.market import (
     market_sparkline,
 )
 from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
+from gen_mania.services.pvp import PvpRuntime, make_pvp_layer
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 
 
@@ -4204,6 +4205,34 @@ BANK_RUNTIME.configure(
     repay_bank_loan,
     expire_bank_loans,
 ) = make_bank_layer(BANK_RUNTIME)
+
+PVP_RUNTIME = PvpRuntime()
+PVP_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    parse_time_getter=lambda: _parse_db_time,
+    combat_power_getter=lambda: get_combat_power,
+    quest_getter=lambda: update_quest_progress,
+    story_quest_getter=lambda: update_story_quests,
+    achievements_getter=lambda: check_achievements,
+    season_xp_getter=lambda: add_season_xp,
+    season_xp_amount_getter=lambda: season_xp_amount,
+    duel_cooldown_seconds=DUEL_COOLDOWN_SECONDS,
+    espionage_cooldown_seconds=ESPIONAGE_COOLDOWN_SECONDS,
+    duel_max_bet_pct=DUEL_MAX_BET_PCT,
+    duel_power_tolerance=DUEL_POWER_TOLERANCE,
+    duel_power_variance=DUEL_POWER_VARIANCE,
+    logger=log,
+)
+(
+    get_duel_cooldown_seconds,
+    set_duel_cooldown,
+    get_espionage_cooldown_seconds,
+    set_espionage_cooldown,
+    power_duel_allowed,
+    validate_power_duel,
+    resolve_duel,
+) = make_pvp_layer(PVP_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -18626,79 +18655,6 @@ class RaidTargetModal(discord.ui.Modal, title="Атака энергостанц
 
         await send_raid_result(interaction, result)
 
-async def get_duel_cooldown_seconds(user_id: int) -> int:
-    """Сколько секунд осталось до следующей дуэли."""
-    async with bot.db.execute(
-        "SELECT last_duel_time FROM duel_cooldowns WHERE user_id = ?", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    last = _parse_db_time(row[0]) if row else None
-    if not last:
-        return 0
-    return max(
-        0,
-        int(DUEL_COOLDOWN_SECONDS - (datetime.datetime.now() - last).total_seconds()),
-    )
-
-
-async def set_duel_cooldown(user_id: int, when: datetime.datetime | None = None):
-    stamp = (when or datetime.datetime.now()).isoformat()
-    await bot.db.execute(
-        "INSERT INTO duel_cooldowns (user_id, last_duel_time) VALUES (?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET last_duel_time = ?",
-        (user_id, stamp, stamp),
-    )
-
-
-async def get_espionage_cooldown_seconds(user_id: int) -> int:
-    async with bot.db.execute(
-        "SELECT last_espionage_time FROM espionage_cooldowns WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-    last = _parse_db_time(row[0]) if row else None
-    if not last:
-        return 0
-    return max(
-        0,
-        int(ESPIONAGE_COOLDOWN_SECONDS - (datetime.datetime.now() - last).total_seconds()),
-    )
-
-
-async def set_espionage_cooldown(user_id: int):
-    stamp = datetime.datetime.now().isoformat()
-    await bot.db.execute(
-        "INSERT INTO espionage_cooldowns (user_id, last_espionage_time) "
-        "VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET last_espionage_time = ?",
-        (user_id, stamp, stamp),
-    )
-
-
-def power_duel_allowed(challenger_power: int, opponent_power: int) -> bool:
-    """Проверяет ±15% мощи без ошибок округления float."""
-    if challenger_power <= 0 or opponent_power <= 0:
-        return False
-    percent = int(round(DUEL_POWER_TOLERANCE * 100))
-    return (
-        challenger_power * (100 - percent)
-        <= opponent_power * 100
-        <= challenger_power * (100 + percent)
-    )
-
-
-async def validate_power_duel(challenger_id: int, opponent_id: int) -> tuple[bool, str]:
-    p1 = await get_combat_power(challenger_id)
-    p2 = await get_combat_power(opponent_id)
-    if p1 <= 0 or p2 <= 0:
-        return False, "У одного из игроков нет генераторов для дуэли."
-    if not power_duel_allowed(p1, p2):
-        return False, (
-            "❌ Для power-дуэли нужен противник в диапазоне "
-            f"±{int(DUEL_POWER_TOLERANCE * 100)}% твоей мощи."
-        )
-    return True, ""
-
-
 async def create_duel_challenge(
     interaction: discord.Interaction,
     author_id: int,
@@ -18981,116 +18937,6 @@ class DuelChallengeView(SafeView):
             except discord.HTTPException:
                 pass
 
-
-async def resolve_duel(
-    challenger_id: int,
-    opponent_id: int,
-    bet: int,
-    mode: str,
-    guild_id: int | None = None,
-) -> tuple[bool, str]:
-    """Проводит дуэль после согласия обеих сторон."""
-    try:
-        async with db_transaction():
-            for uid in (challenger_id, opponent_id):
-                cooldown = await get_duel_cooldown_seconds(uid)
-                if cooldown > 0:
-                    minutes = max(1, int(cooldown // 60) + 1)
-                    raise ValueError(f"Кулдаун дуэли ещё ~{minutes} мин.")
-
-            async with bot.db.execute(
-                "SELECT coins FROM players WHERE user_id = ?", (challenger_id,)
-            ) as c:
-                c1_row = await c.fetchone()
-            async with bot.db.execute(
-                "SELECT coins FROM players WHERE user_id = ?", (opponent_id,)
-            ) as c:
-                c2_row = await c.fetchone()
-
-            c1 = (c1_row[0] if c1_row else 0) or 0
-            c2 = (c2_row[0] if c2_row else 0) or 0
-            if c1 < bet or c2 < bet:
-                raise ValueError("У кого-то не хватает монет на ставку.")
-            max_bet = max(1, int(min(c1, c2) * DUEL_MAX_BET_PCT))
-            if bet > max_bet:
-                raise ValueError(
-                    f"Ставка не больше {int(DUEL_MAX_BET_PCT * 100)}% "
-                    f"баланса (максимум {max_bet})."
-                )
-
-            if mode == "dice":
-                r1, r2 = random.randint(1, 100), random.randint(1, 100)
-                winner = challenger_id if r1 > r2 else opponent_id
-                text = f"🎲 Выпало: {r1} против {r2}"
-            else:
-                p1 = await get_combat_power(challenger_id)
-                p2 = await get_combat_power(opponent_id)
-                if p1 <= 0 or p2 <= 0:
-                    raise ValueError("У одного из игроков нет генераторов для дуэли.")
-                if not power_duel_allowed(p1, p2):
-                    raise ValueError(
-                        "Для power-дуэли нужен противник в диапазоне "
-                        f"±{int(DUEL_POWER_TOLERANCE * 100)}% мощи."
-                    )
-                r1 = int(p1 * random.uniform(
-                    1 - DUEL_POWER_VARIANCE, 1 + DUEL_POWER_VARIANCE
-                ))
-                r2 = int(p2 * random.uniform(
-                    1 - DUEL_POWER_VARIANCE, 1 + DUEL_POWER_VARIANCE
-                ))
-                winner = challenger_id if r1 > r2 else opponent_id
-                text = f"⚔️ Мощь: {p1}→{r1} против {p2}→{r2}"
-
-            cur1 = await bot.db.execute(
-                "UPDATE players SET coins = coins - ? "
-                "WHERE user_id = ? AND coins >= ?",
-                (bet, challenger_id, bet),
-            )
-            cur2 = await bot.db.execute(
-                "UPDATE players SET coins = coins - ? "
-                "WHERE user_id = ? AND coins >= ?",
-                (bet, opponent_id, bet),
-            )
-            if cur1.rowcount == 0 or cur2.rowcount == 0:
-                raise ValueError("У кого-то не хватает монет на ставку.")
-
-            await bot.db.execute(
-                "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-                (bet * 2, winner),
-            )
-            loser = opponent_id if winner == challenger_id else challenger_id
-            await bot.db.execute(
-                "INSERT INTO duel_history (winner_id, loser_id, bet, type) "
-                "VALUES (?, ?, ?, ?)",
-                (winner, loser, bet, mode),
-            )
-            await set_duel_cooldown(challenger_id, datetime.datetime.now())
-            await set_duel_cooldown(opponent_id, datetime.datetime.now())
-    except ValueError as e:
-        return False, f"❌ {e}"
-
-    await update_quest_progress(challenger_id, "duel_1")
-    await update_quest_progress(opponent_id, "duel_1")
-    if winner == challenger_id:
-        await update_story_quests(challenger_id, "duel_win", 1)
-    else:
-        await update_story_quests(opponent_id, "duel_win", 1)
-
-    await check_achievements(challenger_id)
-    await check_achievements(opponent_id)
-
-    loser = opponent_id if winner == challenger_id else challenger_id
-    await add_season_xp(winner, season_xp_amount("duel_win"), guild_id, action="duel_win")
-    await add_season_xp(loser, season_xp_amount("duel_loss"), guild_id, action="duel_loss")
-
-    winner_name = f"<@{winner}>"
-    msg = (
-        f"{text}\n\n"
-        f"🏆 Победитель: {winner_name}\n"
-        f"Банк: 🪙 **{bet * 2}**\n"
-        f"⏳ Следующая дуэль через {DUEL_COOLDOWN_SECONDS // 60} мин."
-    )
-    return True, msg
 
 async def open_duel_setup(interaction: discord.Interaction, author_id: int):
     """Открывает выбор противника и параметры дуэли."""
