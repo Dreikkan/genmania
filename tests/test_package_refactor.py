@@ -14,6 +14,7 @@ from gen_mania.repositories.clans import ClanRuntime
 from gen_mania.repositories.inventory import InventoryRuntime
 from gen_mania.repositories.market import MarketRuntime
 from gen_mania.repositories.players import PlayerRuntime
+from gen_mania.repositories.raids import RaidRuntime
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS as REPOSITORY_SETTING_COLUMNS,
 )
@@ -53,6 +54,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.INVENTORY_RUNTIME, InventoryRuntime)
     assert isinstance(m.MARKET_RUNTIME, MarketRuntime)
     assert isinstance(m.CLAN_RUNTIME, ClanRuntime)
+    assert isinstance(m.RAID_RUNTIME, RaidRuntime)
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
     assert isinstance(m.PVP_RUNTIME, PvpRuntime)

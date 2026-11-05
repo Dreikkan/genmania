@@ -46,6 +46,7 @@ from gen_mania.repositories.inventory import (
 )
 from gen_mania.repositories.market import MarketRuntime, make_market_layer
 from gen_mania.repositories.players import PlayerRuntime, make_player_layer
+from gen_mania.repositories.raids import RaidRuntime, make_raid_layer
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS,  # noqa: F401 - re-export
     SettingsRuntime,
@@ -4259,6 +4260,33 @@ CLAN_RUNTIME.configure(
     add_clan_xp,
     get_active_clan_war,
 ) = make_clan_layer(CLAN_RUNTIME)
+
+RAID_RUNTIME = RaidRuntime()
+RAID_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    commit_getter=lambda: commit_if_needed,
+    parse_time_getter=lambda: _parse_db_time,
+    party_ttl_minutes=RAID_PARTY_TTL_MINUTES,
+    invite_timeout=RAID_INVITE_TIMEOUT,
+    max_members=RAID_PARTY_MAX,
+    cooldown_seconds=3600,
+    logger=log,
+)
+(
+    party_member_ids,
+    cleanup_expired_raid_parties,
+    cleanup_expired_raid_invites,
+    get_raid_party,
+    get_raid_party_by_id,
+    touch_raid_party,
+    create_raid_party,
+    join_raid_party,
+    detach_user_from_raid_party,
+    leave_raid_party,
+    get_raid_cooldown_seconds,
+    get_last_raid_target,
+) = make_raid_layer(RAID_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -17470,260 +17498,6 @@ async def _handle_modal_error(interaction: discord.Interaction, error: Exception
         pass
 
 
-def party_member_ids(party) -> list[int]:
-    """Достаёт участников отряда из строки raid_parties."""
-    if not party:
-        return []
-    members = []
-    for value in (party[1], party[2], party[3]):
-        if value and value not in members:
-            members.append(value)
-    return members
-
-
-async def cleanup_expired_raid_parties():
-    """Удаляет отряды, которые не проявляли активности дольше TTL."""
-    await cleanup_expired_raid_invites()
-    ttl = datetime.timedelta(minutes=RAID_PARTY_TTL_MINUTES)
-    cutoff_local = datetime.datetime.now() - ttl
-    cutoff_utc = datetime.datetime.now(datetime.timezone.utc) - ttl
-
-    async with bot.db.execute(
-        "SELECT id, created_at, updated_at FROM raid_parties"
-    ) as c:
-        rows = await c.fetchall()
-
-    expired = []
-    for party_id, created_at, updated_at in rows:
-        # updated_at пишем локальным временем. created_at у старых строк
-        # заполняется SQLite как UTC — обрабатываем его отдельно.
-        last_seen = _parse_db_time(updated_at)
-        if last_seen is not None:
-            is_expired = last_seen < cutoff_local
-        else:
-            created = _parse_db_time(created_at)
-            if created is None:
-                is_expired = True
-            else:
-                is_expired = created.replace(
-                    tzinfo=datetime.timezone.utc
-                ) < cutoff_utc
-        if is_expired:
-            expired.append(party_id)
-
-    if not expired:
-        return
-
-    placeholders = ",".join("?" for _ in expired)
-    await bot.db.execute(
-        f"DELETE FROM raid_party_invites WHERE party_id IN ({placeholders})", expired
-    )
-    await bot.db.execute(
-        f"DELETE FROM raid_parties WHERE id IN ({placeholders})", expired
-    )
-    await commit_if_needed()
-
-
-async def cleanup_expired_raid_invites():
-    """Удаляет приглашения, чьи кнопки уже неактуальны после таймаута."""
-    cutoff = datetime.datetime.now() - datetime.timedelta(seconds=RAID_INVITE_TIMEOUT)
-    async with bot.db.execute(
-        "SELECT id, created_at FROM raid_party_invites"
-    ) as c:
-        rows = await c.fetchall()
-
-    expired = []
-    for invite_id, created_at in rows:
-        created = _parse_db_time(created_at)
-        if not created or created < cutoff:
-            expired.append(invite_id)
-    if not expired:
-        return
-
-    placeholders = ",".join("?" for _ in expired)
-    await bot.db.execute(
-        f"DELETE FROM raid_party_invites WHERE id IN ({placeholders})", expired
-    )
-    await commit_if_needed()
-
-
-async def get_raid_party(user_id: int):
-    """Возвращает активный отряд игрока или None."""
-    await cleanup_expired_raid_parties()
-    async with bot.db.execute(
-        "SELECT id, leader_id, member2_id, member3_id, created_at, updated_at "
-        "FROM raid_parties "
-        "WHERE leader_id = ? OR member2_id = ? OR member3_id = ? "
-        "ORDER BY id DESC LIMIT 1",
-        (user_id, user_id, user_id),
-    ) as c:
-        return await c.fetchone()
-
-
-async def get_raid_party_by_id(party_id: int):
-    async with bot.db.execute(
-        "SELECT id, leader_id, member2_id, member3_id, created_at, updated_at "
-        "FROM raid_parties WHERE id = ?",
-        (party_id,),
-    ) as c:
-        return await c.fetchone()
-
-
-async def touch_raid_party(party_id: int):
-    await bot.db.execute(
-        "UPDATE raid_parties SET updated_at = ? WHERE id = ?",
-        (datetime.datetime.now().isoformat(), party_id),
-    )
-
-
-async def create_raid_party(user_id: int) -> int:
-    """Создаёт отряд. Игрок может быть только в одном отряде."""
-    async with db_transaction():
-        async with bot.db.execute(
-            "SELECT id FROM raid_parties "
-            "WHERE leader_id = ? OR member2_id = ? OR member3_id = ?",
-            (user_id, user_id, user_id),
-        ) as c:
-            if await c.fetchone():
-                raise ValueError("Ты уже состоишь в отряде.")
-
-        cur = await bot.db.execute(
-            "INSERT INTO raid_parties (leader_id, updated_at) VALUES (?, ?)",
-            (user_id, datetime.datetime.now().isoformat()),
-        )
-        party_id = cur.lastrowid
-        await bot.db.execute(
-            "DELETE FROM raid_party_invites WHERE target_id = ?", (user_id,)
-        )
-    return party_id
-
-
-async def join_raid_party(party_id: int, user_id: int):
-    """Добавляет игрока в отряд после принятия приглашения."""
-    async with db_transaction():
-        async with bot.db.execute(
-            "SELECT id, leader_id, member2_id, member3_id FROM raid_parties WHERE id = ?",
-            (party_id,),
-        ) as c:
-            party = await c.fetchone()
-
-        if not party:
-            raise ValueError("Отряд уже распался.")
-        members = party_member_ids(party)
-        if user_id in members:
-            raise ValueError("Ты уже в этом отряде.")
-        if len(members) >= RAID_PARTY_MAX:
-            raise ValueError("Отряд уже укомплектован.")
-
-        async with bot.db.execute(
-            "SELECT id FROM raid_parties "
-            "WHERE (leader_id = ? OR member2_id = ? OR member3_id = ?) AND id != ?",
-            (user_id, user_id, user_id, party_id),
-        ) as c:
-            if await c.fetchone():
-                raise ValueError("Ты уже состоишь в другом отряде.")
-
-        if party[2] is None:
-            await bot.db.execute(
-                "UPDATE raid_parties SET member2_id = ?, updated_at = ? WHERE id = ?",
-                (user_id, datetime.datetime.now().isoformat(), party_id),
-            )
-        elif party[3] is None:
-            await bot.db.execute(
-                "UPDATE raid_parties SET member3_id = ?, updated_at = ? WHERE id = ?",
-                (user_id, datetime.datetime.now().isoformat(), party_id),
-            )
-        else:
-            raise ValueError("В отряде нет свободного места.")
-
-        await bot.db.execute(
-            "DELETE FROM raid_party_invites WHERE target_id = ?", (user_id,)
-        )
-        await bot.db.execute(
-            "DELETE FROM raid_party_invites WHERE party_id = ? AND target_id = ?",
-            (party_id, user_id),
-        )
-
-        async with bot.db.execute(
-            "SELECT id, leader_id, member2_id, member3_id "
-            "FROM raid_parties WHERE id = ?",
-            (party_id,),
-        ) as c:
-            updated = await c.fetchone()
-        if updated and len(party_member_ids(updated)) >= RAID_PARTY_MAX:
-            await bot.db.execute(
-                "DELETE FROM raid_party_invites WHERE party_id = ?", (party_id,)
-            )
-
-
-async def detach_user_from_raid_party(user_id: int) -> str:
-    """Убирает игрока из отряда. Не коммитит — вызывающий код решает сам."""
-    async with bot.db.execute(
-        "SELECT id, leader_id, member2_id, member3_id FROM raid_parties "
-        "WHERE leader_id = ? OR member2_id = ? OR member3_id = ?",
-        (user_id, user_id, user_id),
-    ) as c:
-        party = await c.fetchone()
-
-    await bot.db.execute(
-        "DELETE FROM raid_party_invites WHERE target_id = ? OR inviter_id = ?",
-        (user_id, user_id),
-    )
-    if not party:
-        return "none"
-
-    party_id, leader_id, member2_id, member3_id = party
-    now = datetime.datetime.now().isoformat()
-
-    if leader_id == user_id:
-        if member2_id:
-            await bot.db.execute(
-                "UPDATE raid_parties SET leader_id = ?, member2_id = ?, "
-                "member3_id = NULL, updated_at = ? WHERE id = ?",
-                (member2_id, member3_id, now, party_id),
-            )
-            return "transferred"
-        await bot.db.execute(
-            "DELETE FROM raid_party_invites WHERE party_id = ?", (party_id,)
-        )
-        await bot.db.execute("DELETE FROM raid_parties WHERE id = ?", (party_id,))
-        return "disbanded"
-
-    if member2_id == user_id:
-        await bot.db.execute(
-            "UPDATE raid_parties SET member2_id = ?, member3_id = NULL, "
-            "updated_at = ? WHERE id = ?",
-            (member3_id, now, party_id),
-        )
-        return "left"
-
-    if member3_id == user_id:
-        await bot.db.execute(
-            "UPDATE raid_parties SET member3_id = NULL, updated_at = ? WHERE id = ?",
-            (now, party_id),
-        )
-        return "left"
-
-    return "none"
-
-
-async def leave_raid_party(user_id: int) -> str:
-    async with db_transaction():
-        return await detach_user_from_raid_party(user_id)
-
-
-async def get_raid_cooldown_seconds(user_id: int) -> int:
-    """Сколько секунд осталось до следующего рейда игрока."""
-    async with bot.db.execute(
-        "SELECT last_raid_time FROM raid_cooldowns WHERE user_id = ?", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    last_raid = _parse_db_time(row[0]) if row else None
-    if not last_raid:
-        return 0
-    return max(0, int(3600 - (datetime.datetime.now() - last_raid).total_seconds()))
-
-
 async def perform_raid(attacker_ids: list[int], target_id: int):
     """Проводит рейд. Возвращает (result, error).
 
@@ -19118,14 +18892,7 @@ async def get_last_duel_opponent(user_id: int) -> int | None:
     return last[0] if last else None
 
 
-async def get_last_raid_target(user_id: int) -> int | None:
-    async with bot.db.execute(
-        "SELECT target_id FROM raid_loot_log WHERE user_id = ? "
-        "ORDER BY id DESC LIMIT 1",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-    return row[0] if row else None
+
 
 
 async def open_duel_lobby(
