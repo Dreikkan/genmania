@@ -44,6 +44,8 @@
   (deposits, loans, collateral and expiry).
 - Refactor slice 9: extracted `gen_mania.services.pvp`
   (duel resolution, power tolerance and cooldowns).
+- Refactor slice 10: extracted `gen_mania.repositories.clans`
+  (clan reads, capacity, levels and active war lookup).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

@@ -39,6 +39,7 @@ from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
 )
+from gen_mania.repositories.clans import ClanRuntime, make_clan_layer
 from gen_mania.repositories.inventory import (
     InventoryRuntime,
     make_inventory_layer,
@@ -4234,6 +4235,31 @@ PVP_RUNTIME.configure(
     resolve_duel,
 ) = make_pvp_layer(PVP_RUNTIME)
 
+CLAN_RUNTIME = ClanRuntime()
+CLAN_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    base_capacity=CLAN_BASE_CAPACITY,
+    capacity_step=CLAN_CAPACITY_STEP,
+    capacity_cost=CLAN_CAPACITY_COST,
+    max_level=CLAN_MAX_LEVEL,
+    xp_per_level=CLAN_XP_PER_LEVEL,
+    logger=log,
+)
+(
+    get_clan,
+    get_clan_members,
+    get_clan_capacity,
+    get_clan_member_count,
+    clan_capacity_cost,
+    get_clan_power,
+    get_clan_role,
+    log_clan,
+    get_clan_level_info,
+    add_clan_xp,
+    get_active_clan_war,
+) = make_clan_layer(CLAN_RUNTIME)
+
 
 def _role_has_administrator(role) -> bool:
     permissions = getattr(role, "permissions", None)
@@ -5318,138 +5344,6 @@ async def get_combat_power_many(user_ids: list[int]) -> dict[int, int]:
                 base_power.get(uid, 0) * (1 + pet_bonus + title_bonus)
             )
     return result
-
-
-async def get_clan(user_id: int):
-    async with bot.db.execute(
-        "SELECT c.* FROM clans c JOIN clan_members cm ON c.id = cm.clan_id WHERE cm.user_id = ?",
-        (user_id,)
-    ) as c:
-        return await c.fetchone()
-
-async def get_clan_members(clan_id: int):
-    async with bot.db.execute(
-        "SELECT user_id, role FROM clan_members WHERE clan_id = ?", (clan_id,)
-    ) as c:
-        return await c.fetchall()
-
-
-async def get_clan_capacity(clan_id: int) -> int:
-    async with bot.db.execute(
-        "SELECT capacity FROM clans WHERE id = ?", (clan_id,)
-    ) as c:
-        row = await c.fetchone()
-    return (row[0] if row else None) or CLAN_BASE_CAPACITY
-
-
-async def get_clan_member_count(clan_id: int) -> int:
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM clan_members WHERE clan_id = ?", (clan_id,)
-    ) as c:
-        return (await c.fetchone())[0] or 0
-
-
-def clan_capacity_cost(current_capacity: int) -> int:
-    """Квадратичная цена расширения: 1k, 4k, 9k, ... за шаг."""
-    steps = max(0, (current_capacity - CLAN_BASE_CAPACITY) // CLAN_CAPACITY_STEP)
-    return CLAN_CAPACITY_COST * (steps + 1) ** 2
-
-async def get_clan_power(clan_id: int):
-    async with bot.db.execute("""
-        SELECT SUM(power) FROM (
-            SELECT SUM(i.price * (1 + inv.stars * 0.5)) as power 
-            FROM inventory inv 
-            JOIN items i ON inv.item_id = i.id 
-            JOIN clan_members cm ON cm.user_id = inv.user_id 
-            WHERE cm.clan_id = ? AND inv.location = 'profile' 
-            GROUP BY inv.user_id
-        )
-    """, (clan_id,)) as c:
-        members_power = (await c.fetchone())[0] or 0
-    async with bot.db.execute("""
-        SELECT SUM(i.price * (1 + ci.stars * 0.5)) 
-        FROM clan_inventory ci 
-        JOIN items i ON ci.item_id = i.id 
-        WHERE ci.clan_id = ?
-    """, (clan_id,)) as c:
-        clan_power = (await c.fetchone())[0] or 0
-    return int(members_power + clan_power)
-
-async def get_clan_role(user_id: int, clan_id: int) -> str:
-    async with bot.db.execute(
-        "SELECT role FROM clan_members WHERE user_id = ? AND clan_id = ?", (user_id, clan_id)
-    ) as c:
-        row = await c.fetchone()
-    return row[0] if row else "none"
-
-async def log_clan(clan_id: int, action: str, details: str = ""):
-    async with db_transaction():
-        await bot.db.execute(
-            "INSERT INTO clan_log (clan_id, action, details) VALUES (?, ?, ?)",
-            (clan_id, action, details),
-        )
-
-
-async def get_clan_level_info(clan_id: int) -> tuple[int, int, float]:
-    async with bot.db.execute(
-        "SELECT level, xp, bonus FROM clans WHERE id = ?", (clan_id,)
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return 1, 0, 0.0
-    level, xp, bonus = row
-    return (level or 1), (xp or 0), (bonus or 0.0)
-
-
-async def add_clan_xp(clan_id: int, amount: int) -> tuple[int, int, float]:
-    """Добавляет XP клану, повышает уровень и пересчитывает бонус к доходу."""
-    if amount <= 0:
-        return await get_clan_level_info(clan_id)
-
-    old_level = 1
-    new_level = 1
-    async with db_transaction():
-        async with bot.db.execute(
-            "SELECT level, xp FROM clans WHERE id = ?", (clan_id,)
-        ) as c:
-            row = await c.fetchone()
-        if not row:
-            raise ValueError("Клан не найден.")
-
-        old_level = row[0] or 1
-        level = old_level
-        xp = (row[1] or 0) + amount
-
-        while level < CLAN_MAX_LEVEL and xp >= CLAN_XP_PER_LEVEL * level:
-            xp -= CLAN_XP_PER_LEVEL * level
-            level += 1
-
-        if level >= CLAN_MAX_LEVEL:
-            xp = min(xp, CLAN_XP_PER_LEVEL * level)
-
-        bonus = min(0.20, (level - 1) * 0.01)
-        new_level = level
-        await bot.db.execute(
-            "UPDATE clans SET level = ?, xp = ?, bonus = ? WHERE id = ?",
-            (level, xp, bonus, clan_id),
-        )
-
-    if new_level > old_level:
-        await log_clan(clan_id, "level_up", f"{old_level} → {new_level}")
-    return await get_clan_level_info(clan_id)
-
-
-async def get_active_clan_war(clan_id: int):
-    async with bot.db.execute("""
-        SELECT id, clan1_id, clan2_id, start_time,
-               clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
-               clan1_damage, clan2_damage
-        FROM clan_wars
-        WHERE status = 'active' AND (clan1_id = ? OR clan2_id = ?)
-        ORDER BY id DESC
-        LIMIT 1
-    """, (clan_id, clan_id)) as c:
-        return await c.fetchone()
 
 
 async def start_clan_war(clan_id: int, enemy_id: int) -> int:

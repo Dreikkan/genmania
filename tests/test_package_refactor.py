@@ -10,6 +10,7 @@ from gen_mania.config import (
 )
 from gen_mania.db.transaction import TransactionRuntime
 from gen_mania.metrics import METRICS, MetricsRegistry
+from gen_mania.repositories.clans import ClanRuntime
 from gen_mania.repositories.inventory import InventoryRuntime
 from gen_mania.repositories.market import MarketRuntime
 from gen_mania.repositories.players import PlayerRuntime
@@ -51,6 +52,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.PLAYER_RUNTIME, PlayerRuntime)
     assert isinstance(m.INVENTORY_RUNTIME, InventoryRuntime)
     assert isinstance(m.MARKET_RUNTIME, MarketRuntime)
+    assert isinstance(m.CLAN_RUNTIME, ClanRuntime)
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
     assert isinstance(m.PVP_RUNTIME, PvpRuntime)
