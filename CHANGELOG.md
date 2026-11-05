@@ -16,8 +16,10 @@
 - P1 security: indirect admin self-actions now flag top exclusion:
   self titles, own clan treasury/create/join/disband, and early
   auction finish while being the current bidder.
+- P1 reliability: global giveaway broadcast is now bounded-parallel
+  (semaphore 5) with per-guild transactional message records.
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + critical ruff profile.
 
-Current test status: **227 passed**, 60 test files.
+Current test status: **228 passed**, 60 test files.
