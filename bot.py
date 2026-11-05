@@ -51,6 +51,7 @@ from gen_mania.repositories.settings import (
     make_settings_layer,
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
+from gen_mania.services.bank import BankRuntime, make_bank_layer
 from gen_mania.services.market import (
     MARKET_MAX_RATIO,  # noqa: F401 - re-export
     MARKET_MIN_RATIO,  # noqa: F401 - re-export
@@ -4181,6 +4182,28 @@ AUCTION_RUNTIME.configure(
     buyout_auction,
     build_auction_history_embed,
 ) = make_auction_layer(AUCTION_RUNTIME)
+
+BANK_RUNTIME = BankRuntime()
+BANK_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    limits_getter=lambda: get_bank_limits,
+    compensation_getter=lambda: grant_item_or_compensation,
+    ltv=BANK_LOAN_LTV,
+    loan_min=BANK_LOAN_MIN,
+    loan_term_days=BANK_LOAN_TERM_DAYS,
+    loan_interest=BANK_LOAN_INTEREST,
+    logger=log,
+)
+(
+    get_deposit,
+    get_loan,
+    loan_total_due,
+    get_collateral_value,
+    take_bank_loan,
+    repay_bank_loan,
+    expire_bank_loans,
+) = make_bank_layer(BANK_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -23850,13 +23873,6 @@ async def get_bank_limits(user_id: int) -> tuple[int, int]:
     return max_deposit, max_loan
 
 
-async def get_deposit(user_id: int):
-    async with bot.db.execute(
-        "SELECT amount, interest_rate, start_time, end_time FROM bank_deposits WHERE user_id = ?",
-        (user_id,)
-    ) as c:
-        return await c.fetchone()
-
 async def calculate_deposit_interest(user_id: int) -> int:
     deposit = await get_deposit(user_id)
     if not deposit:
@@ -24027,175 +24043,6 @@ class BankWithdrawModal(discord.ui.Modal, title="Забрать вклад"):
             )
         except discord.HTTPException:
             pass
-
-async def get_loan(user_id: int):
-    async with bot.db.execute(
-        "SELECT amount, interest_rate, due_time, collateral_item, "
-        "collateral_stars, status FROM bank_loans "
-        "WHERE user_id = ? AND COALESCE(status, 'active') = 'active'",
-        (user_id,),
-    ) as c:
-        return await c.fetchone()
-
-
-def loan_total_due(loan) -> int:
-    if not loan:
-        return 0
-    amount, rate = loan[0], loan[1]
-    return int((amount or 0) * (1 + (rate or 0)))
-
-
-async def get_collateral_value(item_id: str, stars: int) -> int:
-    async with bot.db.execute(
-        "SELECT price FROM items WHERE id = ?", (item_id,)
-    ) as c:
-        row = await c.fetchone()
-    price = (row[0] if row else 0) or 0
-    return int(price * (1 + (stars or 0) * 0.5))
-
-
-async def take_bank_loan(
-    user_id: int, item_id: str, stars: int, amount: int
-) -> tuple[bool, str]:
-    if await get_loan(user_id):
-        return False, "❌ У тебя уже есть активный кредит."
-    collateral_value = await get_collateral_value(item_id, stars)
-    _, loan_cap = await get_bank_limits(user_id)
-    max_loan = min(loan_cap, int(collateral_value * BANK_LOAN_LTV))
-    if max_loan < BANK_LOAN_MIN:
-        return False, "❌ Залог слишком дешёвый для кредита."
-    if amount < BANK_LOAN_MIN or amount > max_loan:
-        return False, f"❌ Сумма кредита: {BANK_LOAN_MIN}–{max_loan}."
-
-    due = datetime.datetime.now() + datetime.timedelta(days=BANK_LOAN_TERM_DAYS)
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT slot FROM inventory WHERE user_id = ? "
-                "AND location = 'profile' AND item_id = ? AND stars = ? "
-                "AND COALESCE(is_locked, 0) = 0 LIMIT 1",
-                (user_id, item_id, stars),
-            ) as c:
-                row = await c.fetchone()
-            if not row:
-                raise ValueError(
-                    "Залоговый предмет не найден на энергостанции "
-                    "или заблокирован."
-                )
-            slot = row[0]
-
-            cur = await bot.db.execute(
-                "DELETE FROM inventory WHERE user_id = ? AND location = 'profile' "
-                "AND slot = ? AND item_id = ? AND stars = ? "
-                "AND COALESCE(is_locked, 0) = 0",
-                (user_id, slot, item_id, stars),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("Залоговый предмет уже перемещён.")
-
-            await bot.db.execute(
-                "INSERT INTO bank_loans "
-                "(user_id, amount, interest_rate, due_time, collateral_item, "
-                "collateral_stars, issued_at, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
-                (
-                    user_id, amount, BANK_LOAN_INTEREST, due.isoformat(),
-                    item_id, stars, datetime.datetime.now().isoformat(),
-                ),
-            )
-            await bot.db.execute(
-                "UPDATE players SET coins = coins + ? WHERE user_id = ?",
-                (amount, user_id),
-            )
-            await bot.db.execute(
-                "INSERT INTO bank_history (user_id, amount, kind, details) "
-                "VALUES (?, ?, 'loan', ?)",
-                (user_id, amount, f"{item_id} {stars}★"),
-            )
-    except ValueError as e:
-        return False, f"❌ {e}"
-
-    return True, (
-        f"✅ Кредит 🪙 **{amount}** выдан под залог "
-        f"**{item_id}** ({stars}★).\n"
-        f"К возврату до {due.strftime('%d.%m %H:%M')}: "
-        f"🪙 {amount + int(amount * BANK_LOAN_INTEREST)}."
-    )
-
-
-async def repay_bank_loan(user_id: int) -> tuple[bool, str]:
-    try:
-        async with db_transaction():
-            loan = await get_loan(user_id)
-            if not loan:
-                raise ValueError("У тебя нет активного кредита.")
-            amount, _rate, _due, item_id, stars, _status = loan
-            total_due = loan_total_due(loan)
-
-            async with bot.db.execute(
-                "SELECT coins FROM players WHERE user_id = ?", (user_id,)
-            ) as c:
-                row = await c.fetchone()
-            coins = (row[0] if row else 0) or 0
-            if coins < total_due:
-                raise ValueError(f"Нужно 🪙 {total_due}, у тебя {coins}.")
-
-            cur = await bot.db.execute(
-                "UPDATE players SET coins = coins - ? "
-                "WHERE user_id = ? AND coins >= ?",
-                (total_due, user_id, total_due),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("Недостаточно монет (баланс изменился).")
-
-            # Залог возвращается на энергостанцию/хранилище или в почту.
-            await grant_item_or_compensation(
-                user_id, item_id, 1, stars or 0
-            )
-
-            cur = await bot.db.execute(
-                "DELETE FROM bank_loans "
-                "WHERE user_id = ? AND COALESCE(status, 'active') = 'active'",
-                (user_id,),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("Кредит уже погашен.")
-            await bot.db.execute(
-                "INSERT INTO bank_history (user_id, amount, kind) "
-                "VALUES (?, ?, 'loan_repay')",
-                (user_id, total_due),
-            )
-    except ValueError as e:
-        return False, f"❌ {e}"
-
-    message = (
-        f"✅ Кредит погашен: 🪙 **{total_due}**. "
-        f"Залог **{item_id}** возвращён на энергостанцию или в почту."
-    )
-    return True, message
-
-
-async def expire_bank_loans():
-    now = datetime.datetime.now().isoformat()
-    async with bot.db.execute(
-        "SELECT user_id, amount, collateral_item, collateral_stars "
-        "FROM bank_loans WHERE COALESCE(status, 'active') = 'active' "
-        "AND due_time < ?",
-        (now,),
-    ) as c:
-        loans = await c.fetchall()
-
-    async with db_transaction():
-        for user_id, amount, item_id, stars in loans:
-            await bot.db.execute(
-                "DELETE FROM bank_loans WHERE user_id = ?", (user_id,)
-            )
-            await bot.db.execute(
-                "INSERT INTO bank_history (user_id, amount, kind, details) "
-                "VALUES (?, ?, 'loan_default', ?)",
-                (user_id, amount, f"{item_id} {stars}★"),
-            )
-
 
 async def build_bank_embed(user_id: int) -> tuple[discord.Embed, bool, bool]:
     deposit = await get_deposit(user_id)
