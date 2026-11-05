@@ -3630,9 +3630,10 @@ class CastleBot(commands.Bot):
                     players = await c.fetchall()
 
                 now = datetime.datetime.now()
+                rate_map = await get_tax_rate_map()
                 for uid, _coins, _last_tax in players:
                     try:
-                        rate = await get_tax_rate_for_user(uid)
+                        rate = rate_map.get(uid, DEFAULT_TAX_RATE)
                         async with db_transaction():
                             async with self.db.execute(
                                 "SELECT coins, last_tax_time FROM players "
@@ -3994,6 +3995,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
 
 _settings_cache: dict[int, tuple[float, dict]] = {}
 _SETTINGS_CACHE_TTL = 30.0
+_tax_rate_cache: dict[int, tuple[float, float]] = {}
+_TAX_RATE_CACHE_TTL = 600.0
 
 # Единый writer-lock и владелец managed-транзакции.
 # Владелец сравнивается с asyncio.current_task(), а не с ContextVar:
@@ -4089,6 +4092,11 @@ async def get_tax_rate_for_user(user_id: int) -> float:
     Профиль игрока глобальный, поэтому нельзя брать настройку одной
     случайной гильдии: иначе можно укрыться в гильдии с нулевым налогом.
     """
+    now_ts = datetime.datetime.now().timestamp()
+    cached = _tax_rate_cache.get(user_id)
+    if cached and (now_ts - cached[0]) < _TAX_RATE_CACHE_TTL:
+        return cached[1]
+
     rates = []
     for guild in getattr(bot, "guilds", []) or []:
         try:
@@ -4113,8 +4121,46 @@ async def get_tax_rate_for_user(user_id: int) -> float:
         if rate is not None:
             rates.append(float(rate))
     if not rates:
-        return DEFAULT_TAX_RATE
-    return max(0.0, min(1.0, max(rates)))
+        rate = DEFAULT_TAX_RATE
+    else:
+        rate = max(0.0, min(1.0, max(rates)))
+    _tax_rate_cache[user_id] = (now_ts, rate)
+    return rate
+
+
+async def get_tax_rate_map() -> dict[int, float]:
+    """Ставки налогов по всем участникам гильдий за один проход.
+
+    tax_collector не должен делать отдельный обход гильдий на каждого
+    игрока: один проход по guild.members строит максимум по гильдиям.
+    """
+    rates: dict[int, float] = {}
+    for guild in getattr(bot, "guilds", []) or []:
+        try:
+            settings = await get_settings(guild.id)
+            rate = float(settings.get("tax_rate", DEFAULT_TAX_RATE) or 0.0)
+            rate = max(0.0, min(1.0, rate))
+            for member in getattr(guild, "members", ()) or ():
+                uid = getattr(member, "id", None)
+                if uid is None:
+                    continue
+                current = rates.get(uid)
+                if current is None or rate > current:
+                    rates[uid] = rate
+        except (
+            aiosqlite.Error,
+            AttributeError,
+            TypeError,
+            ValueError,
+            IndexError,
+        ) as exc:
+            log.debug(
+                "TAX_MAP: пропуск гильдии %s: %s",
+                getattr(guild, "id", None),
+                exc,
+            )
+            continue
+    return rates
 
 
 def _role_has_administrator(role) -> bool:
@@ -4703,6 +4749,8 @@ async def save_setting(guild_id: int, key: str, value, actor_id: int | None = No
     )
     await commit_if_needed()
     _settings_cache.pop(guild_id, None)
+    if key == "tax_rate":
+        _tax_rate_cache.clear()
 
     actor_id = actor_id or _CURRENT_ACTOR_ID.get()
     if actor_id:
@@ -5306,6 +5354,55 @@ async def get_combat_power(user_id: int) -> int:
     pet_bonus = await get_pet_bonus(user_id, "combat_power")
     title_bonus = await get_title_bonus(user_id, "combat_power")
     return int(power * (1 + pet_bonus + title_bonus))
+
+
+async def get_combat_power_many(user_ids: list[int]) -> dict[int, int]:
+    """Батч-расчёт мощи: 2 запроса на чанк вместо 4 запросов на игрока."""
+    ids = list(dict.fromkeys(int(uid) for uid in user_ids if uid is not None))
+    if not ids:
+        return {}
+
+    result = {uid: 0 for uid in ids}
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        placeholders = ",".join("?" for _ in chunk)
+        async with bot.db.execute(
+            f"SELECT inv.user_id, "
+            f"SUM(i.price * (1 + inv.stars * 0.5)) AS power "
+            f"FROM inventory inv JOIN items i ON inv.item_id = i.id "
+            f"WHERE inv.user_id IN ({placeholders}) "
+            f"AND inv.location = 'profile' "
+            f"GROUP BY inv.user_id",
+            tuple(chunk),
+        ) as c:
+            base_power = {
+                uid: (power or 0) for uid, power in await c.fetchall()
+            }
+
+        async with bot.db.execute(
+            f"SELECT p.user_id, p.active_pet, p.title, up.level "
+            f"FROM players p "
+            f"LEFT JOIN user_pets_v2 up ON up.user_id = p.user_id "
+            f"AND up.pet_id = p.active_pet "
+            f"WHERE p.user_id IN ({placeholders})",
+            tuple(chunk),
+        ) as c:
+            meta = await c.fetchall()
+
+        bonuses = {
+            uid: (
+                pet_effect_bonus(active_pet, level or 0, "combat_power"),
+                title_effect_bonus(title, "combat_power"),
+            )
+            for uid, active_pet, title, level in meta
+        }
+        for uid in chunk:
+            pet_bonus, title_bonus = bonuses.get(uid, (0.0, 0.0))
+            result[uid] = int(
+                base_power.get(uid, 0) * (1 + pet_bonus + title_bonus)
+            )
+    return result
+
 
 async def get_clan(user_id: int):
     async with bot.db.execute(
@@ -6828,20 +6925,27 @@ async def get_active_pet(user_id: int):
     return pet_id, r[0]
 
 
-async def get_pet_bonus(user_id: int, effect_type: str) -> float:
-    """Суммарный бонус от активного питомца для указанного эффекта."""
-    pet = await get_active_pet(user_id)
-    if not pet:
-        return 0.0
-    pet_id, level = pet
-    ptype = PET_TYPES.get(pet_id)
+def pet_effect_bonus(
+    pet_id: str | None, level: int, effect_type: str
+) -> float:
+    """Бонус питомца по типу эффекта без обращения к БД."""
+    ptype = PET_TYPES.get(pet_id or "")
     if not ptype:
         return 0.0
     per_level = 0.0
     if ptype.get("effect") == effect_type:
         per_level += ptype.get("per_level", 0.0)
     per_level += ptype.get("extra_effects", {}).get(effect_type, 0.0)
-    return per_level * level
+    return per_level * max(0, int(level or 0))
+
+
+async def get_pet_bonus(user_id: int, effect_type: str) -> float:
+    """Суммарный бонус от активного питомца для указанного эффекта."""
+    pet = await get_active_pet(user_id)
+    if not pet:
+        return 0.0
+    pet_id, level = pet
+    return pet_effect_bonus(pet_id, level, effect_type)
 
 async def feed_active_pet(user_id: int) -> tuple[bool, str, int, str]:
     """Кормит активного питомца с повторной проверкой внутри транзакции."""
@@ -7017,9 +7121,11 @@ async def get_top_players(
             (*params, candidate_limit),
         ) as c:
             raw_rows = await c.fetchall()
+        powers = await get_combat_power_many(
+            [user_id for user_id, _raw_power in raw_rows]
+        )
         scored = [
-            (user_id, await get_combat_power(user_id))
-            for user_id, _raw_power in raw_rows
+            (user_id, powers.get(user_id, 0)) for user_id, _raw in raw_rows
         ]
         scored.sort(key=lambda row: row[1], reverse=True)
         return scored[:limit]
@@ -7309,6 +7415,32 @@ async def build_top_embed(
         embed.description = "Пока нет данных."
         return embed
 
+    user_cache: dict[int, object] = {}
+    if top_type != "clans":
+        missing = []
+        for uid, _value in rows:
+            user = bot.get_user(uid)
+            if user is not None:
+                user_cache[uid] = user
+            else:
+                missing.append(uid)
+        if missing:
+            semaphore = asyncio.Semaphore(5)
+
+            async def fetch_one(uid: int):
+                async with semaphore:
+                    try:
+                        return uid, await bot.fetch_user(uid)
+                    except (discord.NotFound, discord.HTTPException):
+                        return uid, None
+
+            fetched = await asyncio.gather(
+                *(fetch_one(uid) for uid in missing)
+            )
+            for uid, user in fetched:
+                if user is not None:
+                    user_cache[uid] = user
+
     lines = []
     for i, row in enumerate(rows, start=1):
         if top_type == "clans":
@@ -7316,16 +7448,7 @@ async def build_top_embed(
             lines.append(f"**{i}.** 🏰 {name} — ⚔️ {power}")
         else:
             uid, value = row
-            # Пытаемся получить имя пользователя
-            user = bot.get_user(uid)
-            if user is None:
-                try:
-                    user = await bot.fetch_user(uid)
-                except discord.NotFound:
-                    user = None
-                except discord.HTTPException:
-                    user = None
-
+            user = user_cache.get(uid)
             display = f"**{user.name}**" if user else f"`{uid}`"
             lines.append(f"**{i}.** {display} — {value}")
 
@@ -7835,29 +7958,26 @@ async def get_user_pets(user_id: int) -> list:
     ) as c:
         return await c.fetchall()
 
+def title_effect_bonus(title_name: str | None, effect_type: str) -> float:
+    """Бонус титула по названию без обращения к БД."""
+    if not title_name:
+        return 0.0
+    for title_id, (name, _req) in TITLES.items():
+        if name == title_name:
+            btype, bval = TITLE_BONUSES.get(title_id, (None, 0.0))
+            return bval if btype == effect_type else 0.0
+    return 0.0
+
+
 async def get_title_bonus(user_id: int, effect_type: str) -> float:
     """Бонус от активного титула игрока для указанного эффекта."""
     async with bot.db.execute(
         "SELECT title FROM players WHERE user_id = ?", (user_id,)
     ) as c:
         row = await c.fetchone()
-    if not row or not row[0]:
+    if not row:
         return 0.0
-    title_name = row[0]
-
-    # Находим id титула по названию
-    title_id = None
-    for tid, (name, _req) in TITLES.items():
-        if name == title_name:
-            title_id = tid
-            break
-    if not title_id:
-        return 0.0
-
-    btype, bval = TITLE_BONUSES.get(title_id, (None, 0.0))
-    if btype == effect_type:
-        return bval
-    return 0.0
+    return title_effect_bonus(row[0], effect_type)
 
 async def get_total_bonus_line(user_id: int) -> str:
     """Возвращает эффективные множители дохода отдельно для монет и гемов."""
@@ -31359,7 +31479,23 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
+    _tax_rate_cache.clear()
     await sync_guild_access(guild, reason="join")
+
+
+@bot.event
+async def on_guild_remove(guild):
+    _tax_rate_cache.clear()
+
+
+@bot.event
+async def on_member_join(member):
+    _tax_rate_cache.pop(member.id, None)
+
+
+@bot.event
+async def on_member_remove(member):
+    _tax_rate_cache.pop(member.id, None)
 
 
 @bot.event
