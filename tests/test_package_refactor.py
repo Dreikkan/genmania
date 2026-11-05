@@ -27,6 +27,7 @@ from gen_mania.services.market import (
     SHOP_MARKET_MIN_RATIO,
     market_price_bounds,
 )
+from gen_mania.services.prestige import PrestigeRuntime
 from gen_mania.services.progress import ProgressRuntime
 from gen_mania.services.pvp import PvpRuntime
 from gen_mania.services.raid_combat import RaidCombatRuntime
@@ -65,6 +66,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.LEADERBOARD_RUNTIME, LeaderboardRuntime)
     assert isinstance(m.RAID_COMBAT_RUNTIME, RaidCombatRuntime)
     assert isinstance(m.TOP_EXCLUSION_RUNTIME, TopExclusionRuntime)
+    assert isinstance(m.PRESTIGE_RUNTIME, PrestigeRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
