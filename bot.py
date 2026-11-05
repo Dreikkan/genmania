@@ -4171,6 +4171,10 @@ INVENTORY_RUNTIME.configure(
     db_getter=lambda: bot.db,
     transaction_getter=lambda: db_transaction,
     commit_getter=lambda: commit_if_needed,
+    grid_size_getter=lambda: get_grid_size,
+    storage_size_getter=lambda: get_storage_size,
+    place_items_getter=lambda: place_items,
+    temp_storage_size_getter=lambda: TEMP_STORAGE_SIZE,
     logger=log,
 )
 (
@@ -4179,6 +4183,9 @@ INVENTORY_RUNTIME.configure(
     sort_inventory_by,
     get_inventory_rows,
     toggle_item_lock,
+    place_items,
+    _place_items_unlocked,
+    grant_item_or_compensation,
 ) = make_inventory_layer(INVENTORY_RUNTIME)
 
 MARKET_RUNTIME = MarketRuntime()
@@ -5807,105 +5814,6 @@ async def get_menu_welcome_notification(user_id: int, guild_id: int = None) -> s
         f"**{income_str}**\n\n"
         f"*(Доход уже добавлен в кошелёк, он отображён в меню ниже).*"
     )
-
-
-async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = True, stars: int = 0) -> tuple[int, int, int]:
-    async with db_transaction():
-        return await _place_items_unlocked(
-            user_id, item_id, quantity, commit=commit, stars=stars
-        )
-
-
-async def _place_items_unlocked(user_id: int, item_id: str, quantity: int, commit: bool = True, stars: int = 0) -> tuple[int, int, int]:
-    grid_size = await get_grid_size(user_id)
-    storage_size = await get_storage_size(user_id)
-    temp_size = TEMP_STORAGE_SIZE
-
-    async with bot.db.execute(
-        "SELECT slot FROM inventory WHERE user_id = ? AND location = 'profile'", (user_id,)
-    ) as c:
-        used_profile = {r[0] for r in await c.fetchall()}
-    free_profile = [s for s in range(grid_size) if s not in used_profile]
-
-    async with bot.db.execute(
-        "SELECT slot FROM inventory WHERE user_id = ? AND location = 'storage'", (user_id,)
-    ) as c:
-        used_storage = {r[0] for r in await c.fetchall()}
-    free_storage = [s for s in range(storage_size) if s not in used_storage]
-
-    async with bot.db.execute(
-        "SELECT slot FROM inventory WHERE user_id = ? AND location = 'temp'", (user_id,)
-    ) as c:
-        used_temp = {r[0] for r in await c.fetchall()}
-    free_temp = [s for s in range(temp_size) if s not in used_temp]
-
-    total_free = len(free_profile) + len(free_storage) + len(free_temp)
-    if total_free < quantity:
-        raise ValueError(
-            f"Не хватает места: свободно {total_free} "
-            f"(энергостанция + хранилище + временное), нужно {quantity}."
-        )
-
-    to_profile = min(quantity, len(free_profile))
-    remaining = quantity - to_profile
-    to_storage = min(remaining, len(free_storage))
-    to_temp = remaining - to_storage
-
-    for i in range(to_profile):
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'profile', ?)",
-            (user_id, free_profile[i], item_id, stars)
-        )
-    for i in range(to_storage):
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', ?)",
-            (user_id, free_storage[i], item_id, stars)
-        )
-    for i in range(to_temp):
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'temp', ?)",
-            (user_id, free_temp[i], item_id, stars)
-        )
-    await bot.db.execute(
-        "INSERT OR IGNORE INTO player_collection (user_id, item_id) VALUES (?, ?)",
-        (user_id, item_id),
-    )
-    try:
-        await bot.db.execute(
-            "INSERT OR IGNORE INTO player_star_collection "
-            "(user_id, item_id, stars) VALUES (?, ?, ?)",
-            (user_id, item_id, stars),
-        )
-    except aiosqlite.OperationalError:
-        # Старые/упрощённые схемы могут не иметь таблицы звёздной коллекции.
-        pass
-    if commit:
-        await commit_if_needed()
-    return to_profile, to_storage, to_temp
-
-
-async def grant_item_or_compensation(user_id: int, item_id: str, quantity: int = 1, stars: int = 0) -> tuple[str, int]:
-    """Выдаёт предмет. Если места нет — отправляет его в почту.
-
-    Второй элемент возврата оставлен для совместимости и всегда 0:
-    полная денежная компенсация больше не начисляется.
-    """
-    async with bot.db.execute("SELECT name FROM items WHERE id = ?", (item_id,)) as c:
-        row = await c.fetchone()
-    name = row[0] if row else item_id
-
-    try:
-        await place_items(user_id, item_id, quantity, commit=False, stars=stars)
-        await commit_if_needed()
-        return name, 0
-    except ValueError:
-        await bot.db.execute(
-            "INSERT INTO mailbox (user_id, item_id, quantity, stars, reason) "
-            "VALUES (?, ?, ?, ?, 'no_space')",
-            (user_id, item_id, quantity, stars),
-        )
-        await commit_if_needed()
-        return f"{name} (нет места — отправлен в почту)", 0
 
 
 async def log_admin_action(
