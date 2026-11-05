@@ -59,10 +59,12 @@ Dev-стенд использует отдельный токен и `DATA_DIR=d
 ```powershell
 pip install -r requirements-dev.txt
 python -m pytest -q
+python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=50
 ruff check --select F821,F811,F401 bot.py tests
 ```
 
-Текущий статус: **228 passed**, 60 test files.
+Текущий статус: **231 passed**, 60 test files.  
+Coverage `bot.py`: **~51%**, минимальный порог — **50%**.
 
 ## CI
 

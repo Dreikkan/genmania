@@ -1,0 +1,12 @@
+[run]
+source = .
+omit =
+    tests/*
+    dev/*
+    __pycache__/*
+    .venv/*
+    venv/*
+
+[report]
+include = bot.py
+skip_empty = True
