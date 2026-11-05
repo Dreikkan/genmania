@@ -26,6 +26,7 @@ from gen_mania.services.market import (
     SHOP_MARKET_MIN_RATIO,
     market_price_bounds,
 )
+from gen_mania.services.progress import ProgressRuntime
 from gen_mania.services.pvp import PvpRuntime
 from gen_mania.services.taxes import TaxRuntime
 
@@ -57,6 +58,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.CLAN_RUNTIME, ClanRuntime)
     assert isinstance(m.RAID_RUNTIME, RaidRuntime)
     assert isinstance(m.GIVEAWAY_RUNTIME, GiveawayRuntime)
+    assert isinstance(m.PROGRESS_RUNTIME, ProgressRuntime)
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
     assert isinstance(m.PVP_RUNTIME, PvpRuntime)
