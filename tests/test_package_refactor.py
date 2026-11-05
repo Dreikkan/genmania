@@ -23,6 +23,7 @@ from gen_mania.services.market import (
     SHOP_MARKET_MIN_RATIO,
     market_price_bounds,
 )
+from gen_mania.services.pvp import PvpRuntime
 from gen_mania.services.taxes import TaxRuntime
 
 BOT_PATH = pathlib.Path(__file__).resolve().parent.parent / "bot.py"
@@ -52,6 +53,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.MARKET_RUNTIME, MarketRuntime)
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
+    assert isinstance(m.PVP_RUNTIME, PvpRuntime)
     assert m.market_price_bounds is market_price_bounds
     assert m.SHOP_MARKET_MIN_RATIO == SHOP_MARKET_MIN_RATIO
     assert m._settings_cache is m.SETTINGS_RUNTIME.settings_cache
