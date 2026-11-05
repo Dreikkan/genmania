@@ -10,6 +10,7 @@ from gen_mania.config import (
 )
 from gen_mania.db.transaction import TransactionRuntime
 from gen_mania.metrics import METRICS, MetricsRegistry
+from gen_mania.repositories.inventory import InventoryRuntime
 from gen_mania.repositories.players import PlayerRuntime
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS as REPOSITORY_SETTING_COLUMNS,
@@ -40,6 +41,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.SETTINGS_RUNTIME, SettingsRuntime)
     assert isinstance(m.TAX_RUNTIME, TaxRuntime)
     assert isinstance(m.PLAYER_RUNTIME, PlayerRuntime)
+    assert isinstance(m.INVENTORY_RUNTIME, InventoryRuntime)
     assert m._settings_cache is m.SETTINGS_RUNTIME.settings_cache
     assert m._tax_rate_cache is m.SETTINGS_RUNTIME.tax_cache
     assert m._tax_rate_cache is m.TAX_RUNTIME.tax_cache

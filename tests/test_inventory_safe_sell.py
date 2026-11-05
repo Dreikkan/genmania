@@ -273,6 +273,41 @@ def test_storage_embed_respects_filter():
     asyncio.run(run())
 
 
+def test_inventory_sorting_renumbers_slots():
+    async def run():
+        db = await _init()
+        try:
+            await _insert(db, 0, "basic_gen", 0)
+            await _insert(db, 1, "gold_gen", 1)
+            await _insert(db, 2, "copper_gen", 0)
+            await db.commit()
+
+            for sort_type in (
+                "price_desc",
+                "price_asc",
+                "stars_desc",
+                "stars_asc",
+                "income_desc",
+                "rarity_desc",
+                "unknown",
+            ):
+                await m.sort_inventory_by(1, "storage", sort_type)
+                rows = await m.get_inventory_rows(1, "storage")
+                assert [row[0] for row in rows] == [0, 1, 2]
+
+            await m.sort_inventory(1, "storage")
+            rows = await m.get_inventory_rows(1, "storage")
+            assert [row[0] for row in rows] == [0, 1, 2]
+            assert [row[5] for row in rows] == sorted(
+                (row[5] for row in rows), reverse=True
+            )
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_profile_filters():
     rows = [
         (0, "a", "A", "🅰️", 0, 10, "common", 0),
