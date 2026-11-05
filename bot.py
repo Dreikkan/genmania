@@ -19,6 +19,9 @@ from pathlib import Path
 import asyncio
 import contextvars
 from contextlib import asynccontextmanager
+from collections import deque
+import math
+import time
 
 
 log = logging.getLogger("gen_mania")
@@ -479,6 +482,93 @@ SCHEMA_VERSION = 17
 
 # Content migrations: увеличивать при изменении items/achievements/shop.
 CONTENT_VERSION = 6
+
+# --- МЕТРИКИ / HEALTH ---
+SLOW_DB_TX_MS = 100.0
+HEALTH_WRITE_INTERVAL_SECONDS = 60
+UTC = datetime.timezone.utc  # noqa: UP017 - совместимость с Python 3.10
+
+
+class MetricsRegistry:
+    """Лёгкие in-process метрики без внешних зависимостей."""
+
+    def __init__(self):
+        self.started_at = time.time()
+        self.commands_total = 0
+        self.command_errors = 0
+        self.command_durations: deque[float] = deque(maxlen=500)
+        self.commands_by_name: dict[str, int] = {}
+        self.command_errors_by_type: dict[str, int] = {}
+        self.db_tx_total = 0
+        self.db_tx_errors = 0
+        self.db_tx_durations: deque[float] = deque(maxlen=500)
+        self.slow_db_tx = 0
+        self.background_errors = 0
+        self.background_errors_by_task: dict[str, int] = {}
+
+    @staticmethod
+    def _percentile(values, percentile: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        index = round((percentile / 100.0) * (len(ordered) - 1))
+        index = max(0, min(len(ordered) - 1, index))
+        return round(ordered[index], 2)
+
+    def record_command(self, name: str, duration_ms: float) -> None:
+        self.commands_total += 1
+        self.command_durations.append(max(0.0, float(duration_ms)))
+        self.commands_by_name[name] = self.commands_by_name.get(name, 0) + 1
+
+    def record_command_error(self, error_name: str) -> None:
+        self.commands_total += 1
+        self.command_errors += 1
+        self.command_errors_by_type[error_name] = (
+            self.command_errors_by_type.get(error_name, 0) + 1
+        )
+
+    def record_db_tx(self, duration_ms: float, ok: bool = True) -> None:
+        duration = max(0.0, float(duration_ms))
+        self.db_tx_total += 1
+        self.db_tx_durations.append(duration)
+        if not ok:
+            self.db_tx_errors += 1
+        if duration >= SLOW_DB_TX_MS:
+            self.slow_db_tx += 1
+
+    def record_background_error(self, task_name: str) -> None:
+        self.background_errors += 1
+        self.background_errors_by_task[task_name] = (
+            self.background_errors_by_task.get(task_name, 0) + 1
+        )
+
+    def snapshot(self) -> dict:
+        return {
+            "started_at": datetime.datetime.fromtimestamp(
+                self.started_at, UTC
+            ).isoformat(),
+            "uptime_seconds": int(time.time() - self.started_at),
+            "commands_total": self.commands_total,
+            "command_errors": self.command_errors,
+            "command_avg_ms": round(
+                sum(self.command_durations) / len(self.command_durations), 2
+            ) if self.command_durations else 0.0,
+            "command_p95_ms": self._percentile(self.command_durations, 95),
+            "commands_by_name": dict(self.commands_by_name),
+            "command_errors_by_type": dict(self.command_errors_by_type),
+            "db_tx_total": self.db_tx_total,
+            "db_tx_errors": self.db_tx_errors,
+            "db_tx_avg_ms": round(
+                sum(self.db_tx_durations) / len(self.db_tx_durations), 2
+            ) if self.db_tx_durations else 0.0,
+            "db_tx_p95_ms": self._percentile(self.db_tx_durations, 95),
+            "slow_db_tx": self.slow_db_tx,
+            "background_errors": self.background_errors,
+            "background_errors_by_task": dict(self.background_errors_by_task),
+        }
+
+
+METRICS = MetricsRegistry()
 
 TOP_EXCLUSION_NOTICE = (
     "🚫 Ты исключён из топов: ресурс выдан себе через админ-панель. "
@@ -1677,19 +1767,85 @@ class CastleBot(commands.Bot):
 
         # 4. Запускаем фоновые задачи
         self.background_tasks = [
-            asyncio.create_task(self.auction_closer()),
-            asyncio.create_task(self.market_updater()),
-            asyncio.create_task(self.market_order_closer()),
-            asyncio.create_task(self.status_expirer()),
-            asyncio.create_task(self.giveaway_closer()),
-            asyncio.create_task(self.bank_loan_closer()),
-            asyncio.create_task(self.tax_collector()),
-            asyncio.create_task(self.autocollector_task()),
-            asyncio.create_task(self.notification_task()),
-            asyncio.create_task(self.war_closer()),
-            asyncio.create_task(self.backup_task()),
-            asyncio.create_task(self.retention_task()),
+            self._spawn_background("auction_closer", self.auction_closer()),
+            self._spawn_background("market_updater", self.market_updater()),
+            self._spawn_background("market_order_closer", self.market_order_closer()),
+            self._spawn_background("status_expirer", self.status_expirer()),
+            self._spawn_background("giveaway_closer", self.giveaway_closer()),
+            self._spawn_background("bank_loan_closer", self.bank_loan_closer()),
+            self._spawn_background("tax_collector", self.tax_collector()),
+            self._spawn_background("autocollector_task", self.autocollector_task()),
+            self._spawn_background("notification_task", self.notification_task()),
+            self._spawn_background("war_closer", self.war_closer()),
+            self._spawn_background("backup_task", self.backup_task()),
+            self._spawn_background("retention_task", self.retention_task()),
+            self._spawn_background("health_writer", self.health_writer()),
         ]
+
+    def _spawn_background(self, name: str, coro) -> asyncio.Task:
+        """Запускает фоновую задачу с именем и учётом ошибок."""
+
+        async def runner():
+            try:
+                await coro
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                METRICS.record_background_error(name)
+                log.exception("BACKGROUND_TASK: %s", name)
+
+        return asyncio.create_task(runner(), name=f"gen_mania:{name}")
+
+    async def build_health_snapshot(self, deep: bool = False) -> dict:
+        """Снимок состояния бота для /health и data/health.json."""
+        snapshot = METRICS.snapshot()
+        snapshot["guilds"] = len(getattr(self, "guilds", []) or [])
+        latency = getattr(self, "latency", None)
+        snapshot["gateway_latency_ms"] = (
+            round(latency * 1000, 1)
+            if latency is not None and not math.isnan(latency)
+            else None
+        )
+        snapshot["db_path"] = self.db_path
+        db_size = 0
+        if self.db_path:
+            for suffix in ("", "-wal", "-shm"):
+                path = Path(f"{self.db_path}{suffix}")
+                if path.exists():
+                    db_size += path.stat().st_size
+        snapshot["db_size_bytes"] = db_size
+        snapshot["tasks"] = [
+            {"name": task.get_name(), "done": task.done()}
+            for task in getattr(self, "background_tasks", [])
+        ]
+        snapshot["tasks_alive"] = sum(
+            1 for task in snapshot["tasks"] if not task["done"]
+        )
+        if deep and self.db is not None:
+            try:
+                async with self.db.execute("PRAGMA quick_check") as c:
+                    row = await c.fetchone()
+                snapshot["db_quick_check"] = row[0] if row else "unknown"
+            except (aiosqlite.Error, OSError) as exc:
+                snapshot["db_quick_check"] = f"error: {exc}"
+        return snapshot
+
+    async def health_writer(self):
+        """Пишет health.json для внешнего мониторинга."""
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                snapshot = await self.build_health_snapshot()
+                target = self.data_dir / "health.json"
+                temp = target.with_suffix(".json.tmp")
+                temp.write_text(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(temp, target)
+            except Exception:
+                log.exception("HEALTH: ошибка записи health.json")
+            await asyncio.sleep(HEALTH_WRITE_INTERVAL_SECONDS)
 
     def _rotate_backups(self):
         if not self.backup_dir:
@@ -3975,6 +4131,7 @@ bot = CastleBot()
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: Exception):
+    METRICS.record_command_error(error.__class__.__name__)
     log.exception("Ошибка slash-команды", exc_info=error)
     try:
         if interaction.response.is_done():
@@ -3987,6 +4144,20 @@ async def on_app_command_error(interaction: discord.Interaction, error: Exceptio
             )
     except discord.HTTPException:
         pass
+
+
+@bot.event
+async def on_app_command_completion(interaction, command):
+    try:
+        elapsed_ms = (
+            datetime.datetime.now(UTC)
+            - interaction.created_at
+        ).total_seconds() * 1000
+    except (TypeError, ValueError, AttributeError):
+        elapsed_ms = 0.0
+    METRICS.record_command(
+        getattr(command, "qualified_name", "unknown"), elapsed_ms
+    )
 
 
 
@@ -4983,6 +5154,7 @@ async def db_transaction():
         return
 
     async with _DB_WRITE_LOCK:
+        tx_started = time.perf_counter()
         # После исправления get_settings() это не должно срабатывать.
         # Оставляем защиту от старых незакоммиченных DML.
         if bot.db.in_transaction:
@@ -5009,14 +5181,20 @@ async def db_transaction():
                 )
                 await bot.db.commit()
         _DB_TX_OWNER = current
+        tx_ok = True
         try:
             yield
             await bot.db.commit()
         except BaseException:
+            tx_ok = False
             await bot.db.rollback()
             raise
         finally:
             _DB_TX_OWNER = None
+            elapsed_ms = (time.perf_counter() - tx_started) * 1000
+            METRICS.record_db_tx(elapsed_ms, ok=tx_ok)
+            if elapsed_ms >= SLOW_DB_TX_MS:
+                log.warning("SLOW_DB_TX: %.1f ms", elapsed_ms)
 
 # ============================================================
 #  🗓️ СЕЗОНЫ / BATTLE PASS
@@ -31507,6 +31685,61 @@ async def admin_panel(interaction: discord.Interaction):
     )
     view = AdminPanelView(interaction.user.id)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+@bot.tree.command(name="health", description="Состояние бота и метрики")
+async def health_cmd(interaction: discord.Interaction):
+    if not await is_global_owner(interaction):
+        return await interaction.response.send_message(
+            "❌ Команда доступна только владельцу бота.",
+            ephemeral=True,
+        )
+
+    await interaction.response.defer(ephemeral=True)
+    snapshot = await bot.build_health_snapshot(deep=True)
+    latency = snapshot.get("gateway_latency_ms")
+    quick_check = snapshot.get("db_quick_check", "—")
+    embed = BotEmbed(
+        title="🩺 Gen Mania — health",
+        description=(
+            f"Uptime: **{snapshot['uptime_seconds']} c**\n"
+            f"Gateway: **{latency if latency is not None else '—'} ms**\n"
+            f"Серверов: **{snapshot['guilds']}**\n"
+            f"БД: **{snapshot['db_size_bytes']} байт**, "
+            f"quick_check: **{quick_check}**"
+        ),
+        color=0x2ecc71,
+    )
+    embed.add_field(
+        name="Команды",
+        value=(
+            f"Всего: **{snapshot['commands_total']}**\n"
+            f"Ошибок: **{snapshot['command_errors']}**\n"
+            f"Avg: **{snapshot['command_avg_ms']} ms** · "
+            f"p95: **{snapshot['command_p95_ms']} ms**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="DB-транзакции",
+        value=(
+            f"Всего: **{snapshot['db_tx_total']}**\n"
+            f"Ошибок: **{snapshot['db_tx_errors']}**\n"
+            f"Avg: **{snapshot['db_tx_avg_ms']} ms** · "
+            f"p95: **{snapshot['db_tx_p95_ms']} ms**\n"
+            f"Slow: **{snapshot['slow_db_tx']}**"
+        ),
+        inline=True,
+    )
+    tasks = snapshot.get("tasks", [])
+    dead = [task["name"] for task in tasks if task["done"]]
+    tasks_value = (
+        f"Живы: **{snapshot.get('tasks_alive', 0)}/{len(tasks)}**"
+    )
+    if dead:
+        tasks_value += "\nЗавершились: " + ", ".join(dead[:5])
+    embed.add_field(name="Фоновые задачи", value=tasks_value, inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ============================================================
