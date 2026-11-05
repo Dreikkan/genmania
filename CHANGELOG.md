@@ -24,8 +24,10 @@
 - Added in-process metrics (commands, DB transactions, background
   errors), slow DB transaction logging, `data/health.json`, and
   owner-only `/health`.
+- Refactor slice 1: extracted `gen_mania.config` and
+  `gen_mania.metrics`; `bot.py` keeps compatibility re-exports.
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
 
-Current test status: **234 passed**, 62 test files.
+Current test status: **235 passed**, 63 test files.

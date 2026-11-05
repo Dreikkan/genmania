@@ -30,4 +30,4 @@ jobs:
         run: python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=50
 
       - name: Ruff critical
-        run: ruff check --select F821,F811,F401 bot.py tests
+        run: ruff check --select F821,F811,F401 bot.py tests gen_mania
