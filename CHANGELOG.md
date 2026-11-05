@@ -46,6 +46,8 @@
   (duel resolution, power tolerance and cooldowns).
 - Refactor slice 10: extracted `gen_mania.repositories.clans`
   (clan reads, capacity, levels and active war lookup).
+- Refactor slice 11: extracted `gen_mania.repositories.raids`
+  (parties, invites, cooldowns and last raid target).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
