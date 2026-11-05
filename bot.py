@@ -43,12 +43,25 @@ from gen_mania.repositories.inventory import (
     InventoryRuntime,
     make_inventory_layer,
 )
+from gen_mania.repositories.market import MarketRuntime, make_market_layer
 from gen_mania.repositories.players import PlayerRuntime, make_player_layer
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS,  # noqa: F401 - re-export
     SettingsRuntime,
     make_settings_layer,
 )
+from gen_mania.services.market import (
+    MARKET_MAX_RATIO,  # noqa: F401 - re-export
+    MARKET_MIN_RATIO,  # noqa: F401 - re-export
+    SHOP_MARKET_MAX_RATIO,
+    SHOP_MARKET_MIN_RATIO,
+    calculate_market_buy_prices,
+    clamp_market_price,
+    market_order_price_bounds,
+    market_price_bounds,  # noqa: F401 - re-export
+    market_sparkline,
+)
+from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 
 
@@ -587,10 +600,6 @@ MARKET_MAX_ACTIVE_ORDERS = 10         # одновременно активны�
 MARKET_MAX_ORDER_QTY = 100            # максимум предметов в одном ордере
 MARKET_MAX_ORDER_VALUE = 10_000_000   # максимум стоимости одного ордера
 MARKET_MAX_DAILY_VOLUME = 50_000_000  # максимум суммы ордеров за сутки
-SHOP_MARKET_MIN_RATIO = 0.80          # биржа для магазинных генераторов: 80–120%
-SHOP_MARKET_MAX_RATIO = 1.20
-MARKET_MIN_RATIO = 0.50               # epic+: 50–200% от базовой цены
-MARKET_MAX_RATIO = 2.00
 MARKET_MAX_STEP = 0.10                # максимум изменения цены за цикл
 STARTER_SHOP_DISCOUNT = 0.50          # скидка новичку на первый генератор
 
@@ -715,58 +724,6 @@ def calculate_sell_price(price: int, stars: int = 0) -> int:
     """Цена прямой продажи с учётом звёзд."""
     multiplier = 1 + STAR_BONUS.get(stars, 0)
     return max(1, int(price * SELL_RATE * multiplier))
-
-
-def calculate_market_buy_prices(
-    price: int, base_price: int, qty: int
-) -> tuple[int, int]:
-    """Средняя цена покупки и новая цена после покупки.
-
-    Покупка пачки не должна идти целиком по старой цене: иначе можно
-    купить 100 предметов, поднять цену до 2× и продать по 70% от неё.
-    """
-    new_price = min(
-        int(base_price * 2) if base_price else int(price * 2),
-        max(1, int(price * (1 + 0.01 * qty))),
-    )
-    avg_price = max(1, int((int(price) + int(new_price)) / 2))
-    return avg_price, new_price
-
-
-def market_price_bounds(item_price: int, buyable: bool) -> tuple[int, int]:
-    """Допустимый коридор биржевой цены.
-
-    Для магазинных генераторов биржа не может уйти дальше ±20% от
-    фиксированной цены магазина. Для epic+ коридор шире — 50–200%.
-    """
-    base = max(1, int(item_price or 1))
-    if buyable:
-        return (
-            max(1, int(base * SHOP_MARKET_MIN_RATIO)),
-            max(1, int(base * SHOP_MARKET_MAX_RATIO)),
-        )
-    return (
-        max(1, int(base * MARKET_MIN_RATIO)),
-        max(1, int(base * MARKET_MAX_RATIO)),
-    )
-
-
-def market_order_price_bounds(item_price: int, buyable: bool) -> tuple[int, int]:
-    """Границы цены в ордере.
-
-    Для магазинных генераторов верхняя граница — цена магазина, чтобы
-    нельзя было скупить товар в магазине и перепродать дороже.
-    """
-    low, high = market_price_bounds(item_price, buyable)
-    if buyable:
-        high = max(low, int(item_price or high))
-    return low, high
-
-
-def clamp_market_price(price, item_price: int, buyable: bool) -> int:
-    low, high = market_price_bounds(item_price, buyable)
-    value = int(price or item_price or 1)
-    return min(high, max(low, value))
 
 
 def is_synthesis_only(item_id: str) -> bool:
@@ -4193,6 +4150,14 @@ INVENTORY_RUNTIME.configure(
     get_inventory_rows,
     toggle_item_lock,
 ) = make_inventory_layer(INVENTORY_RUNTIME)
+
+MARKET_RUNTIME = MarketRuntime()
+MARKET_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    commit_getter=lambda: commit_if_needed,
+    logger=log,
+)
+(record_market_price,) = make_market_layer(MARKET_RUNTIME)
 
 
 def _role_has_administrator(role) -> bool:
@@ -10069,42 +10034,6 @@ async def sell_market_item(user_id: int, item_id: str, qty: int) -> tuple[bool, 
     return True, f"✅ Продано **{name}** ×{qty} за 🪙 {proceeds}."
 
 
-async def record_market_price(
-    item_id: str,
-    price: int,
-    demand: int = 0,
-    supply: int = 0,
-    commit: bool = True,
-):
-    await bot.db.execute(
-        "INSERT INTO market_history (item_id, price, demand, supply) "
-        "VALUES (?, ?, ?, ?)",
-        (item_id, int(price), int(demand), int(supply)),
-    )
-    await bot.db.execute(
-        "DELETE FROM market_history WHERE item_id = ? AND id NOT IN ("
-        "SELECT id FROM market_history WHERE item_id = ? "
-        "ORDER BY id DESC LIMIT 50)",
-        (item_id, item_id),
-    )
-    if commit:
-        await commit_if_needed()
-
-
-def market_sparkline(prices: list[int]) -> str:
-    if not prices:
-        return "—"
-    chars = "▁▂▃▄▅▆▇█"
-    low = min(prices)
-    high = max(prices)
-    if high == low:
-        return chars[3] * len(prices)
-    return "".join(
-        chars[min(7, max(0, int((price - low) / (high - low) * 7)))]
-        for price in prices
-    )
-
-
 async def build_market_history_embed(item_id: str) -> discord.Embed:
     async with bot.db.execute(
         "SELECT i.name, i.emoji, mp.base_price, mp.current_price, "
@@ -10260,15 +10189,6 @@ async def build_market_embed(
         )
     embed.set_footer(text="Обновление цен — раз в 6 часов")
     return await fix_embed_emojis(embed), total_pages
-
-
-def _parse_market_datetime(value):
-    if not value:
-        return None
-    try:
-        return datetime.datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
 
 
 async def match_market_orders(item_id: str | None = None) -> list[dict]:
