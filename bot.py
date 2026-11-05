@@ -311,8 +311,97 @@ GIVEAWAY_REWARDS = {
 SEASON_LEVELS = 30
 SEASON_PREMIUM_COST_GEMS = 250
 SEASON_XP_BASE = 100                  # XP с 0 на 1 уровень
-SEASON_XP_STEP = 15                   # прибавка к следующему уровню
+SEASON_XP_STEP = 100                  # +100 XP к стоимости каждого следующего уровня
 SEASON_WEEKEND_XP_MULT = 1.5          # событие выходного дня
+
+# Награды каждого действия и лимиты. per_tx — максимум за одно начисление
+# (до выходного множителя), daily — максимум эффективного XP в сутки.
+SEASON_XP_ACTIONS = {
+    "achievement": {
+        "label": "Достижение",
+        "amount": 50,
+        "per_tx": 100,
+        "daily": 200,
+    },
+    "achievement_unlock": {
+        "label": "Новое достижение",
+        "amount": 30,
+        "per_tx": 150,
+        "daily": 300,
+    },
+    "daily": {
+        "label": "Ежедневная награда",
+        "amount": 25,
+        "per_tx": 25,
+        "daily": 25,
+    },
+    "prestige": {
+        "label": "Перерождение",
+        "amount": 100,
+        "per_tx": 100,
+        "daily": 200,
+    },
+    "raid_win": {
+        "label": "Победа в рейде",
+        "amount": 40,
+        "per_tx": 40,
+        "daily": 160,
+    },
+    "raid_loss": {
+        "label": "Поражение в рейде",
+        "amount": 10,
+        "per_tx": 10,
+        "daily": 40,
+    },
+    "duel_win": {
+        "label": "Победа в дуэли",
+        "amount": 40,
+        "per_tx": 40,
+        "daily": 160,
+    },
+    "duel_loss": {
+        "label": "Поражение в дуэли",
+        "amount": 10,
+        "per_tx": 10,
+        "daily": 40,
+    },
+    "craft_success": {
+        "label": "Успешный синтез",
+        "amount": 25,
+        "per_tx": 25,
+        "daily": 150,
+    },
+    "craft_fail": {
+        "label": "Неудачный синтез",
+        "amount": 8,
+        "per_tx": 8,
+        "daily": 64,
+    },
+    "quest": {
+        "label": "Ежедневный квест",
+        "amount": 20,
+        "per_tx": 20,
+        "daily": 100,
+    },
+    "other": {
+        "label": "Другое",
+        "amount": 0,
+        "per_tx": 100,
+        "daily": 300,
+    },
+}
+
+SEASON_XP_HELP_LINES = (
+    "Синтез: +25 успех / +8 провал · 150 / 64 XP в день",
+    "Рейд: +40 победа / +10 поражение · 160 / 40 XP в день",
+    "Дуэль: +40 победа / +10 поражение · 160 / 40 XP в день",
+    "Дейли: +25 · 25 XP в день",
+    "Ежедневный квест: +20 · 100 XP в день",
+    "Достижение: +50 · 200 XP в день",
+    "Новое достижение: +30 · 300 XP в день",
+    "Перерождение: +100 · 200 XP в день",
+    "За одно начисление: достижение ≤100, новое достижение ≤150.",
+)
 SEASON_MONTH_NAMES = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
@@ -346,7 +435,7 @@ RETENTION_LIMITS = {
 }
 
 # Schema migrations: увеличивать при изменении структуры таблиц.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Content migrations: увеличивать при изменении items/achievements/shop.
 CONTENT_VERSION = 6
@@ -2549,6 +2638,16 @@ class CastleBot(commands.Bot):
                 claimed_premium TEXT DEFAULT '[]',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (user_id, season_id)
+            )
+        """)
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS season_xp_log (
+                user_id INTEGER,
+                season_id TEXT,
+                day TEXT,
+                action TEXT,
+                xp INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, season_id, day, action)
             )
         """)
 
@@ -4837,16 +4936,17 @@ def season_progress_bar(remaining: int, needed: int, width: int = 10) -> str:
 
 
 def season_reward(level: int, premium: bool = False) -> dict:
-    coins = 100 + level * 50
+    """Награды выровнены по новой стоимости уровней (+100 XP за уровень)."""
+    coins = 150 + level * 75
     gems = 0
     catalysts = 0
     if premium:
-        gems = 1 + level // 2
+        gems = 3 + level // 2
         if level % 5 == 0:
             catalysts = 1
     else:
         if level % 5 == 0:
-            gems = 5
+            gems = 5 + level // 5
         if level % 10 == 0:
             catalysts = 1
     return {"coins": coins, "gems": gems, "catalysts": catalysts}
@@ -4917,16 +5017,23 @@ async def add_season_xp(
     user_id: int,
     base_amount: int,
     guild_id: int | None = None,
+    action: str = "other",
 ) -> int:
-    """Начисляет сезонный XP. Ошибки не должны ломать основное действие."""
+    """Начисляет сезонный XP с лимитом на транзакцию и дневным лимитом.
+
+    Ошибки не должны ломать основное действие.
+    """
     if base_amount <= 0:
         return 0
+    config = SEASON_XP_ACTIONS.get(action, SEASON_XP_ACTIONS["other"])
     if guild_id:
         settings = await get_settings(guild_id)
         if not settings.get("battlepass_enabled", True):
             return 0
+    base_amount = min(int(base_amount), int(config["per_tx"]))
     amount = max(1, int(round(base_amount * season_event_multiplier())))
     season_id = current_season_id()
+    day = today_str()
     now = datetime.datetime.now().isoformat()
     try:
         async with db_transaction():
@@ -4935,15 +5042,34 @@ async def add_season_xp(
                 "(user_id, season_id, updated_at) VALUES (?, ?, ?)",
                 (user_id, season_id, now),
             )
+            async with bot.db.execute(
+                "SELECT xp FROM season_xp_log "
+                "WHERE user_id = ? AND season_id = ? AND day = ? "
+                "AND action = ?",
+                (user_id, season_id, day, action),
+            ) as c:
+                row = await c.fetchone()
+            used = (row[0] if row else 0) or 0
+            allowed = min(amount, max(0, int(config["daily"]) - used))
+            if allowed <= 0:
+                return 0
             await bot.db.execute(
                 "UPDATE season_progress SET xp = xp + ?, updated_at = ? "
                 "WHERE user_id = ? AND season_id = ?",
-                (amount, now, user_id, season_id),
+                (allowed, now, user_id, season_id),
+            )
+            await bot.db.execute(
+                "INSERT INTO season_xp_log "
+                "(user_id, season_id, day, action, xp) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, season_id, day, action) "
+                "DO UPDATE SET xp = xp + excluded.xp",
+                (user_id, season_id, day, action, allowed),
             )
     except Exception:
         log.exception("Не удалось начислить сезонный XP пользователю %s", user_id)
         return 0
-    return amount
+    return allowed
 
 
 async def buy_season_premium(user_id: int) -> tuple[bool, str]:
@@ -6372,7 +6498,9 @@ async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
                     (reward, reward, user_id),
                 )
     if completed_count:
-        await add_season_xp(user_id, 50 * completed_count)
+        await add_season_xp(
+            user_id, 50 * completed_count, action="achievement"
+        )
 
 async def sync_story_achievements(user_id: int):
     """Синхронизирует прогресс квестов типа 'achievements' с реальным количеством достижений."""
@@ -6460,7 +6588,7 @@ async def claim_daily(user_id: int) -> dict:
 
         await update_quest_progress(user_id, "claim_daily")
         await check_achievements(user_id)
-        await add_season_xp(user_id, 25)
+        await add_season_xp(user_id, 25, action="daily")
         onboarding = await complete_onboarding_step(user_id, "claim_daily")
 
         return {
@@ -8142,7 +8270,7 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
     except ValueError as e:
         return False, f"❌ {e}", 0, points
 
-    await add_season_xp(user_id, 100, guild_id)
+    await add_season_xp(user_id, 100, guild_id, action="prestige")
     new_points = points + gain
     return (
         True,
@@ -8243,7 +8371,11 @@ async def check_achievements(user_id: int):
 
     if newly_unlocked:
         await sync_story_achievements(user_id)
-        await add_season_xp(user_id, 30 * len(newly_unlocked))
+        await add_season_xp(
+            user_id,
+            30 * len(newly_unlocked),
+            action="achievement_unlock",
+        )
     return newly_unlocked
 
 
@@ -8557,6 +8689,23 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             "• Победитель забирает банк.\n\n"
             "**Где:** «Социум» → «Рейд» / «Дуэль»."
         ),
+        "power": (
+            f"{get_emoji('_raid')} Мощь",
+            "**Формула:**\n"
+            "Мощь генератора = цена × (1 + 0.5 × звёзды).\n"
+            "Мощь игрока = сумма всех генераторов **на энергостанции**, "
+            "затем × (1 + бонус питомца + бонус титулов).\n\n"
+            "**Пример:** Базовый генератор 15, 3★ → 15 × 2.5 = 37.5 → "
+            "**37** (дробная часть отбрасывается).\n\n"
+            "**Что не считается:** генераторы в хранилище, временном "
+            "хранилище и клановой сетке. Звёзды учитываются только у "
+            "генераторов на личной энергостанции.\n\n"
+            "**Бонусы:** Дракончик даёт +4% мощи за уровень, титулы "
+            "«Звёздный лорд», «Дуэлянт», «Клановый воин» и «Охотник за "
+            "достижениями» — свои проценты.\n\n"
+            "**Где используется:** рейды, дуэли в режиме `power`, "
+            "клановые войны и топ по мощи."
+        ),
         "auction": (
             "🏛️ Аукцион",
             "**Лоты:** любой генератор, кроме synthesis-only, 1–72 ч.\n\n"
@@ -8606,10 +8755,28 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
         "season": (
             "🎫 Сезон",
             "**Что это:** месячный battle pass на 30 уровней.\n\n"
-            "**XP:** дают дейли, квесты, синтезы, рейды, дуэли, достижения и другие действия. "
-            f"Каждый следующий уровень требует на {SEASON_XP_STEP} XP больше.\n\n"
+            f"**Стоимость уровней:** 1-й — {SEASON_XP_BASE} XP, каждый "
+            f"следующий +{SEASON_XP_STEP} XP (100, 200, 300 … 3000).\n\n"
+            "**Сколько XP даёт действие:**\n"
+            "• Синтез: +25 за успех, +8 за провал.\n"
+            "• Рейд: +40 за победу, +10 за поражение.\n"
+            "• Дуэль: +40 за победу, +10 за поражение.\n"
+            "• Ежедневная награда: +25.\n"
+            "• Ежедневный квест: +20.\n"
+            "• Достижение: +50; новое достижение: +30.\n"
+            "• Перерождение: +100.\n\n"
+            "**Дневные лимиты:**\n"
+            "• Синтез: 150 успех / 64 провал.\n"
+            "• Рейд и дуэль: 160 победа / 40 поражение.\n"
+            "• Дейли: 25; квест: 100.\n"
+            "• Достижения: 200; новые достижения: 300.\n"
+            "• Перерождение: 200.\n\n"
+            "**Лимит за одно начисление:** достижение — не больше 100 XP, "
+            "новое достижение — не больше 150 XP. Остальные действия "
+            "начисляются по одному событию.\n\n"
+            "**Выходные:** +50% к XP, но дневные лимиты не обходятся.\n\n"
             "**Награды:** бесплатная линейка — монеты, гемы и предметы; "
-            "премиум — косметика и дополнительные награды.\n\n"
+            "премиум — дополнительные гемы и катализаторы.\n\n"
             "**Премиум:** покупается за гемы; награды выдаются только один раз.\n\n"
             "**Сброс:** в начале нового месяца прогресс начинается заново.\n\n"
             "**Где:** главное меню → «Сезон» или «Квесты» → «Сезон»."
@@ -8723,6 +8890,29 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
         sections["sets"] = (
             title,
             body + "\n\n**Состав сетов:**\n" + "\n".join(set_lines),
+        )
+
+    if key == "power":
+        async with bot.db.execute(
+            "SELECT name, price FROM items "
+            "WHERE id LIKE '%_gen' AND price > 0 ORDER BY price ASC"
+        ) as c:
+            generator_rows = await c.fetchall()
+        pairs = [
+            f"{name} — **{format_price(price)}**"
+            for name, price in generator_rows
+        ]
+        table_lines = []
+        for index in range(0, len(pairs), 2):
+            left = pairs[index]
+            right = pairs[index + 1] if index + 1 < len(pairs) else ""
+            table_lines.append(f"{left} | {right}".rstrip(" |"))
+        title, body = sections["power"]
+        sections["power"] = (
+            title,
+            body
+            + "\n\n**Базовая мощь генераторов (0★ = цена):**\n"
+            + "\n".join(table_lines),
         )
 
     return sections.get(key, ("📖 Путеводитель", "Раздел не найден."))
@@ -11312,14 +11502,6 @@ class NotificationCenterView(BaseView):
         embed = await build_notification_center_embed(self.author_id)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
-    async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await build_main_embed(interaction)
-        await interaction.edit_original_response(
-            embed=embed, view=MainMenuView(self.author_id)
-        )
-
 
 class AdminView(BaseView):
     """BaseView с повторной проверкой админ-прав на каждом callback."""
@@ -11783,6 +11965,7 @@ GUIDE_SECTIONS = {
     "titles": ("Титулы", "21 титул, условия, бонусы"),
     "clans": ("Кланы", "Создание, роли, войны, сундук, квесты"),
     "pvp": ("PvP", "Рейды, дуэли, мощь, лимиты"),
+    "power": ("Мощь", "Формула, генераторы, звёзды, бонусы"),
     "auction": ("Аукцион", "Лоты, ставки, buyout, комиссия"),
     "buyout": ("Buyout", "Мгновенный выкуп лота"),
     "orders": ("Ордера биржи", "Покупка, продажа, эскроу, отмена"),
@@ -11808,6 +11991,7 @@ GUIDE_SECTION_EMOJIS = {
     "titles": "_title",
     "clans": "_clan",
     "pvp": "_raid",
+    "power": "_raid",
     "auction": "_auction",
     "buyout": "_buy",
     "orders": "_market",
@@ -12105,7 +12289,8 @@ async def build_season_embed(user_id: int):
         title=f"{get_emoji('_advent')} Сезон: {data['season_name']}",
         description=(
             f"До конца сезона: **{data['days_left']} дн.**\n"
-            "XP за синтезы, рейды, дуэли, квесты, достижения и перерождение."
+            f"Уровень 1 — {SEASON_XP_BASE} XP, каждый следующий "
+            f"+{SEASON_XP_STEP} XP."
         ),
         color=0x9b59b6,
     )
@@ -12114,6 +12299,12 @@ async def build_season_embed(user_id: int):
     event = season_event_label()
     if event:
         embed.add_field(name="Событие", value=event, inline=False)
+
+    embed.add_field(
+        name="XP за действия и лимиты",
+        value="\n".join(SEASON_XP_HELP_LINES),
+        inline=False,
+    )
 
     next_levels = list(
         range(data["level"] + 1, min(data["level"] + 5, SEASON_LEVELS) + 1)
@@ -12148,7 +12339,10 @@ async def build_season_embed(user_id: int):
 
     embed.add_field(name="Премиум-пропуск", value=pass_text, inline=False)
     embed.set_footer(
-        text=f"Сезон {data['season_id']} · Уровень = {SEASON_XP_BASE}+ XP"
+        text=(
+            f"Сезон {data['season_id']} · "
+            f"уровень = {SEASON_XP_BASE} + {SEASON_XP_STEP}×(ур.-1) XP"
+        )
     )
     return embed, data
 
@@ -12168,6 +12362,8 @@ async def build_season_preview_embed(
         description=(
             f"Страница {page + 1}/{total_pages} · "
             f"текущий уровень: **{data['level']}/{SEASON_LEVELS}**\n"
+            f"Стоимость уровня: {SEASON_XP_BASE} + "
+            f"{SEASON_XP_STEP}×(уровень-1) XP.\n"
             "Нажми «Назад», чтобы вернуться к сезону и забрать награды."
         ),
         color=0x9b59b6,
@@ -17763,7 +17959,11 @@ async def finalize_raid(result: dict):
                 )
                 await commit_if_needed()
                 await check_achievements(uid)
-            await add_season_xp(uid, 40 if result["success"] else 10)
+            await add_season_xp(
+                uid,
+                40 if result["success"] else 10,
+                action="raid_win" if result["success"] else "raid_loss",
+            )
         except Exception:
             log.exception("Не удалось обновить прогресс рейда для %s", uid)
 
@@ -18786,8 +18986,8 @@ async def resolve_duel(
     await check_achievements(opponent_id)
 
     loser = opponent_id if winner == challenger_id else challenger_id
-    await add_season_xp(winner, 40, guild_id)
-    await add_season_xp(loser, 10, guild_id)
+    await add_season_xp(winner, 40, guild_id, action="duel_win")
+    await add_season_xp(loser, 10, guild_id, action="duel_loss")
 
     winner_name = f"<@{winner}>"
     msg = (
@@ -20104,6 +20304,9 @@ class DailyView(BaseView):
     def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
+        if return_to == "main":
+            # «В меню» уже есть — отдельная «Назад» вела бы туда же.
+            self.remove_item(self.back)
 
     @discord.ui.button(label="Забрать", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success, row=0)
     async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -20144,6 +20347,8 @@ class StoryQuestsView(BaseView):
     def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
+        if return_to == "main":
+            self.remove_item(self.back)
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -22021,6 +22226,29 @@ class LockSelectView(SafeView):
 #  ↔️ ОБМЕН СЛОТОВ
 # ============================================================
 
+async def _swap_location_size(author_id: int, location: str) -> int:
+    if location == "profile":
+        return await get_grid_size(author_id)
+    return await get_storage_size(author_id)
+
+
+def _swap_grid_preview(slots, rows_by_slot, custom) -> str:
+    """Компактная графическая схема слотов для embed."""
+    cells = []
+    for slot in slots:
+        row = rows_by_slot.get(slot)
+        if row is None:
+            cells.append(f"`{slot}` ·")
+        else:
+            item_id, _name, default_emoji, stars = row
+            emoji = custom.get(item_id, default_emoji)
+            cells.append(f"`{slot}` {emoji}{f' {stars}★' if stars else ''}")
+    return "\n".join(
+        " ".join(cells[index:index + 5])
+        for index in range(0, len(cells), 5)
+    )
+
+
 async def _build_swap_first_page(
     location: str,
     author_id: int,
@@ -22038,8 +22266,8 @@ async def _build_swap_first_page(
     """, (author_id, location)) as c:
         rows = await c.fetchall()
 
-    if len(rows) < 2:
-        return None, None, "❌ Нужно минимум 2 предмета для обмена."
+    if not rows:
+        return None, None, "❌ На энергостанции нет предметов для перемещения."
 
     page_size = SHOP_SELECT_PAGE_SIZE
     total_pages = max(1, (len(rows) + page_size - 1) // page_size)
@@ -22065,6 +22293,14 @@ async def _build_swap_first_page(
         ),
         color=0x3498db
     )
+    by_slot = {row[0]: row[1:] for row in rows}
+    embed.add_field(
+        name="Схема слотов",
+        value=_swap_grid_preview(
+            [row[0] for row in chunk], by_slot, custom
+        ),
+        inline=False,
+    )
     view = SwapFirstView(
         author_id, location, options, page, total_pages, main_message
     )
@@ -22085,21 +22321,33 @@ async def _build_swap_second_page(
     async with bot.db.execute("""
         SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars
         FROM inventory inv JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = ? AND inv.slot != ?
+        WHERE inv.user_id = ? AND inv.location = ?
         ORDER BY inv.slot ASC
-    """, (author_id, location, first_slot)) as c:
+    """, (author_id, location)) as c:
         rows = await c.fetchall()
-
-    if not rows:
+    row_by_slot = {row[0]: row[1:] for row in rows}
+    size = await _swap_location_size(author_id, location)
+    slots = [slot for slot in range(size) if slot != first_slot]
+    if not slots:
         return None, None, "❌ Нет других слотов для обмена."
 
     page_size = SHOP_SELECT_PAGE_SIZE
-    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    total_pages = max(1, (len(slots) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * page_size:page * page_size + page_size]
+    chunk = slots[page * page_size:page * page_size + page_size]
+    empty_emoji = parse_emoji_safe(get_emoji("_inventory"))
 
     options = []
-    for slot, item_id2, name, default_emoji, stars2 in chunk:
+    for slot in chunk:
+        row = row_by_slot.get(slot)
+        if row is None:
+            options.append(discord.SelectOption(
+                label=f"Слот {slot}: пусто",
+                value=str(slot),
+                emoji=empty_emoji,
+            ))
+            continue
+        item_id2, name, default_emoji, stars2 = row
         emoji_obj = parse_emoji_safe(custom.get(item_id2, default_emoji))
         stars_str = f" {stars2}★" if stars2 > 0 else ""
         short_name = name[:40] + "..." if len(name) > 40 else name
@@ -22113,10 +22361,15 @@ async def _build_swap_second_page(
         title="↔️ Обмен местами",
         description=(
             f"Шаг 2: Выбран предмет из **слота {first_slot}**.\n"
-            f"Теперь выбери слот, с которым хочешь его **поменять**.\n"
+            "Выбери занятый слот для обмена или пустой для перемещения.\n"
             f"Страница {page + 1}/{total_pages}"
         ),
         color=0x3498db
+    )
+    embed.add_field(
+        name="Схема слотов",
+        value=_swap_grid_preview(chunk, row_by_slot, custom),
+        inline=False,
     )
     view = SwapSecondView(
         author_id, location, first_slot, options, page, total_pages, main_message
@@ -22147,6 +22400,7 @@ class SwapFirstView(SafeView):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.location = location
+        self.feature_key = "storage" if location == "storage" else None
         self.page = page
         self.total_pages = total_pages
         self.main_message = main_message
@@ -22223,6 +22477,7 @@ class SwapSecondView(SafeView):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.location = location
+        self.feature_key = "storage" if location == "storage" else None
         self.first_slot = first_slot
         self.page = page
         self.total_pages = total_pages
@@ -22261,32 +22516,82 @@ class SwapSecondView(SafeView):
         ) as c:
             second = await c.fetchone()
 
-        if not first or not second:
+        if not first:
             return await interaction.edit_original_response(
-                embed=BotEmbed(title="❌ Ошибка", description="Один из слотов пуст.", color=0xe74c3c),
+                embed=BotEmbed(
+                    title="❌ Ошибка",
+                    description="Исходный слот пуст.",
+                    color=0xe74c3c,
+                ),
                 view=None
             )
 
-        await bot.db.execute(
-            "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot IN (?, ?)",
-            (self.author_id, self.location, self.first_slot, second_slot)
-        )
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars, is_locked) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (self.author_id, self.first_slot, second[0], self.location, second[1], second[2])
-        )
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars, is_locked) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (self.author_id, second_slot, first[0], self.location, first[1], first[2])
-        )
+        if second is None:
+            await bot.db.execute(
+                "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
+                (self.author_id, self.location, self.first_slot)
+            )
+            await bot.db.execute(
+                "INSERT INTO inventory "
+                "(user_id, slot, item_id, location, stars, is_locked) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    self.author_id,
+                    second_slot,
+                    first[0],
+                    self.location,
+                    first[1],
+                    first[2],
+                )
+            )
+            result_title = "✅ Предмет перемещён"
+            result_text = (
+                f"Предмет из слота **{self.first_slot}** перемещён "
+                f"в пустой слот **{second_slot}**."
+            )
+        else:
+            await bot.db.execute(
+                "DELETE FROM inventory WHERE user_id = ? AND location = ? "
+                "AND slot IN (?, ?)",
+                (self.author_id, self.location, self.first_slot, second_slot)
+            )
+            await bot.db.execute(
+                "INSERT INTO inventory "
+                "(user_id, slot, item_id, location, stars, is_locked) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    self.author_id,
+                    self.first_slot,
+                    second[0],
+                    self.location,
+                    second[1],
+                    second[2],
+                )
+            )
+            await bot.db.execute(
+                "INSERT INTO inventory "
+                "(user_id, slot, item_id, location, stars, is_locked) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    self.author_id,
+                    second_slot,
+                    first[0],
+                    self.location,
+                    first[1],
+                    first[2],
+                )
+            )
+            result_title = "✅ Слоты поменяны"
+            result_text = (
+                f"Предметы в слотах **{self.first_slot}** и "
+                f"**{second_slot}** поменялись местами."
+            )
         await commit_if_needed()
         await update_quest_progress(self.author_id, "swap_1")
 
         embed = BotEmbed(
-            title="✅ Слоты поменяны",
-            description=f"Предметы в слотах **{self.first_slot}** и **{second_slot}** поменялись местами.",
+            title=result_title,
+            description=result_text,
             color=0x2ecc71
         )
         await interaction.edit_original_response(embed=embed, view=None)
@@ -23299,7 +23604,10 @@ class CraftConfirmView(SafeView):
 
         unlocked = await check_achievements(user_id)
         await add_season_xp(
-            user_id, 25 if success else 8, interaction.guild_id
+            user_id,
+            25 if success else 8,
+            interaction.guild_id,
+            action="craft_success" if success else "craft_fail",
         )
         onboarding = await complete_onboarding_step(user_id, "craft")
 
@@ -25066,6 +25374,8 @@ class QuestsView(BaseView):
     def __init__(self, author_id: int, return_to: str = "main", timeout: int = 600):
         super().__init__(author_id, timeout)
         self.return_to = return_to
+        if return_to == "main":
+            self.remove_item(self.back)
 
     @discord.ui.button(label="Забрать награду", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success, row=1)
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -25147,7 +25457,9 @@ class ClaimQuestSelectView(SafeView):
              reward_gems, reward_coins, reward_coins, user_id)
         )
         await commit_if_needed()
-        await add_season_xp(user_id, 20, interaction.guild_id)
+        await add_season_xp(
+            user_id, 20, interaction.guild_id, action="quest"
+        )
         embed = BotEmbed(
             title="🎁 Награда получена",
             description=f"💎 **{reward_gems}** гемов и 🪙 **{reward_coins}** монет за «{desc}»!",
@@ -26210,8 +26522,8 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                     "bank_loans", "bank_history", "user_notifications", "player_quests",
                     "user_cosmetics", "tax_log", "raid_cooldowns",
                     "duel_cooldowns", "espionage_cooldowns", "season_progress",
-                    "market_orders", "onboarding_progress", "clan_applications",
-                    "giveaway_entries",
+                    "season_xp_log", "market_orders", "onboarding_progress",
+                    "clan_applications", "giveaway_entries",
                 ):
                     await bot.db.execute(
                         f"DELETE FROM {table} WHERE user_id = ?", (self.author_id,)
@@ -26351,16 +26663,10 @@ class AdminPanelView(AdminView):
                 label="Владелец",
                 emoji=BOT_BTN_EMOJIS.get("_vip", "⭐"),
                 style=discord.ButtonStyle.danger,
-                row=4,
+                row=3,
             )
             owner_btn.callback = self.btn_owner
             self.add_item(owner_btn)
-        else:
-            for item in (self.add_gen, self.backup_now):
-                try:
-                    self.remove_item(item)
-                except ValueError:
-                    pass
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await super().interaction_check(interaction)
@@ -26407,16 +26713,6 @@ class AdminPanelView(AdminView):
     async def give_item(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AdminGiveItemModal(self.author_id))
 
-    @discord.ui.button(label="Добавить генератор", emoji=BOT_BTN_EMOJIS.get("_upgrades", "⚙️"), style=discord.ButtonStyle.secondary, row=2)
-    async def add_gen(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await is_global_owner(interaction):
-            await interaction.response.send_message(
-                "❌ Генераторы может добавлять только владелец бота.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_modal(AddGeneratorModal(self.author_id))
-
     @discord.ui.button(label="Настройки", emoji=BOT_BTN_EMOJIS.get("_settings", "🔧"), style=discord.ButtonStyle.secondary, row=2)
     async def settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -26430,32 +26726,7 @@ class AdminPanelView(AdminView):
         await interaction.response.defer()
         await open_admin_giveaways(interaction, self.author_id)
 
-    @discord.ui.button(label="Логи", emoji=BOT_BTN_EMOJIS.get("_storyquests", "📜"), style=discord.ButtonStyle.secondary, row=3)
-    async def logs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await open_admin_logs(interaction, self.author_id, page=0)
-
-    @discord.ui.button(label="Бэкап", emoji=BOT_BTN_EMOJIS.get("_storage", "💾"), style=discord.ButtonStyle.secondary, row=3)
-    async def backup_now(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await is_global_owner(interaction):
-            await interaction.response.send_message(
-                "❌ Ручной бэкап может делать только владелец бота.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        path = await bot.backup_database("manual")
-        if path:
-            await interaction.followup.send(
-                f"✅ Бэкап создан: `{path.name}`.", ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                "❌ Не удалось создать бэкап (нет БД или активная транзакция).",
-                ephemeral=True,
-            )
-
-    @discord.ui.button(label="Игрок", emoji=BOT_BTN_EMOJIS.get("_profile", "👤"), style=discord.ButtonStyle.primary, row=4)
+    @discord.ui.button(label="Игрок", emoji=BOT_BTN_EMOJIS.get("_profile", "👤"), style=discord.ButtonStyle.primary, row=2)
     async def player_card(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(
@@ -26467,7 +26738,7 @@ class AdminPanelView(AdminView):
             embed=embed, view=AdminPlayerSelectView(self.author_id)
         )
 
-    @discord.ui.button(label="Ещё", emoji=BOT_BTN_EMOJIS.get("_forward", "➡️"), style=discord.ButtonStyle.primary, row=4)
+    @discord.ui.button(label="Ещё", emoji=BOT_BTN_EMOJIS.get("_forward", "➡️"), style=discord.ButtonStyle.primary, row=3)
     async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="🛡️ Панель администратора — страница 2", color=0xe74c3c)
@@ -26831,6 +27102,11 @@ class AdminPanelPage2(AdminView):
             embed=embed, view=AdminPrestigeView(self.author_id)
         )
 
+    @discord.ui.button(label="Логи", emoji=BOT_BTN_EMOJIS.get("_storyquests", "📜"), style=discord.ButtonStyle.secondary, row=4)
+    async def btn_logs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await open_admin_logs(interaction, self.author_id, page=0)
+
     @discord.ui.button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=4)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -26976,6 +27252,9 @@ class AdminSeasonResetModal(discord.ui.Modal, title="Сбросить прогр
             return await interaction.followup.send("❌ ID игрока — число.", ephemeral=True)
         cur = await bot.db.execute(
             "DELETE FROM season_progress WHERE user_id = ?", (uid,)
+        )
+        await bot.db.execute(
+            "DELETE FROM season_xp_log WHERE user_id = ?", (uid,)
         )
         await commit_if_needed()
         await log_admin_action(
@@ -28908,8 +29187,8 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                 "bank_deposits", "bank_loans", "bank_history", "user_notifications",
                 "player_quests", "user_cosmetics", "tax_log", "raid_cooldowns",
                 "duel_cooldowns", "espionage_cooldowns", "player_collection",
-                "season_progress", "market_orders", "onboarding_progress",
-                "clan_applications", "giveaway_entries",
+                "season_progress", "season_xp_log", "market_orders",
+                "onboarding_progress", "clan_applications", "giveaway_entries",
             ):
                 await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
 
