@@ -34,9 +34,7 @@ _CURRENT_IS_BOT_OWNER = contextvars.ContextVar("current_is_bot_owner", default=F
 DEFAULT_BOT_NAME = "Gen Mania"
 DEFAULT_CURRENCY_COINS = "монеты"
 DEFAULT_CURRENCY_GEMS = "гемы"
-DEFAULT_GEM_CAP = 6
 DEFAULT_START_COINS = 20
-DEFAULT_PASSIVE_LIMIT = 100000
 DEFAULT_TAX_RATE = 0.02
 INCOME_HINT = "Доход начисляется каждую секунду, в интерфейсе показан за час."
 
@@ -312,76 +310,83 @@ SEASON_LEVELS = 30
 SEASON_PREMIUM_COST_GEMS = 250
 SEASON_XP_BASE = 100                  # XP с 0 на 1 уровень
 SEASON_XP_STEP = 100                  # +100 XP к стоимости каждого следующего уровня
+SEASON_TOTAL_XP = (
+    SEASON_XP_BASE * SEASON_LEVELS
+    + SEASON_XP_STEP * (SEASON_LEVELS - 1) * SEASON_LEVELS // 2
+)
+SEASON_TOTAL_XP_TEXT = f"{SEASON_TOTAL_XP:,}".replace(",", " ")
 SEASON_WEEKEND_XP_MULT = 1.5          # событие выходного дня
 
 # Награды каждого действия и лимиты. per_tx — максимум за одно начисление
 # (до выходного множителя), daily — максимум эффективного XP в сутки.
+# Баланс: активная игра даёт ~1 670 XP/день, за 30 дней — ~50 100 XP
+# при необходимых 46 500 XP на 30 уровней.
 SEASON_XP_ACTIONS = {
-    "achievement": {
-        "label": "Достижение",
-        "amount": 50,
-        "per_tx": 100,
-        "daily": 200,
+    "story_quest": {
+        "label": "Сюжетный квест",
+        "amount": 200,
+        "per_tx": 400,
+        "daily": 400,
     },
     "achievement_unlock": {
         "label": "Новое достижение",
-        "amount": 30,
-        "per_tx": 150,
+        "amount": 100,
+        "per_tx": 300,
         "daily": 300,
     },
     "daily": {
         "label": "Ежедневная награда",
-        "amount": 25,
-        "per_tx": 25,
-        "daily": 25,
+        "amount": 250,
+        "per_tx": 250,
+        "daily": 250,
     },
     "prestige": {
         "label": "Перерождение",
-        "amount": 100,
-        "per_tx": 100,
-        "daily": 200,
+        "amount": 500,
+        "per_tx": 500,
+        "daily": 500,
     },
     "raid_win": {
         "label": "Победа в рейде",
-        "amount": 40,
-        "per_tx": 40,
-        "daily": 160,
+        "amount": 150,
+        "per_tx": 150,
+        "daily": 300,
     },
     "raid_loss": {
         "label": "Поражение в рейде",
-        "amount": 10,
-        "per_tx": 10,
-        "daily": 40,
+        "amount": 40,
+        "per_tx": 40,
+        "daily": 80,
     },
     "duel_win": {
         "label": "Победа в дуэли",
-        "amount": 40,
-        "per_tx": 40,
-        "daily": 160,
+        "amount": 150,
+        "per_tx": 150,
+        "daily": 450,
     },
     "duel_loss": {
         "label": "Поражение в дуэли",
-        "amount": 10,
-        "per_tx": 10,
-        "daily": 40,
+        "amount": 40,
+        "per_tx": 40,
+        "daily": 120,
     },
     "craft_success": {
         "label": "Успешный синтез",
-        "amount": 25,
-        "per_tx": 25,
-        "daily": 150,
+        "amount": 50,
+        "per_tx": 50,
+        "daily": 400,
     },
     "craft_fail": {
         "label": "Неудачный синтез",
-        "amount": 8,
-        "per_tx": 8,
-        "daily": 64,
+        "amount": 15,
+        "per_tx": 15,
+        "daily": 120,
     },
     "quest": {
         "label": "Ежедневный квест",
-        "amount": 20,
-        "per_tx": 20,
-        "daily": 100,
+        "amount": 120,
+        "per_tx": 120,
+        "daily": 360,
     },
     "other": {
         "label": "Другое",
@@ -391,16 +396,49 @@ SEASON_XP_ACTIONS = {
     },
 }
 
+# Ожидаемый профиль активного дня: не хардкор, но стабильная игра.
+SEASON_ACTIVE_DAY_PROFILE = {
+    "daily": 1,
+    "quest": 3,
+    "craft_success": 6,
+    "craft_fail": 4,
+    "raid_win": 1,
+    "raid_loss": 1,
+    "duel_win": 2,
+    "duel_loss": 1,
+    "story_quest": 0.5,
+    "achievement_unlock": 0.2,
+    "prestige": 0.1,
+}
+
+
+def season_xp_amount(action: str, multiplier: int = 1) -> int:
+    """Базовый XP действия с учётом множителя (до per_tx/daily)."""
+    config = SEASON_XP_ACTIONS.get(action, SEASON_XP_ACTIONS["other"])
+    return max(0, int(config["amount"]) * max(0, int(multiplier)))
+
+
+def season_expected_daily_xp() -> int:
+    """Ожидаемый XP активного дня без хардкора (для гайда и тестов)."""
+    total = 0.0
+    for action, count in SEASON_ACTIVE_DAY_PROFILE.items():
+        config = SEASON_XP_ACTIONS.get(action)
+        if not config:
+            continue
+        total += min(config["amount"] * count, config["daily"])
+    return int(total)
+
+
 SEASON_XP_HELP_LINES = (
-    "Синтез: +25 успех / +8 провал · 150 / 64 XP в день",
-    "Рейд: +40 победа / +10 поражение · 160 / 40 XP в день",
-    "Дуэль: +40 победа / +10 поражение · 160 / 40 XP в день",
-    "Дейли: +25 · 25 XP в день",
-    "Ежедневный квест: +20 · 100 XP в день",
-    "Достижение: +50 · 200 XP в день",
-    "Новое достижение: +30 · 300 XP в день",
-    "Перерождение: +100 · 200 XP в день",
-    "За одно начисление: достижение ≤100, новое достижение ≤150.",
+    "Синтез: +50 успех / +15 провал · 400 / 120 XP в день",
+    "Рейд: +150 победа / +40 поражение · 300 / 80 XP в день",
+    "Дуэль: +150 победа / +40 поражение · 450 / 120 XP в день",
+    "Дейли: +250 · 250 XP в день",
+    "Ежедневный квест: +120 · 360 XP в день",
+    "Сюжетный квест: +200 · 400 XP в день",
+    "Достижение: +100 · 300 XP в день",
+    "Перерождение: +500 · 500 XP в день",
+    "За одно начисление: сюжетный квест ≤400, достижение ≤300.",
 )
 SEASON_MONTH_NAMES = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -432,13 +470,24 @@ RETENTION_LIMITS = {
     "bank_history": ("opened_at", 180),
     "duel_history": ("timestamp", 90),
     "raid_loot_log": ("timestamp", 90),
+    "season_xp_log": ("day", 90),
 }
 
 # Schema migrations: увеличивать при изменении структуры таблиц.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Content migrations: увеличивать при изменении items/achievements/shop.
 CONTENT_VERSION = 6
+
+TOP_EXCLUSION_NOTICE = (
+    "🚫 Ты исключён из топов: ресурс выдан себе через админ-панель. "
+    "Это ограничение снимается только полным сбросом прогресса."
+)
+
+ADMIN_MAX_RESOURCE = 10**12
+ADMIN_MAX_GRID = 100
+ADMIN_MAX_STORAGE = 100
+ADMIN_MAX_PRESTIGE = 1_000_000
 
 # --- КОЛЛЕКЦИЯ ---
 COLLECTION_BONUS_PER_ITEM = 0.005     # +0.5% к доходу за каждый открытый генератор
@@ -1572,6 +1621,9 @@ async def verify_columns(conn, table: str, required: list[str]) -> None:
 
 
 intents = discord.Intents.default()
+# Нужен для локальных топов, налогов и корректного состава guild.members.
+# В Discord Developer Portal включите Privileged Intent -> Server Members.
+intents.members = True
 
 class CastleBot(commands.Bot):
     def __init__(self):
@@ -1724,13 +1776,13 @@ class CastleBot(commands.Bot):
                 await asyncio.sleep(86400)
                 now = datetime.datetime.now()
                 removed = {}
-                for table, (column, days) in RETENTION_LIMITS.items():
-                    cutoff = (now - datetime.timedelta(days=days)).isoformat()
-                    cur = await self.db.execute(
-                        f"DELETE FROM {table} WHERE {column} < ?", (cutoff,)
-                    )
-                    removed[table] = cur.rowcount
-                await self.db.commit()
+                async with db_transaction():
+                    for table, (column, days) in RETENTION_LIMITS.items():
+                        cutoff = (now - datetime.timedelta(days=days)).isoformat()
+                        cur = await self.db.execute(
+                            f"DELETE FROM {table} WHERE {column} < ?", (cutoff,)
+                        )
+                        removed[table] = cur.rowcount
                 if any(removed.values()):
                     log.info("Retention: удалено %s", removed)
             except asyncio.CancelledError:
@@ -1776,56 +1828,62 @@ class CastleBot(commands.Bot):
                     wars = await c.fetchall()
 
                 for war_id, c1, c2, start_time, c1_hp, c2_hp, c1_dmg, c2_dmg in wars:
-                    # проверяем, что оба клана ещё существуют
-                    async with self.db.execute(
-                        "SELECT 1 FROM clans WHERE id IN (?, ?)", (c1, c2)
-                    ) as c:
-                        existing = await c.fetchall()
-                    if len(existing) < 2:
-                        # один из кланов распущен — закрываем войну без победителя
+                    async with db_transaction():
+                        async with self.db.execute(
+                            "SELECT status FROM clan_wars WHERE id = ?",
+                            (war_id,),
+                        ) as c:
+                            fresh = await c.fetchone()
+                        if not fresh or fresh[0] != "active":
+                            continue
+                        # проверяем, что оба клана ещё существуют
+                        async with self.db.execute(
+                            "SELECT 1 FROM clans WHERE id IN (?, ?)", (c1, c2)
+                        ) as c:
+                            existing = await c.fetchall()
+                        if len(existing) < 2:
+                            # один из кланов распущен — закрываем войну без победителя
+                            await self.db.execute(
+                                "UPDATE clan_wars SET status = 'finished', winner_id = NULL, end_time = ? WHERE id = ?",
+                                (now.isoformat(), war_id)
+                            )
+                            continue
+
+                        start = datetime.datetime.fromisoformat(start_time)
+                        if (now - start).total_seconds() < CLAN_WAR_DURATION_HOURS * 3600:
+                            continue
+
+                        c1_hp = c1_hp or 0
+                        c2_hp = c2_hp or 0
+                        c1_dmg = c1_dmg or 0
+                        c2_dmg = c2_dmg or 0
+
+                        if c1_hp or c2_hp:
+                            winner = (
+                                c1 if c1_hp > c2_hp
+                                else c2 if c2_hp > c1_hp
+                                else c1 if c1_dmg > c2_dmg
+                                else c2 if c2_dmg > c1_dmg
+                                else None
+                            )
+                        else:
+                            # совместимость со старыми войнами без HP
+                            p1 = await get_clan_power(c1)
+                            p2 = await get_clan_power(c2)
+                            winner = c1 if p1 > p2 else (c2 if p2 > p1 else None)
+
                         await self.db.execute(
-                            "UPDATE clan_wars SET status = 'finished', winner_id = NULL, end_time = ? WHERE id = ?",
-                            (now.isoformat(), war_id)
+                            "UPDATE clan_wars SET status = 'finished', winner_id = ?, end_time = ? WHERE id = ?",
+                            (winner, now.isoformat(), war_id)
                         )
-                        continue
-
-                    start = datetime.datetime.fromisoformat(start_time)
-                    if (now - start).total_seconds() < CLAN_WAR_DURATION_HOURS * 3600:
-                        continue
-
-                    c1_hp = c1_hp or 0
-                    c2_hp = c2_hp or 0
-                    c1_dmg = c1_dmg or 0
-                    c2_dmg = c2_dmg or 0
-
-                    if c1_hp or c2_hp:
-                        winner = (
-                            c1 if c1_hp > c2_hp
-                            else c2 if c2_hp > c1_hp
-                            else c1 if c1_dmg > c2_dmg
-                            else c2 if c2_dmg > c1_dmg
-                            else None
-                        )
-                    else:
-                        # совместимость со старыми войнами без HP
-                        p1 = await get_clan_power(c1)
-                        p2 = await get_clan_power(c2)
-                        winner = c1 if p1 > p2 else (c2 if p2 > p1 else None)
-
-                    await self.db.execute(
-                        "UPDATE clan_wars SET status = 'finished', winner_id = ?, end_time = ? WHERE id = ?",
-                        (winner, now.isoformat(), war_id)
-                    )
-                    if winner:
-                        await self.db.execute(
-                            "UPDATE clans SET treasury = treasury + ? WHERE id = ?",
-                            (CLAN_WAR_REWARD, winner),
-                        )
-                        await log_clan(winner, "war_win", f"Победа над кланом {c2 if winner == c1 else c1}")
-                        await update_clan_quest(winner, "war", 1)
-                        await add_clan_xp(winner, 200)
-
-                await self.db.commit()
+                        if winner:
+                            await self.db.execute(
+                                "UPDATE clans SET treasury = treasury + ? WHERE id = ?",
+                                (CLAN_WAR_REWARD, winner),
+                            )
+                            await log_clan(winner, "war_win", f"Победа над кланом {c2 if winner == c1 else c1}")
+                            await update_clan_quest(winner, "war", 1)
+                            await add_clan_xp(winner, 200)
             except Exception as e:
                 log.exception("WAR_CLOSER: ошибка фоновой задачи")
                 await asyncio.sleep(600)
@@ -1841,7 +1899,8 @@ class CastleBot(commands.Bot):
                 last_gem_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_tax_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 lifetime_production INTEGER DEFAULT 0,
-                accessibility_mode INTEGER DEFAULT 0
+                accessibility_mode INTEGER DEFAULT 0,
+                top_excluded INTEGER DEFAULT 0
             )
         """)
 
@@ -1913,6 +1972,7 @@ class CastleBot(commands.Bot):
             ("income_bonus", "REAL DEFAULT 0.0"),
             ("raid_wins", "INTEGER DEFAULT 0"),
             ("prestige_points", "INTEGER DEFAULT 0"),
+            ("top_excluded", "INTEGER DEFAULT 0"),
         ]:
             await ensure_column(self.db, "players", column, definition)
 
@@ -3452,7 +3512,6 @@ class CastleBot(commands.Bot):
                             "WHERE id = ? AND status = 'closing'",
                             (aid,),
                         )
-                await self.db.commit()
             except Exception as e:
                 log.exception("AUCTION_CLOSER: ошибка фоновой задачи")
                 await asyncio.sleep(60)
@@ -3470,27 +3529,27 @@ class CastleBot(commands.Bot):
                 ) as c:
                     rows = await c.fetchall()
 
-                for item_id, base, current, demand, supply, item_price, buyable in rows:
-                    old_price = int(current or item_price or base or 1)
-                    anchor = int(item_price or base or old_price)
-                    ratio = 1.0 + (demand - supply) / max(1, demand + supply) * 0.5
-                    target = int(old_price * ratio)
-                    max_step = max(1, int(old_price * MARKET_MAX_STEP))
-                    stepped = old_price + max(
-                        -max_step, min(max_step, target - old_price)
-                    )
-                    new_price = clamp_market_price(
-                        stepped, anchor, bool(buyable)
-                    )
-                    await self.db.execute(
-                        "UPDATE market_prices SET current_price = ?, demand = 0, supply = 0, "
-                        "last_update = ? WHERE item_id = ?",
-                        (new_price, datetime.datetime.now().isoformat(), item_id)
-                    )
-                    await record_market_price(
-                        item_id, new_price, 0, 0, commit=False
-                    )
-                await self.db.commit()
+                async with db_transaction():
+                    for item_id, base, current, demand, supply, item_price, buyable in rows:
+                        old_price = int(current or item_price or base or 1)
+                        anchor = int(item_price or base or old_price)
+                        ratio = 1.0 + (demand - supply) / max(1, demand + supply) * 0.5
+                        target = int(old_price * ratio)
+                        max_step = max(1, int(old_price * MARKET_MAX_STEP))
+                        stepped = old_price + max(
+                            -max_step, min(max_step, target - old_price)
+                        )
+                        new_price = clamp_market_price(
+                            stepped, anchor, bool(buyable)
+                        )
+                        await self.db.execute(
+                            "UPDATE market_prices SET current_price = ?, demand = 0, supply = 0, "
+                            "last_update = ? WHERE item_id = ?",
+                            (new_price, datetime.datetime.now().isoformat(), item_id)
+                        )
+                        await record_market_price(
+                            item_id, new_price, 0, 0, commit=False
+                        )
             except Exception as e:
                 log.exception("MARKET_UPDATER: ошибка фоновой задачи")
                 await asyncio.sleep(300)
@@ -3571,37 +3630,51 @@ class CastleBot(commands.Bot):
                     players = await c.fetchall()
 
                 now = datetime.datetime.now()
-                for uid, coins, last_tax in players:
-                    last = _parse_db_time(last_tax)
-                    if last and (now - last).total_seconds() < 86400:
-                        continue
-                    rate = await get_tax_rate_for_user(uid)
-                    tax = int((coins or 0) * rate)
-                    await self.db.execute(
-                        "UPDATE players SET coins = coins - ?, last_tax_time = ? WHERE user_id = ?",
-                        (tax, now.isoformat(), uid)
-                    )
-                    if tax > 0:
-                        await self.db.execute(
-                            "INSERT INTO tax_log (user_id, amount, tax_type) VALUES (?, ?, 'daily')",
-                            (uid, tax)
-                        )
-                await self.db.commit()
+                for uid, _coins, _last_tax in players:
+                    try:
+                        rate = await get_tax_rate_for_user(uid)
+                        async with db_transaction():
+                            async with self.db.execute(
+                                "SELECT coins, last_tax_time FROM players "
+                                "WHERE user_id = ?",
+                                (uid,),
+                            ) as c:
+                                row = await c.fetchone()
+                            if not row:
+                                continue
+                            coins, last_tax = row
+                            last = _parse_db_time(last_tax)
+                            if last and (now - last).total_seconds() < 86400:
+                                continue
+                            tax = max(0, int((coins or 0) * rate))
+                            if tax > 0:
+                                cur = await self.db.execute(
+                                    "UPDATE players SET coins = coins - ?, "
+                                    "last_tax_time = ? WHERE user_id = ? "
+                                    "AND coins >= ?",
+                                    (tax, now.isoformat(), uid, tax),
+                                )
+                                if cur.rowcount == 0:
+                                    continue
+                                await self.db.execute(
+                                    "INSERT INTO tax_log "
+                                    "(user_id, amount, tax_type) "
+                                    "VALUES (?, ?, 'daily')",
+                                    (uid, tax),
+                                )
+                            else:
+                                await self.db.execute(
+                                    "UPDATE players SET last_tax_time = ? "
+                                    "WHERE user_id = ?",
+                                    (now.isoformat(), uid),
+                                )
+                    except Exception:
+                        log.exception("TAX_COLLECTOR: ошибка игрока %s", uid)
             except Exception as e:
                 log.exception("TAX_COLLECTOR: ошибка фоновой задачи")
                 await asyncio.sleep(600)
                 continue
             await asyncio.sleep(3600)
-
-    def _find_user_guild_id(self, user_id: int):
-        """Ищет гильдию, где бот видит участника."""
-        for guild in getattr(self, "guilds", []) or []:
-            try:
-                if guild.get_member(user_id) is not None:
-                    return guild.id
-            except Exception:
-                continue
-        return None
 
     async def autocollector_task(self):
         await self.wait_until_ready()
@@ -3620,7 +3693,6 @@ class CastleBot(commands.Bot):
                     if last and (now - last).total_seconds() < interval * 3600:
                         continue
 
-                    guild_id = self._find_user_guild_id(uid)
                     async with db_transaction():
                         # Повторная проверка внутри транзакции: пока ждали
                         # writer-lock, авт сбор мог уже пройти.
@@ -3633,7 +3705,7 @@ class CastleBot(commands.Bot):
                         if fresh_last and (now - fresh_last).total_seconds() < interval * 3600:
                             continue
 
-                        coins, gems = await calculate_full_passive_income(uid, guild_id)
+                        coins, gems = await calculate_full_passive_income(uid)
                         now_iso = now.isoformat()
 
                         if coins > 0:
@@ -3967,16 +4039,12 @@ async def get_settings(guild_id: int) -> dict:
         "currency_coins": DEFAULT_CURRENCY_COINS,
         "currency_gems": DEFAULT_CURRENCY_GEMS,
         "prefix": "/",
-        "gem_cap": DEFAULT_GEM_CAP,
         "start_coins": DEFAULT_START_COINS,
-        "passive_limit": DEFAULT_PASSIVE_LIMIT,
         "disabled_commands": [],
         "status_roles": {},
         "battlepass_enabled": True,
         "admin_role_id": None,
         "tax_rate": DEFAULT_TAX_RATE,
-        "inflation_rate": 0.0,
-        "auction_fee": AUCTION_FEE_RATE,
     }
     if not guild_id:
         return defaults
@@ -4004,16 +4072,12 @@ async def get_settings(guild_id: int) -> dict:
         "currency_coins": row[2] or DEFAULT_CURRENCY_COINS,
         "currency_gems": row[3] or DEFAULT_CURRENCY_GEMS,
         "prefix": row[4] or "/",
-        "gem_cap": row[5] or DEFAULT_GEM_CAP,
         "start_coins": row[6] or DEFAULT_START_COINS,
-        "passive_limit": row[7] or DEFAULT_PASSIVE_LIMIT,
         "disabled_commands": json.loads(row[8] or "[]"),
         "status_roles": json.loads(row[9] or "{}"),
         "battlepass_enabled": bool(row[10]) if row[10] is not None else True,
         "admin_role_id": row[11],
         "tax_rate": row[12] if row[12] is not None else DEFAULT_TAX_RATE,
-        "inflation_rate": row[13] or 0.0,
-        "auction_fee": row[14] if row[14] is not None else AUCTION_FEE_RATE,
     }
     _settings_cache[guild_id] = (now_ts, result)
     return copy.deepcopy(result)
@@ -4028,7 +4092,19 @@ async def get_tax_rate_for_user(user_id: int) -> float:
     rates = []
     for guild in getattr(bot, "guilds", []) or []:
         try:
-            if guild.get_member(user_id) is None:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except (
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                    AttributeError,
+                    TypeError,
+                ):
+                    member = None
+            if member is None:
                 continue
         except Exception:
             continue
@@ -4126,11 +4202,11 @@ async def sync_guild_access(guild, reason: str = "join") -> dict | None:
     if guild_id is None:
         return None
     try:
-        await bot.db.execute(
-            "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",
-            (guild_id,),
-        )
-        await commit_if_needed()
+        async with db_transaction():
+            await bot.db.execute(
+                "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",
+                (guild_id,),
+            )
     except Exception:
         log.exception("GUILD_ACCESS: не удалось создать настройки %s", guild_id)
     _settings_cache.pop(guild_id, None)
@@ -4194,34 +4270,34 @@ async def sync_guild_access(guild, reason: str = "join") -> dict | None:
     member_count = int(getattr(guild, "member_count", 0) or 0)
 
     try:
-        await bot.db.execute("""
-            INSERT INTO guild_access
-                (guild_id, owner_id, owner_name, admin_role_id,
-                 admin_role_name, admin_role_ids, roles_json,
-                 member_count, bot_permissions, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                owner_id = excluded.owner_id,
-                owner_name = excluded.owner_name,
-                admin_role_id = excluded.admin_role_id,
-                admin_role_name = excluded.admin_role_name,
-                admin_role_ids = excluded.admin_role_ids,
-                roles_json = excluded.roles_json,
-                member_count = excluded.member_count,
-                bot_permissions = excluded.bot_permissions,
-                updated_at = CURRENT_TIMESTAMP
-        """, (
-            guild_id,
-            owner_id,
-            owner_name,
-            admin_role_id,
-            admin_role_name,
-            json.dumps(admin_role_ids),
-            json.dumps(roles_data, ensure_ascii=False),
-            member_count,
-            bot_permissions,
-        ))
-        await commit_if_needed()
+        async with db_transaction():
+            await bot.db.execute("""
+                INSERT INTO guild_access
+                    (guild_id, owner_id, owner_name, admin_role_id,
+                     admin_role_name, admin_role_ids, roles_json,
+                     member_count, bot_permissions, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    owner_id = excluded.owner_id,
+                    owner_name = excluded.owner_name,
+                    admin_role_id = excluded.admin_role_id,
+                    admin_role_name = excluded.admin_role_name,
+                    admin_role_ids = excluded.admin_role_ids,
+                    roles_json = excluded.roles_json,
+                    member_count = excluded.member_count,
+                    bot_permissions = excluded.bot_permissions,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                guild_id,
+                owner_id,
+                owner_name,
+                admin_role_id,
+                admin_role_name,
+                json.dumps(admin_role_ids),
+                json.dumps(roles_data, ensure_ascii=False),
+                member_count,
+                bot_permissions,
+            ))
     except Exception:
         log.exception("GUILD_ACCESS: не удалось сохранить снимок %s", guild_id)
 
@@ -4602,16 +4678,12 @@ SETTING_COLUMNS = {
     "currency_coins": "currency_coins",
     "currency_gems": "currency_gems",
     "prefix": "prefix",
-    "gem_cap": "gem_cap",
     "start_coins": "start_coins",
-    "passive_limit": "passive_limit",
     "disabled_commands": "disabled_commands",
     "status_roles": "status_roles",
     "battlepass_enabled": "battlepass_enabled",
     "admin_role_id": "admin_role_id",
     "tax_rate": "tax_rate",
-    "inflation_rate": "inflation_rate",
-    "auction_fee": "auction_fee",
 }
 
 
@@ -4868,7 +4940,25 @@ async def db_transaction():
             log.debug("Найдена незавершённая транзакция перед BEGIN — коммитим")
             await bot.db.commit()
 
-        await bot.db.execute("BEGIN IMMEDIATE")
+        # Сырые DML-вызовы вне db_transaction могут открыть неявную
+        # транзакцию между проверкой in_transaction и BEGIN. Повторяем
+        # BEGIN после коммита, чтобы не падать на гонке.
+        for attempt in range(3):
+            try:
+                await bot.db.execute("BEGIN IMMEDIATE")
+                break
+            except aiosqlite.OperationalError as exc:
+                if (
+                    "cannot start a transaction within a transaction"
+                    not in str(exc)
+                    or attempt == 2
+                ):
+                    raise
+                log.warning(
+                    "db_transaction: гонка с незавершённой транзакцией, "
+                    "коммитим и повторяем BEGIN"
+                )
+                await bot.db.commit()
         _DB_TX_OWNER = current
         try:
             yield
@@ -4936,8 +5026,11 @@ def season_progress_bar(remaining: int, needed: int, width: int = 10) -> str:
 
 
 def season_reward(level: int, premium: bool = False) -> dict:
-    """Награды выровнены по новой стоимости уровней (+100 XP за уровень)."""
-    coins = 150 + level * 75
+    """Награды выровнены по стоимости уровней (+100 XP за уровень).
+
+    Монеты: 30 уровень = 150 + 30×55 = 1800.
+    """
+    coins = 150 + level * 55
     gems = 0
     catalysts = 0
     if premium:
@@ -5636,9 +5729,7 @@ async def calculate_passive_income(user_id: int, guild_id: int = None):
     return coins, gems
 
 
-async def calculate_full_passive_income(
-    user_id: int, guild_id: int | None = None
-) -> tuple[int, int]:
+async def calculate_full_passive_income(user_id: int) -> tuple[int, int]:
     """Полный доход без офлайн-штрафа и без потолков.
 
     Используется автосборщиком.
@@ -5759,6 +5850,13 @@ async def get_menu_welcome_notification(user_id: int, guild_id: int = None) -> s
 
 
 async def place_items(user_id: int, item_id: str, quantity: int, commit: bool = True, stars: int = 0) -> tuple[int, int, int]:
+    async with db_transaction():
+        return await _place_items_unlocked(
+            user_id, item_id, quantity, commit=commit, stars=stars
+        )
+
+
+async def _place_items_unlocked(user_id: int, item_id: str, quantity: int, commit: bool = True, stars: int = 0) -> tuple[int, int, int]:
     grid_size = await get_grid_size(user_id)
     storage_size = await get_storage_size(user_id)
     temp_size = TEMP_STORAGE_SIZE
@@ -6499,7 +6597,9 @@ async def update_story_quests(user_id: int, action_type: str, amount: int = 1):
                 )
     if completed_count:
         await add_season_xp(
-            user_id, 50 * completed_count, action="achievement"
+            user_id,
+            season_xp_amount("story_quest", completed_count),
+            action="story_quest",
         )
 
 async def sync_story_achievements(user_id: int):
@@ -6588,7 +6688,7 @@ async def claim_daily(user_id: int) -> dict:
 
         await update_quest_progress(user_id, "claim_daily")
         await check_achievements(user_id)
-        await add_season_xp(user_id, 25, action="daily")
+        await add_season_xp(user_id, season_xp_amount("daily"), action="daily")
         onboarding = await complete_onboarding_step(user_id, "claim_daily")
 
         return {
@@ -6852,8 +6952,9 @@ async def get_top_players(
     member_ids = None
     if guild_id:
         guild = bot.get_guild(guild_id) if hasattr(bot, "get_guild") else None
-        if guild is not None:
-            member_ids = [member.id for member in guild.members]
+        if guild is None:
+            return []
+        member_ids = [member.id for member in guild.members]
 
     def user_filter(column: str = "user_id") -> tuple[str, list]:
         if member_ids is None:
@@ -6867,6 +6968,7 @@ async def get_top_players(
         where, params = user_filter()
         async with bot.db.execute(
             f"SELECT user_id, coins FROM players WHERE 1=1 {where} "
+            f"AND COALESCE(top_excluded, 0) = 0 "
             f"ORDER BY coins DESC LIMIT ?",
             (*params, limit),
         ) as c:
@@ -6876,6 +6978,7 @@ async def get_top_players(
         where, params = user_filter()
         async with bot.db.execute(
             f"SELECT user_id, gems FROM players WHERE 1=1 {where} "
+            f"AND COALESCE(top_excluded, 0) = 0 "
             f"ORDER BY gems DESC LIMIT ?",
             (*params, limit),
         ) as c:
@@ -6885,30 +6988,41 @@ async def get_top_players(
         where, params = user_filter()
         async with bot.db.execute(
             f"SELECT user_id, total_crafts FROM players WHERE 1=1 {where} "
+            f"AND COALESCE(top_excluded, 0) = 0 "
             f"ORDER BY total_crafts DESC LIMIT ?",
             (*params, limit),
         ) as c:
             return await c.fetchall()
 
     elif top_type == "pets":
-        where, params = user_filter()
+        where, params = user_filter("up.user_id")
         async with bot.db.execute(
-            f"SELECT user_id, COUNT(*) AS cnt FROM user_pets_v2 "
-            f"WHERE 1=1 {where} GROUP BY user_id ORDER BY cnt DESC LIMIT ?",
+            f"SELECT up.user_id, COUNT(*) AS cnt FROM user_pets_v2 up "
+            f"JOIN players p ON p.user_id = up.user_id "
+            f"WHERE 1=1 {where} AND COALESCE(p.top_excluded, 0) = 0 "
+            f"GROUP BY up.user_id ORDER BY cnt DESC LIMIT ?",
             (*params, limit),
         ) as c:
             return await c.fetchall()
 
     elif top_type == "power":
         where, params = user_filter("inv.user_id")
+        candidate_limit = max(limit * 10, 100)
         async with bot.db.execute(
             f"SELECT inv.user_id, SUM(i.price * (1 + inv.stars * 0.5)) AS power "
             f"FROM inventory inv JOIN items i ON inv.item_id = i.id "
-            f"WHERE inv.location = 'profile' {where} "
-            f"GROUP BY inv.user_id ORDER BY power DESC LIMIT ?",
-            (*params, limit),
+            f"JOIN players p ON p.user_id = inv.user_id "
+            f"WHERE inv.location = 'profile' AND COALESCE(p.top_excluded, 0) = 0 "
+            f"{where} GROUP BY inv.user_id ORDER BY power DESC LIMIT ?",
+            (*params, candidate_limit),
         ) as c:
-            return await c.fetchall()
+            raw_rows = await c.fetchall()
+        scored = [
+            (user_id, await get_combat_power(user_id))
+            for user_id, _raw_power in raw_rows
+        ]
+        scored.sort(key=lambda row: row[1], reverse=True)
+        return scored[:limit]
 
     elif top_type == "clans":
         clan_where = ""
@@ -6922,6 +7036,10 @@ async def get_top_players(
                 f"WHERE cm2.clan_id = c.id AND cm2.user_id IN ({placeholders}))"
             )
             clan_params = list(member_ids)
+        clan_where = (clan_where or " WHERE 1=1") + (
+            " AND (c.leader_id IS NULL OR c.leader_id NOT IN "
+            "(SELECT user_id FROM players WHERE COALESCE(top_excluded, 0) = 1))"
+        )
         async with bot.db.execute(
             f"""
             SELECT c.id, c.name,
@@ -6954,25 +7072,31 @@ async def get_top_players(
         where, params = user_filter()
         async with bot.db.execute(
             f"SELECT user_id, prestige_points FROM players WHERE 1=1 {where} "
+            f"AND COALESCE(top_excluded, 0) = 0 "
             f"ORDER BY prestige_points DESC LIMIT ?",
             (*params, limit),
         ) as c:
             return await c.fetchall()
 
     elif top_type == "collection":
-        where, params = user_filter()
+        where, params = user_filter("pc.user_id")
         async with bot.db.execute(
-            f"SELECT user_id, COUNT(*) AS cnt FROM player_collection "
-            f"WHERE 1=1 {where} GROUP BY user_id ORDER BY cnt DESC LIMIT ?",
+            f"SELECT pc.user_id, COUNT(*) AS cnt FROM player_collection pc "
+            f"JOIN players p ON p.user_id = pc.user_id "
+            f"WHERE 1=1 {where} AND COALESCE(p.top_excluded, 0) = 0 "
+            f"GROUP BY pc.user_id ORDER BY cnt DESC LIMIT ?",
             (*params, limit),
         ) as c:
             return await c.fetchall()
 
     elif top_type == "duels":
-        where, params = user_filter("winner_id")
+        where, params = user_filter("dh.winner_id")
         async with bot.db.execute(
-            f"SELECT winner_id AS user_id, COUNT(*) AS wins FROM duel_history "
-            f"WHERE 1=1 {where} GROUP BY winner_id ORDER BY wins DESC LIMIT ?",
+            f"SELECT dh.winner_id AS user_id, COUNT(*) AS wins "
+            f"FROM duel_history dh "
+            f"JOIN players p ON p.user_id = dh.winner_id "
+            f"WHERE 1=1 {where} AND COALESCE(p.top_excluded, 0) = 0 "
+            f"GROUP BY dh.winner_id ORDER BY wins DESC LIMIT ?",
             (*params, limit),
         ) as c:
             return await c.fetchall()
@@ -6997,6 +7121,37 @@ async def get_top_players_cached(
     rows = await get_top_players(top_type, limit, guild_id)
     _top_cache[cache_key] = (now, rows)
     return rows
+
+
+async def enforce_top_exclusion(
+    interaction: discord.Interaction,
+    target_id: int,
+    reason: str,
+) -> bool:
+    """Исключает админа/владельца из топов после выдачи ресурса себе."""
+    if target_id != interaction.user.id:
+        return False
+    cur = await bot.db.execute(
+        "UPDATE players SET top_excluded = 1 "
+        "WHERE user_id = ? AND COALESCE(top_excluded, 0) = 0",
+        (target_id,),
+    )
+    await commit_if_needed()
+    _top_cache.clear()
+    if cur.rowcount == 0:
+        return False
+    await log_admin_action(
+        target_id,
+        target_id,
+        "top_exclusion",
+        reason,
+        guild_id=getattr(interaction, "guild_id", None),
+    )
+    try:
+        await interaction.followup.send(TOP_EXCLUSION_NOTICE, ephemeral=True)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+    return True
 
 async def get_advent_state(user_id: int) -> tuple:
     """Возвращает (last_opened_day, last_opened_date, event_key)."""
@@ -7545,12 +7700,12 @@ async def can_send_notification(user_id: int, notif_type: str) -> bool:
 async def mark_notification_sent(user_id: int, notif_type: str):
     """Отмечает, что уведомление отправлено (обновляет last_sent)."""
     now_iso = datetime.datetime.now().isoformat()
-    await bot.db.execute("""
-        INSERT INTO user_notifications (user_id, notif_type, enabled, last_sent)
-        VALUES (?, ?, 1, ?)
-        ON CONFLICT(user_id, notif_type) DO UPDATE SET last_sent = ?
-    """, (user_id, notif_type, now_iso, now_iso))
-    await commit_if_needed()
+    async with db_transaction():
+        await bot.db.execute("""
+            INSERT INTO user_notifications (user_id, notif_type, enabled, last_sent)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(user_id, notif_type) DO UPDATE SET last_sent = ?
+        """, (user_id, notif_type, now_iso, now_iso))
 
 
 async def send_dm_notification(user_id: int, notif_type: str, text: str, embed: discord.Embed = None) -> bool:
@@ -7571,14 +7726,20 @@ async def send_dm_notification(user_id: int, notif_type: str, text: str, embed: 
         return True
     except discord.Forbidden:
         # ЛС закрыты — сохраняем для эфемерной выдачи через /уведомления.
+        # Одна запись на тип, чтобы повторные циклы не плодили дубли.
         title = NOTIFICATION_TYPES.get(notif_type, (notif_type, ""))[0]
         body = text or (embed.description if embed else "")
-        await bot.db.execute(
-            "INSERT INTO notification_fallback "
-            "(user_id, notif_type, title, body) VALUES (?, ?, ?, ?)",
-            (user_id, notif_type, title, body[:1000]),
-        )
-        await commit_if_needed()
+        async with db_transaction():
+            await bot.db.execute(
+                "DELETE FROM notification_fallback "
+                "WHERE user_id = ? AND notif_type = ?",
+                (user_id, notif_type),
+            )
+            await bot.db.execute(
+                "INSERT INTO notification_fallback "
+                "(user_id, notif_type, title, body) VALUES (?, ?, ?, ?)",
+                (user_id, notif_type, title, body[:1000]),
+            )
         return False
     except discord.NotFound:
         return False
@@ -8157,6 +8318,7 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
     }
     start_coins = settings["start_coins"]
     points = await get_prestige_points(user_id)
+    released_bids = 0
 
     try:
         async with db_transaction():
@@ -8197,6 +8359,10 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
                             f"Сначала закрой {label}: перерождение не должно "
                             "терять активные обязательства."
                         )
+
+            # Снимаем ставки игрока на чужих лотах: после сброса
+            # он не должен остаться лидером аукциона с обнулённым балансом.
+            released_bids, _refunded = await release_active_auction_bids(user_id)
 
             # Закрываем активные лоты игрока и возвращаем ставки.
             async with bot.db.execute(
@@ -8270,13 +8436,19 @@ async def do_prestige(user_id: int, guild_id: int | None = None) -> tuple[bool, 
     except ValueError as e:
         return False, f"❌ {e}", 0, points
 
-    await add_season_xp(user_id, 100, guild_id, action="prestige")
+    await add_season_xp(user_id, season_xp_amount("prestige"), guild_id, action="prestige")
     new_points = points + gain
+    bid_note = ""
+    if released_bids:
+        bid_note = (
+            f"\n🏛️ Сняты активные ставки на аукционах: **{released_bids}**."
+        )
     return (
         True,
         f"{get_emoji('_rebirth')} Перерождение завершено! Получено **{gain}** очков престижа.\n"
         f"Всего очков: **{new_points}** "
-        f"(+{int(min(new_points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100)}% к доходу).",
+        f"(+{int(min(new_points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100)}% к доходу)."
+        f"{bid_note}",
         gain,
         new_points,
     )
@@ -8373,7 +8545,7 @@ async def check_achievements(user_id: int):
         await sync_story_achievements(user_id)
         await add_season_xp(
             user_id,
-            30 * len(newly_unlocked),
+            season_xp_amount("achievement_unlock", len(newly_unlocked)),
             action="achievement_unlock",
         )
     return newly_unlocked
@@ -8453,16 +8625,18 @@ async def get_or_create_daily_quests(user_id: int):
 
 
 async def update_quest_progress(user_id: int, quest_id: str, amount: int = 1):
-    quests, progress, claimed = await get_or_create_daily_quests(user_id)
-    if quest_id not in progress or quest_id in claimed:
-        return
+    async with db_transaction():
+        quests, progress, claimed = await get_or_create_daily_quests(user_id)
+        if quest_id not in progress or quest_id in claimed:
+            return
 
-    progress[quest_id] = min(progress[quest_id] + amount, QUEST_POOL[quest_id][1])
-    await bot.db.execute(
-        "UPDATE players SET daily_quest_progress = ? WHERE user_id = ?",
-        (json.dumps(progress), user_id)
-    )
-    await commit_if_needed()
+        progress[quest_id] = min(
+            progress[quest_id] + amount, QUEST_POOL[quest_id][1]
+        )
+        await bot.db.execute(
+            "UPDATE players SET daily_quest_progress = ? WHERE user_id = ?",
+            (json.dumps(progress), user_id)
+        )
 
 
 # ============================================================
@@ -8756,24 +8930,30 @@ async def _guide_section_data(key: str) -> tuple[str, str]:
             "🎫 Сезон",
             "**Что это:** месячный battle pass на 30 уровней.\n\n"
             f"**Стоимость уровней:** 1-й — {SEASON_XP_BASE} XP, каждый "
-            f"следующий +{SEASON_XP_STEP} XP (100, 200, 300 … 3000).\n\n"
+            f"следующий +{SEASON_XP_STEP} XP (100, 200, 300 … 3000).\n"
+            f"Всего до 30 уровня — **{SEASON_TOTAL_XP_TEXT} XP**.\n\n"
             "**Сколько XP даёт действие:**\n"
-            "• Синтез: +25 за успех, +8 за провал.\n"
-            "• Рейд: +40 за победу, +10 за поражение.\n"
-            "• Дуэль: +40 за победу, +10 за поражение.\n"
-            "• Ежедневная награда: +25.\n"
-            "• Ежедневный квест: +20.\n"
-            "• Достижение: +50; новое достижение: +30.\n"
-            "• Перерождение: +100.\n\n"
+            "• Синтез: +50 за успех, +15 за провал.\n"
+            "• Рейд: +150 за победу, +40 за поражение.\n"
+            "• Дуэль: +150 за победу, +40 за поражение.\n"
+            "• Ежедневная награда: +250.\n"
+            "• Ежедневный квест: +120.\n"
+            "• Сюжетный квест: +200; достижение: +100.\n"
+            "• Перерождение: +500.\n\n"
             "**Дневные лимиты:**\n"
-            "• Синтез: 150 успех / 64 провал.\n"
-            "• Рейд и дуэль: 160 победа / 40 поражение.\n"
-            "• Дейли: 25; квест: 100.\n"
-            "• Достижения: 200; новые достижения: 300.\n"
-            "• Перерождение: 200.\n\n"
-            "**Лимит за одно начисление:** достижение — не больше 100 XP, "
-            "новое достижение — не больше 150 XP. Остальные действия "
+            "• Синтез: 400 успех / 120 провал.\n"
+            "• Рейд: 300 победа / 80 поражение.\n"
+            "• Дуэль: 450 победа / 120 поражение.\n"
+            "• Дейли: 250; квест: 360.\n"
+            "• Сюжетные квесты: 400; достижения: 300.\n"
+            "• Перерождение: 500.\n\n"
+            "**Лимит за одно начисление:** сюжетный квест — не больше 400 XP, "
+            "достижение — не больше 300 XP. Остальные действия "
             "начисляются по одному событию.\n\n"
+            f"**Достижимость:** активная игра даёт около "
+            f"{season_expected_daily_xp()} XP/день; за 30 дней это "
+            f"~{season_expected_daily_xp() * 30} XP, поэтому 30 уровень "
+            "достижим без хардкора.\n\n"
             "**Выходные:** +50% к XP, но дневные лимиты не обходятся.\n\n"
             "**Награды:** бесплатная линейка — монеты, гемы и предметы; "
             "премиум — дополнительные гемы и катализаторы.\n\n"
@@ -10685,18 +10865,8 @@ async def expire_market_orders():
                         user_id, item_id, remaining, commit=False, stars=0
                     )
                 except ValueError:
-                    async with bot.db.execute(
-                        "SELECT price FROM items WHERE id = ?", (item_id,)
-                    ) as c:
-                        price_row = await c.fetchone()
-                    compensation = max(
-                        1, int((price_row[0] if price_row else 0) or 0)
-                    ) * remaining
-                    await bot.db.execute(
-                        "UPDATE players SET coins = coins + ?, "
-                        "total_coins_earned = total_coins_earned + ? "
-                        "WHERE user_id = ?",
-                        (compensation, compensation, user_id),
+                    await grant_item_or_compensation(
+                        user_id, item_id, remaining
                     )
             await bot.db.execute(
                 "UPDATE market_orders SET status = 'expired' WHERE id = ?",
@@ -11976,7 +12146,7 @@ GUIDE_SECTIONS = {
     "cosmetics": ("Кастомизация", "Цвет, фон, иконка, титулы"),
     "autocollector": ("Автосборщик", "Покупка, уровни, автодоход"),
     "notifications": ("Уведомления", "5 типов, настройка в ЛС"),
-    "tops": ("Топы", "6 типов, 10/20/30 мест"),
+    "tops": ("Топы", "9 типов, 10/20/30 мест"),
     "analytics": ("Аналитика", "Личная статистика"),
 }
 
@@ -12290,7 +12460,8 @@ async def build_season_embed(user_id: int):
         description=(
             f"До конца сезона: **{data['days_left']} дн.**\n"
             f"Уровень 1 — {SEASON_XP_BASE} XP, каждый следующий "
-            f"+{SEASON_XP_STEP} XP."
+            f"+{SEASON_XP_STEP} XP.\n"
+            f"Всего до {SEASON_LEVELS} уровня — **{SEASON_TOTAL_XP_TEXT} XP**."
         ),
         color=0x9b59b6,
     )
@@ -14916,6 +15087,13 @@ async def create_giveaway(
             log.exception("Не удалось отменить розыгрыш после ошибки отправки")
         return False, "❌ Не удалось отправить сообщение розыгрыша."
 
+    await log_admin_action(
+        creator_id,
+        0,
+        "giveaway_create",
+        f"server:{meta['reward_type']}:{meta['amount']}x{winners_int}",
+        guild_id=guild_id,
+    )
     return True, f"✅ Розыгрыш создан: {message.jump_url}"
 
 
@@ -15000,6 +15178,12 @@ async def create_global_giveaway(
             "Проверь права бота и включённую функцию «Розыгрыши»."
         )
 
+    await log_admin_action(
+        creator_id,
+        0,
+        "giveaway_create",
+        f"global:{meta['reward_type']}:{meta['amount']}x{winners_int}:servers={sent}",
+    )
     return True, (
         f"✅ Глобальный розыгрыш создан и отправлен на "
         f"**{sent}** сервер(ов)."
@@ -15705,14 +15889,21 @@ async def decide_clan_application(
     if not has_clan_permission(role, "invite"):
         return False, "Недостаточно прав."
     if approve:
-        if await get_clan(target_id):
-            return False, "Игрок уже состоит в клане."
-        capacity = await get_clan_capacity(clan_id)
-        members = await get_clan_member_count(clan_id)
-        if members >= capacity:
-            return False, "Клан заполнен. Нужно расширить состав."
         try:
             async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT status FROM clan_applications WHERE id = ?",
+                    (app_id,),
+                ) as c:
+                    fresh = await c.fetchone()
+                if not fresh or fresh[0] != "pending":
+                    raise ValueError("Заявка уже обработана.")
+                if await get_clan(target_id):
+                    raise ValueError("Игрок уже состоит в клане.")
+                capacity = await get_clan_capacity(clan_id)
+                members = await get_clan_member_count(clan_id)
+                if members >= capacity:
+                    raise ValueError("Клан заполнен. Нужно расширить состав.")
                 await bot.db.execute(
                     "INSERT INTO clan_members (user_id, clan_id, role) "
                     "VALUES (?, ?, 'member')",
@@ -15725,8 +15916,9 @@ async def decide_clan_application(
                 await bot.db.execute(
                     "DELETE FROM clan_invites WHERE target_id = ?", (target_id,)
                 )
-        except aiosqlite.IntegrityError:
-            return False, "Игрок уже состоит в клане."
+        except (ValueError, aiosqlite.IntegrityError) as exc:
+            msg = str(exc) if isinstance(exc, ValueError) else "Игрок уже состоит в клане."
+            return False, msg
         await log_clan(clan_id, "join", f"<@{target_id}> (заявка)")
         await update_story_quests(target_id, "clan_join", 1)
         return True, f"✅ <@{target_id}> принят в клан."
@@ -17961,7 +18153,9 @@ async def finalize_raid(result: dict):
                 await check_achievements(uid)
             await add_season_xp(
                 uid,
-                40 if result["success"] else 10,
+                season_xp_amount(
+                    "raid_win" if result["success"] else "raid_loss"
+                ),
                 action="raid_win" if result["success"] else "raid_loss",
             )
         except Exception:
@@ -18986,8 +19180,8 @@ async def resolve_duel(
     await check_achievements(opponent_id)
 
     loser = opponent_id if winner == challenger_id else challenger_id
-    await add_season_xp(winner, 40, guild_id, action="duel_win")
-    await add_season_xp(loser, 10, guild_id, action="duel_loss")
+    await add_season_xp(winner, season_xp_amount("duel_win"), guild_id, action="duel_win")
+    await add_season_xp(loser, season_xp_amount("duel_loss"), guild_id, action="duel_loss")
 
     winner_name = f"<@{winner}>"
     msg = (
@@ -22503,90 +22697,104 @@ class SwapSecondView(SafeView):
         second_slot = int(interaction.data["values"][0])
         await interaction.response.defer()
 
-        async with bot.db.execute(
-            "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
-            "WHERE user_id = ? AND location = ? AND slot = ?",
-            (self.author_id, self.location, self.first_slot)
-        ) as c:
-            first = await c.fetchone()
-        async with bot.db.execute(
-            "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
-            "WHERE user_id = ? AND location = ? AND slot = ?",
-            (self.author_id, self.location, second_slot)
-        ) as c:
-            second = await c.fetchone()
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (self.author_id, self.location, self.first_slot)
+                ) as c:
+                    first = await c.fetchone()
+                async with bot.db.execute(
+                    "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (self.author_id, self.location, second_slot)
+                ) as c:
+                    second = await c.fetchone()
 
-        if not first:
+                if not first:
+                    raise ValueError("Исходный слот пуст.")
+
+                if second is None:
+                    cur = await bot.db.execute(
+                        "DELETE FROM inventory "
+                        "WHERE user_id = ? AND location = ? AND slot = ?",
+                        (self.author_id, self.location, self.first_slot)
+                    )
+                    if cur.rowcount == 0:
+                        raise ValueError("Предмет уже перемещён.")
+                    await bot.db.execute(
+                        "INSERT INTO inventory "
+                        "(user_id, slot, item_id, location, stars, is_locked) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            self.author_id,
+                            second_slot,
+                            first[0],
+                            self.location,
+                            first[1],
+                            first[2],
+                        )
+                    )
+                    result_title = "✅ Предмет перемещён"
+                    result_text = (
+                        f"Предмет из слота **{self.first_slot}** перемещён "
+                        f"в пустой слот **{second_slot}**."
+                    )
+                else:
+                    cur = await bot.db.execute(
+                        "DELETE FROM inventory "
+                        "WHERE user_id = ? AND location = ? "
+                        "AND slot IN (?, ?)",
+                        (
+                            self.author_id,
+                            self.location,
+                            self.first_slot,
+                            second_slot,
+                        )
+                    )
+                    if cur.rowcount < 2:
+                        raise ValueError("Один из слотов уже изменился.")
+                    await bot.db.execute(
+                        "INSERT INTO inventory "
+                        "(user_id, slot, item_id, location, stars, is_locked) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            self.author_id,
+                            self.first_slot,
+                            second[0],
+                            self.location,
+                            second[1],
+                            second[2],
+                        )
+                    )
+                    await bot.db.execute(
+                        "INSERT INTO inventory "
+                        "(user_id, slot, item_id, location, stars, is_locked) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            self.author_id,
+                            second_slot,
+                            first[0],
+                            self.location,
+                            first[1],
+                            first[2],
+                        )
+                    )
+                    result_title = "✅ Слоты поменяны"
+                    result_text = (
+                        f"Предметы в слотах **{self.first_slot}** и "
+                        f"**{second_slot}** поменялись местами."
+                    )
+        except (ValueError, aiosqlite.IntegrityError) as exc:
             return await interaction.edit_original_response(
                 embed=BotEmbed(
                     title="❌ Ошибка",
-                    description="Исходный слот пуст.",
+                    description=str(exc),
                     color=0xe74c3c,
                 ),
-                view=None
+                view=None,
             )
-
-        if second is None:
-            await bot.db.execute(
-                "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-                (self.author_id, self.location, self.first_slot)
-            )
-            await bot.db.execute(
-                "INSERT INTO inventory "
-                "(user_id, slot, item_id, location, stars, is_locked) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    self.author_id,
-                    second_slot,
-                    first[0],
-                    self.location,
-                    first[1],
-                    first[2],
-                )
-            )
-            result_title = "✅ Предмет перемещён"
-            result_text = (
-                f"Предмет из слота **{self.first_slot}** перемещён "
-                f"в пустой слот **{second_slot}**."
-            )
-        else:
-            await bot.db.execute(
-                "DELETE FROM inventory WHERE user_id = ? AND location = ? "
-                "AND slot IN (?, ?)",
-                (self.author_id, self.location, self.first_slot, second_slot)
-            )
-            await bot.db.execute(
-                "INSERT INTO inventory "
-                "(user_id, slot, item_id, location, stars, is_locked) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    self.author_id,
-                    self.first_slot,
-                    second[0],
-                    self.location,
-                    second[1],
-                    second[2],
-                )
-            )
-            await bot.db.execute(
-                "INSERT INTO inventory "
-                "(user_id, slot, item_id, location, stars, is_locked) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    self.author_id,
-                    second_slot,
-                    first[0],
-                    self.location,
-                    first[1],
-                    first[2],
-                )
-            )
-            result_title = "✅ Слоты поменяны"
-            result_text = (
-                f"Предметы в слотах **{self.first_slot}** и "
-                f"**{second_slot}** поменялись местами."
-            )
-        await commit_if_needed()
         await update_quest_progress(self.author_id, "swap_1")
 
         embed = BotEmbed(
@@ -23099,6 +23307,7 @@ class MoveView(SafeView):
         super().__init__(timeout=180)
         self.author_id = author_id
         self.source = source
+        self.feature_key = "storage" if source in ("storage", "temp") else None
         self.page = page
         self.total_pages = total_pages
         self.main_message = main_message
@@ -23143,42 +23352,62 @@ class MoveView(SafeView):
         else:
             target = "storage"
         
-        async with bot.db.execute(
-            "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
-            "WHERE user_id = ? AND location = ? AND slot = ?",
-            (user_id, self.source, slot)
-        ) as c:
-            row = await c.fetchone()
-        if not row:
-            return await interaction.edit_original_response(embed=BotEmbed(title="❌ Ошибка", description="Предмета уже нет.", color=0xe74c3c), view=None)
-        item_id = row[0]
-        stars = row[1]
-        is_locked = row[2]
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT item_id, stars, COALESCE(is_locked, 0) FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (user_id, self.source, slot)
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("Предмета уже нет.")
+                item_id = row[0]
+                stars = row[1]
+                is_locked = row[2]
 
-        target_size = await (get_storage_size(user_id) if target == "storage" else get_grid_size(user_id))
-        async with bot.db.execute("SELECT slot FROM inventory WHERE user_id = ? AND location = ?", (user_id, target)) as c:
-            used = {r[0] for r in await c.fetchall()}
-        free = [s for s in range(target_size) if s not in used]
+                target_size = await (
+                    get_storage_size(user_id)
+                    if target == "storage"
+                    else get_grid_size(user_id)
+                )
+                async with bot.db.execute(
+                    "SELECT slot FROM inventory "
+                    "WHERE user_id = ? AND location = ?",
+                    (user_id, target),
+                ) as c:
+                    used = {r[0] for r in await c.fetchall()}
+                free = [s for s in range(target_size) if s not in used]
+                if not free:
+                    raise ValueError(
+                        f"В хранилище нет места (макс. {target_size})."
+                        if target == "storage"
+                        else f"На энергостанции нет места (макс. {target_size})."
+                    )
 
-        if not free:
-            no_space = (
-                f"В хранилище нет места (макс. {target_size})."
-                if target == "storage"
-                else f"На энергостанции нет места (макс. {target_size})."
-            )
+                new_slot = free[0]
+                cur = await bot.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (user_id, self.source, slot),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Предмета уже нет.")
+                await bot.db.execute(
+                    "INSERT INTO inventory "
+                    "(user_id, slot, item_id, location, stars, is_locked) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, new_slot, item_id, target, stars, is_locked),
+                )
+        except (ValueError, aiosqlite.IntegrityError) as exc:
             return await interaction.edit_original_response(
-                embed=BotEmbed(title="❌ Ошибка", description=no_space, color=0xe74c3c), 
-                view=None
+                embed=BotEmbed(
+                    title="❌ Ошибка",
+                    description=str(exc),
+                    color=0xe74c3c,
+                ),
+                view=None,
             )
-
-        new_slot = free[0]
-        await bot.db.execute("DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?", (user_id, self.source, slot))
-        await bot.db.execute(
-            "INSERT INTO inventory (user_id, slot, item_id, location, stars, is_locked) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, new_slot, item_id, target, stars, is_locked),
-        )
-        await commit_if_needed()
 
         await update_quest_progress(user_id, "move_2")
         await update_quest_progress(user_id, "move_5")
@@ -23605,7 +23834,9 @@ class CraftConfirmView(SafeView):
         unlocked = await check_achievements(user_id)
         await add_season_xp(
             user_id,
-            25 if success else 8,
+            season_xp_amount(
+                "craft_success" if success else "craft_fail"
+            ),
             interaction.guild_id,
             action="craft_success" if success else "craft_fail",
         )
@@ -24118,16 +24349,16 @@ async def expire_bank_loans():
     ) as c:
         loans = await c.fetchall()
 
-    for user_id, amount, item_id, stars in loans:
-        await bot.db.execute(
-            "DELETE FROM bank_loans WHERE user_id = ?", (user_id,)
-        )
-        await bot.db.execute(
-            "INSERT INTO bank_history (user_id, amount, kind, details) "
-            "VALUES (?, ?, 'loan_default', ?)",
-            (user_id, amount, f"{item_id} {stars}★"),
-        )
-    await commit_if_needed()
+    async with db_transaction():
+        for user_id, amount, item_id, stars in loans:
+            await bot.db.execute(
+                "DELETE FROM bank_loans WHERE user_id = ?", (user_id,)
+            )
+            await bot.db.execute(
+                "INSERT INTO bank_history (user_id, amount, kind, details) "
+                "VALUES (?, ?, 'loan_default', ?)",
+                (user_id, amount, f"{item_id} {stars}★"),
+            )
 
 
 async def build_bank_embed(user_id: int) -> tuple[discord.Embed, bool, bool]:
@@ -24797,6 +25028,45 @@ class AuctionCancelSelectView(SafeView):
         await open_auction_view(interaction, self.author_id)
 
 
+async def release_active_auction_bids(user_id: int) -> tuple[int, int]:
+    """Снимает активные ставки игрока на чужих лотах.
+
+    Возвращает (количество лотов, сумма возврата). Вызывать только
+    внутри db_transaction. Лот возвращается к стартовой цене и снова
+    доступен для ставок.
+    """
+    async with bot.db.execute(
+        "SELECT id, current_bid, start_price FROM auctions "
+        "WHERE current_bidder = ? AND status = 'active' "
+        "AND COALESCE(seller_id, 0) != ?",
+        (user_id, user_id),
+    ) as c:
+        lots = await c.fetchall()
+
+    total_refund = 0
+    for auction_id, current_bid, start_price in lots:
+        refund = max(0, int(current_bid or 0))
+        if refund:
+            await bot.db.execute(
+                "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                (refund, user_id),
+            )
+            total_refund += refund
+        await bot.db.execute(
+            "UPDATE auctions SET current_bid = ?, current_bidder = NULL "
+            "WHERE id = ? AND status = 'active' AND current_bidder = ?",
+            (max(0, int(start_price or 0)), auction_id, user_id),
+        )
+        if refund:
+            await bot.db.execute(
+                "INSERT INTO auction_bids "
+                "(auction_id, bidder_id, amount, kind) "
+                "VALUES (?, ?, ?, 'refund')",
+                (auction_id, user_id, refund),
+            )
+    return len(lots), total_refund
+
+
 async def place_auction_bid(
     user_id: int, auction_id: int, amount: int
 ) -> tuple[bool, str, int | None, bool]:
@@ -24896,6 +25166,7 @@ async def place_auction_bid(
 async def buyout_auction(user_id: int, auction_id: int) -> tuple[bool, str, int]:
     """Выкупает лот по buyout-цене. Возвращает (ok, message, compensation)."""
     compensation = 0
+    mailbox_sent = False
     try:
         async with db_transaction():
             async with bot.db.execute(
@@ -24957,16 +25228,10 @@ async def buyout_auction(user_id: int, auction_id: int) -> tuple[bool, str, int]
                     user_id, item_id, 1, commit=False, stars=stars or 0
                 )
             except ValueError:
-                async with bot.db.execute(
-                    "SELECT price FROM items WHERE id = ?", (item_id,)
-                ) as c:
-                    price_row = await c.fetchone()
-                compensation = max(1, int((price_row[0] if price_row else 0) or 0))
-                await bot.db.execute(
-                    "UPDATE players SET coins = coins + ?, "
-                    "total_coins_earned = total_coins_earned + ? WHERE user_id = ?",
-                    (compensation, compensation, user_id),
+                await grant_item_or_compensation(
+                    user_id, item_id, 1, stars or 0
                 )
+                mailbox_sent = True
 
             await bot.db.execute(
                 "UPDATE auctions SET status = 'finished', current_bid = ?, "
@@ -24987,8 +25252,8 @@ async def buyout_auction(user_id: int, auction_id: int) -> tuple[bool, str, int]
     await update_quest_progress(user_id, "bid_auction")
     await check_achievements(user_id)
     message = f"{get_emoji('_approve')} Лот #{auction_id} куплен за 🪙 {buyout_price}!"
-    if compensation:
-        message += f"\nНет места — начислена компенсация 🪙 {compensation}."
+    if mailbox_sent:
+        message += "\nНет места — предмет отправлен в почту."
     return True, message, compensation
 
 
@@ -25057,8 +25322,15 @@ async def build_auction_history_embed(auction_id: int) -> discord.Embed:
     if bids:
         lines = []
         for bidder_id, amount, kind, timestamp in bids:
-            icon = get_emoji("_approve") if kind == "buyout" else get_emoji("_coin")
-            kind_name = "выкуп" if kind == "buyout" else "ставка"
+            if kind == "buyout":
+                icon = get_emoji("_approve")
+                kind_name = "выкуп"
+            elif kind == "refund":
+                icon = get_emoji("_back")
+                kind_name = "возврат"
+            else:
+                icon = get_emoji("_coin")
+                kind_name = "ставка"
             lines.append(
                 f"{icon} <@{bidder_id}> — 🪙 **{amount}** ({kind_name})\n"
                 f"`{str(timestamp)[:16]}`"
@@ -25458,7 +25730,7 @@ class ClaimQuestSelectView(SafeView):
         )
         await commit_if_needed()
         await add_season_xp(
-            user_id, 20, interaction.guild_id, action="quest"
+            user_id, season_xp_amount("quest"), interaction.guild_id, action="quest"
         )
         embed = BotEmbed(
             title="🎁 Награда получена",
@@ -26469,11 +26741,38 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
 
         settings = await get_settings(interaction.guild_id)
         start_coins = settings["start_coins"]
+        released_bids = 0
 
         try:
             async with db_transaction():
+                # Не теряем эскроу/долги при сбросе: сначала закрываем обязательства.
+                for label, sql in (
+                    ("вклад", "SELECT 1 FROM bank_deposits WHERE user_id = ?"),
+                    (
+                        "кредит",
+                        "SELECT 1 FROM bank_loans WHERE user_id = ? "
+                        "AND COALESCE(status, 'active') = 'active'",
+                    ),
+                    (
+                        "ордера биржи",
+                        "SELECT 1 FROM market_orders WHERE user_id = ? "
+                        "AND status = 'active'",
+                    ),
+                ):
+                    async with bot.db.execute(sql, (self.author_id,)) as c:
+                        if await c.fetchone():
+                            raise ValueError(
+                                f"Сначала закрой {label}: сброс не должен "
+                                "терять активные обязательства."
+                            )
+
                 # Убираем игрока из отряда и удаляем его приглашения.
                 await detach_user_from_raid_party(self.author_id)
+
+                # Снимаем ставки на чужих лотах до обнуления баланса.
+                released_bids, _refunded = await release_active_auction_bids(
+                    self.author_id
+                )
 
                 # Возвращаем ставки по активным лотам игрока и удаляем лоты.
                 async with bot.db.execute(
@@ -26510,7 +26809,9 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                         title = 'Новичок',
                         active_pet = NULL,
                         last_tax_time = CURRENT_TIMESTAMP,
-                        raid_wins = 0
+                        raid_wins = 0,
+                        prestige_points = 0,
+                        top_excluded = 0
                     WHERE user_id = ?
                 """, (start_coins, self.author_id))
 
@@ -26523,7 +26824,8 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                     "user_cosmetics", "tax_log", "raid_cooldowns",
                     "duel_cooldowns", "espionage_cooldowns", "season_progress",
                     "season_xp_log", "market_orders", "onboarding_progress",
-                    "clan_applications", "giveaway_entries",
+                    "clan_applications", "giveaway_entries", "mailbox",
+                    "notification_fallback", "player_collection",
                 ):
                     await bot.db.execute(
                         f"DELETE FROM {table} WHERE user_id = ?", (self.author_id,)
@@ -26536,17 +26838,28 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                 await bot.db.execute(
                     "DELETE FROM raid_loot_log WHERE user_id = ?", (self.author_id,)
                 )
+        except ValueError as exc:
+            return await interaction.followup.send(f"❌ {exc}", ephemeral=True)
         except Exception:
             log.exception("Не удалось сбросить прогресс пользователя %s", self.author_id)
             return await interaction.followup.send(
                 "❌ Не удалось сбросить прогресс. Попробуй позже.", ephemeral=True
             )
 
+        onboarding_cache = getattr(bot, "_onboarding_complete_cache", None)
+        if onboarding_cache is not None:
+            onboarding_cache.discard(self.author_id)
+        _top_cache.clear()
+
         await log_admin_action(self.author_id, self.author_id, "self_reset", "user reset")
-        await interaction.followup.send(
-            "✅ Прогресс сброшен. Энергостанция, инвентарь, питомцы и квесты очищены.",
-            ephemeral=True,
+        reset_message = (
+            "✅ Прогресс сброшен. Энергостанция, инвентарь, питомцы и квесты очищены."
         )
+        if released_bids:
+            reset_message += (
+                f"\n🏛️ Сняты активные ставки на аукционах: **{released_bids}**."
+            )
+        await interaction.followup.send(reset_message, ephemeral=True)
         if self.main_message:
             embed = await build_user_profile_embed(interaction)
             try:
@@ -27292,6 +27605,9 @@ class AdminSeasonPremiumModal(discord.ui.Modal, title="Выдать премиу
             return await interaction.followup.send(
                 "❌ Не удалось обновить прогресс.", ephemeral=True
             )
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:season_premium"
+        )
         await interaction.followup.send(
             f"✅ Премиум-пропуск выдан <@{uid}>.", ephemeral=True
         )
@@ -27330,6 +27646,9 @@ class AdminSeasonXpModal(discord.ui.Modal, title="Выдать сезонный 
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "season_xp", str(amount))
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:season_xp"
+        )
         await interaction.followup.send(
             f"✅ <@{uid}> получил **{amount}** сезонного XP.", ephemeral=True
         )
@@ -27486,6 +27805,9 @@ class AdminGrantPrestigeModal(discord.ui.Modal, title="Выдать очки п�
         await log_admin_action(
             self.author_id, uid, "prestige_grant", str(amount)
         )
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:prestige"
+        )
         await interaction.followup.send(
             f"✅ <@{uid}> получил **{amount}** очков престижа.", ephemeral=True
         )
@@ -27604,6 +27926,9 @@ class AdminGiveAchievementModal(discord.ui.Modal, title="Выдать дости
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_achievement", f"{ach_id} (+{reward}💎)")
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:achievement"
+        )
         await interaction.followup.send(
             f"✅ Достижение {emoji} **{name}** выдано <@{uid}>, награда 💎 {reward}.",
             ephemeral=True
@@ -27738,6 +28063,9 @@ class AdminCompleteStoryModal(discord.ui.Modal, title="Завершить сюж
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "complete_story", f"{qid} (+{reward}💎)")
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:story_reward"
+        )
         await interaction.followup.send(
             f"✅ Квест «{name}» завершён у <@{uid}>, награда 💎 {reward}.", ephemeral=True
         )
@@ -27893,6 +28221,9 @@ class AdminOpenAdventModal(discord.ui.Modal, title="Открыть окошко 
             "open_advent",
             f"day={day}, event={event['key']}",
         )
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:advent"
+        )
         msg = f"✅ Окошко {day} открыто у <@{uid}>: 🪙 {coins} | 💎 {gems}"
         if item_name:
             msg += f" | 🎁 {item_name}"
@@ -28025,6 +28356,9 @@ class AdminGiveAutocollectorModal(discord.ui.Modal, title="Выдать авто
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_autocollector", "level=1")
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:autocollector"
+        )
         await interaction.followup.send(
             f"✅ Автосборщик (1 ур.) выдан <@{uid}>.", ephemeral=True
         )
@@ -28065,6 +28399,9 @@ class AdminSetAutocollectorLevelModal(discord.ui.Modal, title="Установи�
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "set_autocollector_level", f"→ {lvl}")
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:autocollector_level"
+        )
         await interaction.followup.send(
             f"✅ Уровень автосборщика <@{uid}> = **{lvl}**.", ephemeral=True
         )
@@ -28138,7 +28475,7 @@ class AdminGiveDepositModal(discord.ui.Modal, title="Выдать вклад"):
             uid = int(self.user_id.value)
             amt = int(self.amount.value)
             days = int(self.days.value)
-            if amt <= 0 or days < 1 or days > 30:
+            if amt <= 0 or amt > ADMIN_MAX_RESOURCE or days < 1 or days > 30:
                 raise ValueError
         except ValueError:
             await interaction.followup.send(
@@ -28163,18 +28500,22 @@ class AdminGiveDepositModal(discord.ui.Modal, title="Выдать вклад"):
         end = now + datetime.timedelta(days=days)
         rate = BANK_DAILY_RATE * days
 
-        await bot.db.execute("""
-            INSERT INTO bank_deposits (user_id, amount, interest_rate, start_time, end_time)
-            VALUES (?, ?, ?, ?, ?)
-        """, (uid, amt, rate, now.isoformat(), end.isoformat()))
+        async with db_transaction():
+            await bot.db.execute("""
+                INSERT INTO bank_deposits (user_id, amount, interest_rate, start_time, end_time)
+                VALUES (?, ?, ?, ?, ?)
+            """, (uid, amt, rate, now.isoformat(), end.isoformat()))
 
-        # история для титула "banker"
-        await bot.db.execute(
-            "INSERT INTO bank_history (user_id, amount) VALUES (?, ?)", (uid, amt)
-        )
+            # история для титула "banker"
+            await bot.db.execute(
+                "INSERT INTO bank_history (user_id, amount) VALUES (?, ?)",
+                (uid, amt),
+            )
 
-        await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_deposit", f"{amt} на {days} дн.")
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:deposit"
+        )
         await interaction.followup.send(
             f"✅ Вклад 🪙 {amt} на {days} дн. выдан <@{uid}>.", ephemeral=True
         )
@@ -28265,22 +28606,18 @@ class AdminRemoveAuctionModal(discord.ui.Modal, title="Удалить лот"):
             )
             return
 
-        # возвращаем предмет продавцу
-        try:
-            await place_items(seller_id, item_id, 1)
-        except ValueError:
-            await interaction.followup.send(
-                "⚠️ У продавца нет места — предмет потерян.", ephemeral=True
-            )
+        async with db_transaction():
+            # возвращаем предмет продавцу (при нехватке места — в почту)
+            await grant_item_or_compensation(seller_id, item_id, 1, stars or 0)
 
-        # возвращаем ставку лидеру
-        if bidder and bid:
-            await bot.db.execute(
-                "UPDATE players SET coins = coins + ? WHERE user_id = ?", (bid, bidder)
-            )
+            # возвращаем ставку лидеру
+            if bidder and bid:
+                await bot.db.execute(
+                    "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                    (bid, bidder),
+                )
 
-        await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
-        await commit_if_needed()
+            await bot.db.execute("DELETE FROM auctions WHERE id = ?", (aid,))
         await log_admin_action(self.author_id, seller_id, "remove_auction", f"id={aid}")
         await interaction.followup.send(
             f"✅ Лот {aid} удалён, предмет возвращён продавцу"
@@ -28693,6 +29030,9 @@ class AdminGivePetModal(discord.ui.Modal, title="Выдать питомца"):
 
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "give_pet", pet_id)
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:pet"
+        )
         await interaction.followup.send(
             f"✅ Питомец **{PET_TYPES[pet_id]['name']}** выдан <@{uid}>.", ephemeral=True
         )
@@ -28738,6 +29078,9 @@ class AdminSetPetLevelModal(discord.ui.Modal, title="Установить уро
         )
         await commit_if_needed()
         await log_admin_action(self.author_id, uid, "set_pet_level", f"{pet_id} → {lvl}")
+        await enforce_top_exclusion(
+            interaction, uid, "self_grant:pet_level"
+        )
         await interaction.followup.send(
             f"✅ Уровень **{pet_id}** = **{lvl}** для <@{uid}>.", ephemeral=True
         )
@@ -28799,7 +29142,13 @@ class AdminGrantView(AdminView):
         return await super().interaction_check(interaction)
 
     async def currency_select(self, interaction: discord.Interaction):
-        self.currency = interaction.data["values"][0]
+        value = (interaction.data.get("values") or [None])[0]
+        if value not in ("coins", "gems"):
+            await interaction.response.send_message(
+                "❌ Неверная валюта.", ephemeral=True
+            )
+            return
+        self.currency = value
         await interaction.response.defer()
 
     async def enter(self, interaction: discord.Interaction):
@@ -28835,7 +29184,13 @@ class AdminTakeView(AdminView):
         return await super().interaction_check(interaction)
 
     async def currency_select(self, interaction: discord.Interaction):
-        self.currency = interaction.data["values"][0]
+        value = (interaction.data.get("values") or [None])[0]
+        if value not in ("coins", "gems"):
+            await interaction.response.send_message(
+                "❌ Неверная валюта.", ephemeral=True
+            )
+            return
+        self.currency = value
         await interaction.response.defer()
 
     async def enter(self, interaction: discord.Interaction):
@@ -28939,33 +29294,48 @@ class AdminGrantValuesModal(discord.ui.Modal, title="Начислить"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        if self.currency not in ("coins", "gems"):
+            return await interaction.followup.send(
+                "❌ Неверная валюта.", ephemeral=True
+            )
         try:
             uid = int(self.user_id.value)
             amount = int(self.amount.value)
-            if amount <= 0:
+            if amount <= 0 or amount > ADMIN_MAX_RESOURCE:
                 raise ValueError
         except ValueError:
-            await interaction.followup.send("❌ ID и количество — числа > 0.", ephemeral=True)
-            return
-        async with bot.db.execute("SELECT 1 FROM players WHERE user_id = ?", (uid,)) as c:
-            if not await c.fetchone():
+            return await interaction.followup.send(
+                f"❌ ID и количество: 1–{ADMIN_MAX_RESOURCE}.",
+                ephemeral=True,
+            )
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT 1 FROM players WHERE user_id = ?", (uid,)
+            ) as c:
+                exists = await c.fetchone()
+            if not exists:
                 await bot.db.execute(
                     "INSERT OR IGNORE INTO players "
                     "(user_id, coins, last_gem_collected, last_tax_time) "
                     "VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                     (uid, DEFAULT_START_COINS),
                 )
-        await bot.db.execute(
-            f"UPDATE players SET {self.currency} = {self.currency} + ? WHERE user_id = ?",
-            (amount, uid)
-        )
-        await commit_if_needed()
+            await bot.db.execute(
+                f"UPDATE players SET {self.currency} = {self.currency} + ? "
+                "WHERE user_id = ?",
+                (amount, uid),
+            )
         await log_admin_action(
             self.author_id, uid, "grant",
             f"{self.currency} +{amount}"
         )
+        await enforce_top_exclusion(
+            interaction, uid, f"self_grant:{self.currency}"
+        )
         unit = "🪙" if self.currency == "coins" else "💎"
-        await interaction.followup.send(f"✅ Начислено {amount} {unit} <@{uid}>.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Начислено {amount} {unit} <@{uid}>.", ephemeral=True
+        )
 
 
 class AdminTakeValuesModal(discord.ui.Modal, title="Забрать"):
@@ -28979,33 +29349,48 @@ class AdminTakeValuesModal(discord.ui.Modal, title="Забрать"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        if self.currency not in ("coins", "gems"):
+            return await interaction.followup.send(
+                "❌ Неверная валюта.", ephemeral=True
+            )
         try:
             uid = int(self.user_id.value)
             amount = int(self.amount.value)
-            if amount <= 0:
+            if amount <= 0 or amount > ADMIN_MAX_RESOURCE:
                 raise ValueError
         except ValueError:
-            await interaction.followup.send("❌ ID и количество — числа > 0.", ephemeral=True)
-            return
-        async with bot.db.execute(f"SELECT {self.currency} FROM players WHERE user_id = ?", (uid,)) as c:
-            row = await c.fetchone()
-        if not row:
-            await interaction.followup.send("❌ Игрок не найден.", ephemeral=True)
-            return
-        if row[0] < amount:
-            await interaction.followup.send(f"❌ У игрока только {row[0]}.", ephemeral=True)
-            return
-        await bot.db.execute(
-            f"UPDATE players SET {self.currency} = {self.currency} - ? WHERE user_id = ?",
-            (amount, uid)
-        )
-        await commit_if_needed()
+            return await interaction.followup.send(
+                f"❌ ID и количество: 1–{ADMIN_MAX_RESOURCE}.",
+                ephemeral=True,
+            )
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    f"SELECT {self.currency} FROM players WHERE user_id = ?",
+                    (uid,),
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("Игрок не найден.")
+                if row[0] < amount:
+                    raise ValueError(f"У игрока только {row[0]}.")
+                cur = await bot.db.execute(
+                    f"UPDATE players SET {self.currency} = {self.currency} - ? "
+                    f"WHERE user_id = ? AND {self.currency} >= ?",
+                    (amount, uid, amount),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Баланс изменился, попробуй снова.")
+        except ValueError as exc:
+            return await interaction.followup.send(f"❌ {exc}", ephemeral=True)
         await log_admin_action(
             self.author_id, uid, "take",
             f"{self.currency} -{amount}"
         )
         unit = "🪙" if self.currency == "coins" else "💎"
-        await interaction.followup.send(f"✅ Забрано {amount} {unit} у <@{uid}>.", ephemeral=True)
+        await interaction.followup.send(
+            f"✅ Забрано {amount} {unit} у <@{uid}>.", ephemeral=True
+        )
 
 
 class AdminProfileModal(discord.ui.Modal, title="Профиль игрока"):
@@ -29109,13 +29494,33 @@ class AdminEditModal(discord.ui.Modal, title="Изменить поле проф
         except ValueError:
             await interaction.followup.send("❌ Неверное значение.", ephemeral=True)
             return
-        await bot.db.execute(f"UPDATE players SET {field} = ? WHERE user_id = ?", (parsed, uid))
-        await commit_if_needed()
+        max_value = {
+            "grid_size": ADMIN_MAX_GRID,
+            "storage_size": ADMIN_MAX_STORAGE,
+            "prestige_points": ADMIN_MAX_PRESTIGE,
+        }.get(field, ADMIN_MAX_RESOURCE)
+        if parsed > max_value:
+            await interaction.followup.send(
+                f"❌ Максимум для `{field}`: **{max_value}**.",
+                ephemeral=True,
+            )
+            return
+        async with db_transaction():
+            await bot.db.execute(
+                f"UPDATE players SET {field} = ? WHERE user_id = ?",
+                (parsed, uid),
+            )
         await log_admin_action(
             self.author_id, uid, "edit",
             f"{field} = {parsed}"
         )
-        await interaction.followup.send(f"✅ `{field}` = **{parsed}** для <@{uid}>.", ephemeral=True)
+        await enforce_top_exclusion(
+            interaction, uid, f"self_edit:{field}"
+        )
+        await interaction.followup.send(
+            f"✅ `{field}` = **{parsed}** для <@{uid}>.",
+            ephemeral=True,
+        )
 
 
 class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс"):
@@ -29136,9 +29541,22 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
         except ValueError:
             await interaction.followup.send("❌ ID должен быть числом.", ephemeral=True)
             return
+        async with bot.db.execute(
+            "SELECT 1 FROM market_orders WHERE user_id = ? AND status = 'active'",
+            (uid,),
+        ) as c:
+            if await c.fetchone():
+                return await interaction.followup.send(
+                    "❌ Сначала отмени активные ордера игрока на бирже.",
+                    ephemeral=True,
+                )
+        released_bids = 0
         async with db_transaction():
             # Убираем игрока из отряда и удаляем его приглашения.
             await detach_user_from_raid_party(uid)
+
+            # Снимаем ставки на чужих лотах до обнуления баланса.
+            released_bids, _refunded = await release_active_auction_bids(uid)
 
             # Возвращаем ставки по активным лотам и удаляем лоты игрока.
             async with bot.db.execute(
@@ -29176,7 +29594,8 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                     active_pet = NULL,
                     last_tax_time = CURRENT_TIMESTAMP,
                     raid_wins = 0,
-                    prestige_points = 0
+                    prestige_points = 0,
+                    top_excluded = 0
                 WHERE user_id = ?
             """, (DEFAULT_START_COINS, uid))
 
@@ -29189,6 +29608,7 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                 "duel_cooldowns", "espionage_cooldowns", "player_collection",
                 "season_progress", "season_xp_log", "market_orders",
                 "onboarding_progress", "clan_applications", "giveaway_entries",
+                "mailbox", "notification_fallback",
             ):
                 await bot.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
 
@@ -29200,11 +29620,20 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                 "DELETE FROM raid_loot_log WHERE user_id = ?", (uid,)
             )
 
+        onboarding_cache = getattr(bot, "_onboarding_complete_cache", None)
+        if onboarding_cache is not None:
+            onboarding_cache.discard(uid)
+        _top_cache.clear()
         await log_admin_action(
             self.author_id, uid, "reset",
             f"coins = {DEFAULT_START_COINS}, inventory/quests/pets/cosmetics cleared",
         )
-        await interaction.followup.send(f"🗑️ Прогресс <@{uid}> сброшен.", ephemeral=True)
+        reset_message = f"🗑️ Прогресс <@{uid}> сброшен."
+        if released_bids:
+            reset_message += (
+                f"\n🏛️ Сняты активные ставки на аукционах: **{released_bids}**."
+            )
+        await interaction.followup.send(reset_message, ephemeral=True)
 
 
 class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
@@ -29222,10 +29651,12 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
         try:
             uid = int(self.user_id.value)
             qty = int(self.quantity.value)
-            if qty < 1:
+            if qty < 1 or qty > 1000:
                 raise ValueError
         except ValueError:
-            await interaction.followup.send("❌ ID и количество — числа > 0.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ ID и количество: 1–1000.", ephemeral=True
+            )
             return
         loc = self.location.value.strip()
         if loc not in ("profile", "storage"):
@@ -29252,30 +29683,44 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
                     f"{to_temp} во временное хранилище."
                 )
         else:
-            storage_size = await get_storage_size(uid)
-            async with bot.db.execute(
-                "SELECT slot FROM inventory WHERE user_id = ? AND location = 'storage'", (uid,)
-            ) as c:
-                used = {r[0] for r in await c.fetchall()}
-            free = [s for s in range(storage_size) if s not in used]
-            if len(free) < qty:
-                await interaction.followup.send(f"❌ В хранилище только {len(free)} слотов.", ephemeral=True)
-                return
-            for i in range(qty):
-                await bot.db.execute(
-                    "INSERT INTO inventory (user_id, slot, item_id, location, stars) VALUES (?, ?, ?, 'storage', 0)",
-                    (uid, free[i], item_id)
+            try:
+                async with db_transaction():
+                    storage_size = await get_storage_size(uid)
+                    async with bot.db.execute(
+                        "SELECT slot FROM inventory "
+                        "WHERE user_id = ? AND location = 'storage'",
+                        (uid,),
+                    ) as c:
+                        used = {r[0] for r in await c.fetchall()}
+                    free = [s for s in range(storage_size) if s not in used]
+                    if len(free) < qty:
+                        raise ValueError(
+                            f"В хранилище только {len(free)} слотов."
+                        )
+                    for i in range(qty):
+                        await bot.db.execute(
+                            "INSERT INTO inventory "
+                            "(user_id, slot, item_id, location, stars) "
+                            "VALUES (?, ?, ?, 'storage', 0)",
+                            (uid, free[i], item_id)
+                        )
+                    await bot.db.execute(
+                        "INSERT OR IGNORE INTO player_collection "
+                        "(user_id, item_id) VALUES (?, ?)",
+                        (uid, item_id),
+                    )
+            except ValueError as exc:
+                return await interaction.followup.send(
+                    f"❌ {exc}", ephemeral=True
                 )
-            await bot.db.execute(
-                "INSERT OR IGNORE INTO player_collection (user_id, item_id) VALUES (?, ?)",
-                (uid, item_id),
-            )
-            await commit_if_needed()
             msg = f"✅ Выдано {qty}×{emoji} {name} в хранилище <@{uid}>."
 
         await log_admin_action(
             self.author_id, uid, "give_item",
             f"{item_id} x{qty} -> {loc}",
+        )
+        await enforce_top_exclusion(
+            interaction, uid, f"self_grant_item:{item_id}"
         )
         await sort_inventory(uid, "profile")
         await sort_inventory(uid, "storage")

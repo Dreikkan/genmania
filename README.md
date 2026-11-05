@@ -1,0 +1,80 @@
+# Gen Mania
+
+Discord-бот **Gen Mania** — incremental idle/management игра: генераторы,
+синтез, звёзды, коллекция, биржа, аукцион, банк, кланы, PvP, питомцы,
+статусы, сезон/battle pass, квесты, дейли, адвент, престиж и розыгрыши.
+
+## Что внутри
+
+- `bot.py` — основной монолит бота (discord.py 2.x + aiosqlite).
+- `tests/` — pytest-набор: экономика, банк, биржа, аукцион, PvP,
+  кланы, сезоны, розыгрыши, миграции, транзакции, UI-смоуки.
+- `dev/` — локальный dev-стенд: запуск отдельного тестового бота с
+  изолированной папкой `data`, проверка токена, БД и live-smoke.
+- `CHANGELOG.md` — краткая история изменений.
+- `.github/workflows/ci.yml` — pytest + обязательный ruff-профиль.
+
+## Требования
+
+- Python **3.10+** (проверялось на 3.14).
+- `discord.py>=2.4`
+- `aiosqlite>=0.20`
+- В Discord Developer Portal включён **Server Members Intent**
+  (нужен для локальных топов, налогов и состава участников).
+
+## Быстрый старт
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+$env:DISCORD_BOT_TOKEN="your_token"
+$env:DATA_DIR="$PWD\data"
+python bot.py
+```
+
+`DATA_DIR` — постоянная папка для `castle.db`, бэкапов и `bot.log`.
+Не коммить `.env`, базу и бэкапы.
+
+## Dev-стенд
+
+Инструкция: [`dev/README_DEV.md`](dev/README_DEV.md).
+
+Коротко:
+
+```powershell
+python dev\run_dev.py --check --probe
+python dev\start_dev.py      # detached-фон
+python dev\status_dev.py
+python dev\stop_dev.py
+```
+
+Dev-стенд использует отдельный токен и `DATA_DIR=dev/data`,
+поэтому production-бота и production-базу не затрагивает.
+`dev/.env` и `dev/data/` исключены через `.gitignore`.
+
+## Тесты
+
+```powershell
+pip install -r requirements-dev.txt
+python -m pytest -q
+ruff check --select F821,F811,F401 bot.py tests
+```
+
+Текущий статус: **217 passed**, 58 test files.
+
+## CI
+
+GitHub Actions запускает на Windows:
+
+- `python -m py_compile bot.py`;
+- `pytest -q`;
+- `ruff check --select F821,F811,F401 bot.py tests`.
+
+## Безопасность
+
+- Никогда не коммить `DISCORD_BOT_TOKEN`, `.env`, `castle.db`,
+  `*.db-wal`, `dev/data/` и `bot_backup_*.py`.
+- Для dev-стенда используй отдельное тестовое Discord-приложение.
+- Не запускай два процесса с одним токеном одновременно.
