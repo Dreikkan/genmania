@@ -39,6 +39,10 @@ from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
 )
+from gen_mania.repositories.inventory import (
+    InventoryRuntime,
+    make_inventory_layer,
+)
 from gen_mania.repositories.players import PlayerRuntime, make_player_layer
 from gen_mania.repositories.settings import (
     SETTING_COLUMNS,  # noqa: F401 - re-export
@@ -4175,6 +4179,21 @@ PLAYER_RUNTIME.configure(
     get_prestige_points,
 ) = make_player_layer(PLAYER_RUNTIME)
 
+INVENTORY_RUNTIME = InventoryRuntime()
+INVENTORY_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    commit_getter=lambda: commit_if_needed,
+    logger=log,
+)
+(
+    _reslot_inventory,
+    sort_inventory,
+    sort_inventory_by,
+    get_inventory_rows,
+    toggle_item_lock,
+) = make_inventory_layer(INVENTORY_RUNTIME)
+
 
 def _role_has_administrator(role) -> bool:
     permissions = getattr(role, "permissions", None)
@@ -5901,72 +5920,6 @@ async def grant_item_or_compensation(user_id: int, item_id: str, quantity: int =
         await commit_if_needed()
         return f"{name} (нет места — отправлен в почту)", 0
 
-
-async def _reslot_inventory(user_id: int, location: str, rows: list):
-    """Безопасно переставляет предметы по слотам через временные отрицательные слоты."""
-    if not rows:
-        return
-
-    for idx, row in enumerate(rows):
-        old_slot = row[0]
-        await bot.db.execute(
-            "UPDATE inventory SET slot = ? WHERE user_id = ? AND location = ? AND slot = ?",
-            (-(idx + 1), user_id, location, old_slot),
-        )
-
-    for new_slot, row in enumerate(rows):
-        await bot.db.execute(
-            "UPDATE inventory SET slot = ? WHERE user_id = ? AND location = ? AND slot = ?",
-            (new_slot, user_id, location, -(new_slot + 1)),
-        )
-    await commit_if_needed()
-
-
-async def sort_inventory(user_id: int, location: str):
-    async with bot.db.execute("""
-        SELECT inv.slot, inv.item_id, inv.stars, i.price
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = ?
-        ORDER BY i.price DESC, inv.stars DESC
-    """, (user_id, location)) as c:
-        rows = await c.fetchall()
-
-    await _reslot_inventory(user_id, location, rows)
-
-async def sort_inventory_by(user_id: int, location: str, sort_type: str):
-    """Сортирует инвентарь по выбранному критерию."""
-    # Получаем все предметы
-    async with bot.db.execute("""
-        SELECT inv.slot, inv.item_id, inv.stars, i.price, i.income_per_hour, i.rarity
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = ?
-    """, (user_id, location)) as c:
-        rows = await c.fetchall()
-
-    if not rows:
-        return
-
-    rarity_order = {"common": 1, "uncommon": 2, "rare": 3, "epic": 4, "legendary": 5, "mythic": 6}
-
-    if sort_type == "price_desc":
-        rows.sort(key=lambda r: r[3], reverse=True)
-    elif sort_type == "price_asc":
-        rows.sort(key=lambda r: r[3])
-    elif sort_type == "stars_desc":
-        rows.sort(key=lambda r: (r[2], r[3]), reverse=True)
-    elif sort_type == "stars_asc":
-        rows.sort(key=lambda r: (r[2], r[3]))
-    elif sort_type == "income_desc":
-        rows.sort(key=lambda r: r[4], reverse=True)
-    elif sort_type == "rarity_desc":
-        rows.sort(key=lambda r: (rarity_order.get(r[5], 0), r[3]), reverse=True)
-    else:
-        # По умолчанию: цена (убывание), затем звёзды
-        rows.sort(key=lambda r: (r[3], r[2]), reverse=True)
-
-    await _reslot_inventory(user_id, location, rows)
 
 async def log_admin_action(
     admin_id: int,
@@ -21868,18 +21821,6 @@ MASS_ACTION_LABELS = {
 }
 
 
-async def get_inventory_rows(user_id: int, location: str):
-    async with bot.db.execute("""
-        SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars, i.price,
-               i.rarity, COALESCE(inv.is_locked, 0)
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = ?
-        ORDER BY inv.slot ASC
-    """, (user_id, location)) as c:
-        return await c.fetchall()
-
-
 async def get_profile_rows(user_id: int):
     return await get_inventory_rows(user_id, "profile")
 
@@ -22228,35 +22169,6 @@ class MassOpsConfirmView(SafeView):
 # ============================================================
 #  🔒 БЛОКИРОВКА ПРЕДМЕТОВ
 # ============================================================
-
-async def toggle_item_lock(
-    user_id: int, location: str, slot: int, item_id: str, stars: int
-) -> tuple[bool, int, str]:
-    """Переключает блокировку предмета. Возвращает (ok, new_state, message)."""
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT COALESCE(is_locked, 0) FROM inventory "
-                "WHERE user_id = ? AND location = ? AND slot = ? "
-                "AND item_id = ? AND stars = ?",
-                (user_id, location, slot, item_id, stars),
-            ) as c:
-                row = await c.fetchone()
-            if not row:
-                raise ValueError("Предмет не найден.")
-            new_state = 0 if row[0] else 1
-            cur = await bot.db.execute(
-                "UPDATE inventory SET is_locked = ? "
-                "WHERE user_id = ? AND location = ? AND slot = ? "
-                "AND item_id = ? AND stars = ?",
-                (new_state, user_id, location, slot, item_id, stars),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("Предмет уже перемещён.")
-    except ValueError as e:
-        return False, 0, f"❌ {e}"
-    return True, new_state, ""
-
 
 async def open_lock_view(
     interaction: discord.Interaction, author_id: int, page: int = 0
