@@ -21,8 +21,11 @@
 - Added concurrency tests for serialized DB transactions, equal
   auction bids and daily season XP caps.
 - Added coverage baseline: 50% gate, current `bot.py` coverage ~51%.
+- Added in-process metrics (commands, DB transactions, background
+  errors), slow DB transaction logging, `data/health.json`, and
+  owner-only `/health`.
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
 
-Current test status: **231 passed**, 60 test files.
+Current test status: **234 passed**, 62 test files.

@@ -63,8 +63,11 @@ python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=50
 ruff check --select F821,F811,F401 bot.py tests
 ```
 
-Текущий статус: **231 passed**, 60 test files.  
-Coverage `bot.py`: **~51%**, минимальный порог — **50%**.
+Текущий статус: **234 passed**, 62 test files.  
+Coverage `bot.py`: **51.56%**, минимальный порог — **50%**.
+
+Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
+owner-only команда `/health` показывает метрики и состояние задач.
 
 ## CI
 
