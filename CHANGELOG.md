@@ -116,6 +116,8 @@
   `gen_mania.services.clan_wars`.
 - Refactor slice 45: moved guild-access snapshot synchronization into
   `gen_mania.services.guild_access`.
+- Refactor slice 46: moved the PvP battle-log embed into
+  `gen_mania.services.pvp`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
