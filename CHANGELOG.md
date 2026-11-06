@@ -84,6 +84,8 @@
   (shop, achievements and collection embeds).
 - Refactor slice 29: extracted `gen_mania.services.upgrades_ui`
   (upgrades, pets and autocollector embeds).
+- Refactor slice 30: extracted `gen_mania.services.analytics_ui`
+  (detailed player analytics embed).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
