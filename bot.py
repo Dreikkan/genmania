@@ -4193,6 +4193,8 @@ PLAYER_RUNTIME.configure(
     commit_getter=lambda: commit_if_needed,
     settings_getter=lambda: get_settings,
     status_bonus_getter=lambda: get_status_bonus,
+    clan_getter=lambda: get_clan,
+    collection_count_getter=lambda: get_collection_count,
     start_grid=START_GRID,
     storage_size=STORAGE_SIZE,
     default_start_coins=DEFAULT_START_COINS,
@@ -4203,6 +4205,7 @@ PLAYER_RUNTIME.configure(
     toggle_accessibility_mode,
     get_player_stats,
     get_prestige_points,
+    get_unlocked_titles,
 ) = make_player_layer(PLAYER_RUNTIME)
 
 INVENTORY_RUNTIME = InventoryRuntime()
@@ -5897,114 +5900,6 @@ async def deny_content_edit(interaction: discord.Interaction) -> bool:
     )
     return True
 
-
-async def get_unlocked_titles(user_id: int) -> set:
-    # --- Базовые данные ---
-    async with bot.db.execute("""
-        SELECT 
-            (SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile') AS gens,
-            (SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'profile' AND stars >= 5) AS five_star,
-            (SELECT COUNT(DISTINCT item_id) FROM inventory WHERE user_id = ? AND location = 'profile') AS distinct_gens,
-            (SELECT total_crafts FROM players WHERE user_id = ?) AS crafts,
-            (SELECT coins FROM players WHERE user_id = ?) AS coins,
-            (SELECT gems FROM players WHERE user_id = ?) AS gems,
-            (SELECT grid_size FROM players WHERE user_id = ?) AS grid_size
-    """, (user_id,)*7) as c:
-        row = await c.fetchone()
-    gens, five_star, _distinct_gens, crafts, coins, gems, grid_size = row or (0,)*7
-
-    # --- Рейды (отдельный счётчик побед) ---
-    async with bot.db.execute(
-        "SELECT raid_wins FROM players WHERE user_id = ?", (user_id,)
-    ) as c:
-        r = await c.fetchone()
-        raid_wins = (r[0] if r else 0) or 0
-
-    # --- Дуэли ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM duel_history WHERE winner_id = ?", (user_id,)
-    ) as c:
-        duel_wins = (await c.fetchone())[0] or 0
-
-    # --- Питомцы ---
-    async with bot.db.execute(
-        "SELECT COUNT(*), MAX(level) FROM user_pets_v2 WHERE user_id = ?", (user_id,)
-    ) as c:
-        pet_count, pet_max_level = await c.fetchone()
-    pet_count = pet_count or 0
-    pet_max_level = pet_max_level or 0
-
-    # --- Клан ---
-    clan = await get_clan(user_id)
-    is_clan_leader = bool(clan and clan[2] == user_id)
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM clan_wars WHERE winner_id = ?", (clan[0] if clan else -1,)
-    ) as c:
-        clan_wars_won = (await c.fetchone())[0] or 0
-
-    # --- Банк ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM bank_history WHERE user_id = ? "
-        "AND COALESCE(kind, 'deposit') = 'deposit'", (user_id,)
-    ) as c:
-        bank_deposits = (await c.fetchone())[0] or 0
-
-    # --- Налоги ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM tax_log WHERE user_id = ?", (user_id,)
-    ) as c:
-        tax_count = (await c.fetchone())[0] or 0
-
-    # --- Аукцион ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM auctions WHERE seller_id = ?", (user_id,)
-    ) as c:
-        auction_sold = (await c.fetchone())[0] or 0
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM auctions WHERE current_bidder = ? AND status = 'finished'", (user_id,)
-    ) as c:
-        auction_bought = (await c.fetchone())[0] or 0
-
-    # --- Сюжетные квесты ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM player_quests WHERE user_id = ? AND completed = 1", (user_id,)
-    ) as c:
-        story_done = (await c.fetchone())[0] or 0
-
-    # --- Достижения ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
-    ) as c:
-        ach_count = (await c.fetchone())[0] or 0
-
-    prestige_points = await get_prestige_points(user_id)
-    collection_count = await get_collection_count(user_id)
-
-    # --- Формируем set ---
-    unlocked = {"novice"}
-    if gens >= 10: unlocked.add("builder")
-    if crafts >= 10: unlocked.add("alchemist")
-    if five_star >= 1: unlocked.add("star_lord")
-    if coins >= 10000: unlocked.add("rich")
-    if raid_wins >= 5: unlocked.add("raider")
-    if duel_wins >= 10: unlocked.add("duelist")
-    if collection_count >= 20: unlocked.add("collector")
-
-    if pet_count >= 3: unlocked.add("pet_lover")
-    if pet_max_level >= 10: unlocked.add("pet_master")
-    if is_clan_leader: unlocked.add("clan_leader")
-    if clan_wars_won >= 1: unlocked.add("clan_warrior")
-    if bank_deposits >= 1: unlocked.add("banker")
-    if tax_count >= 3: unlocked.add("taxpayer")
-    if auction_sold >= 1: unlocked.add("auctioneer")
-    if auction_bought >= 1: unlocked.add("trader")
-    if gems >= 100: unlocked.add("gem_master")
-    if story_done >= 5: unlocked.add("quest_hero")
-    if ach_count >= 10: unlocked.add("ach_hunter")
-    if grid_size >= 100: unlocked.add("grid_master")
-    if prestige_points >= 1: unlocked.add("ascended")
-
-    return unlocked
 
 async def get_advent_state(user_id: int) -> tuple:
     """Возвращает (last_opened_day, last_opened_date, event_key)."""
