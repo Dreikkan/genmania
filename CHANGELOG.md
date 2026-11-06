@@ -161,6 +161,9 @@
   Coverage reached **85%**.
 - Coverage slice 68: added view constructors, move/swap callbacks, admin
   advent/give-item/profile/reset and market-order confirmation tests.
+- Coverage slice 69: added clan invite/application decisions, pets shop,
+  star confirm, bonus line, global giveaway helpers, profile buttons,
+  swap pagination, content/settings views and bank-loan select tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
