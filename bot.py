@@ -4992,6 +4992,9 @@ PRESTIGE_RUNTIME.configure(
     season_xp_amount_getter=lambda: season_xp_amount,
     prestige_points_getter=lambda: get_prestige_points,
     emoji_getter=lambda: get_emoji,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
     default_start_coins=DEFAULT_START_COINS,
     base_requirement=PRESTIGE_BASE_REQUIREMENT,
     step_requirement=PRESTIGE_STEP_REQUIREMENT,
@@ -5007,6 +5010,7 @@ PRESTIGE_RUNTIME.configure(
     prestige_points_from_lifetime,
     calculate_prestige_gain,
     do_prestige,
+    build_prestige_embed,
 ) = make_prestige_layer(PRESTIGE_RUNTIME)
 
 
@@ -7378,72 +7382,6 @@ class MainMenuView(BaseView):
         await interaction.edit_original_response(
             embed=embed, view=OnboardingView(self.author_id)
         )
-
-
-async def build_prestige_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    async with bot.db.execute(
-        "SELECT lifetime_production, prestige_points FROM players WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-
-    total, points = row if row else (0, 0)
-    total = total or 0
-    points = points or 0
-    gain = prestige_gain_from_lifetime(total, points)
-    next_need = max(0, prestige_point_cost(points) - total) if gain <= 0 else 0
-    bonus_pct = int(
-        min(points * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100
-    )
-
-    embed = BotEmbed(
-        title="🔁 Перерождение",
-        description=(
-            "Сбрось текущую энергостанцию и начни заново — но уже с постоянным бонусом к доходу.\n"
-            "Это основной долгосрочный цикл игры."
-        ),
-        color=0x9b59b6,
-    )
-    embed.add_field(name="Очки престижа", value=f"**{points}**", inline=True)
-    embed.add_field(name="Бонус к доходу", value=f"**+{bonus_pct}%**", inline=True)
-    embed.add_field(name="Доступно сейчас", value=f"**+{gain}** очков", inline=True)
-    embed.add_field(
-        name="Всего заработано",
-        value=f"🪙 {format_price(total)}",
-        inline=True,
-    )
-    embed.add_field(
-        name="До следующего очка",
-        value=f"🪙 {format_price(next_need)}",
-        inline=True,
-    )
-    embed.add_field(
-        name="Что сбросится",
-        value=(
-            "монеты, инвентарь, сетка, катализаторы, улучшения, "
-            "ежедневные квесты. Вклад, кредит и активные ордера нужно "
-            "закрыть заранее."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Что останется",
-        value=(
-            "гемы, питомцы, титулы, статусы VIP/Gold/Platinum/Diamond, "
-            "достижения, клан, косметика, сюжетные квесты, статистика"
-        ),
-        inline=False,
-    )
-    embed.set_footer(
-        text=(
-            f"Стоимость: 1-е очко {format_price(PRESTIGE_BASE_REQUIREMENT)}, "
-            f"дальше +{format_price(PRESTIGE_STEP_REQUIREMENT)}; "
-            f"макс. бонус +{int(PRESTIGE_BONUS_CAP * 100)}%"
-        )
-    )
-    embed = await fix_embed_emojis(embed)
-    return embed
 
 
 class PrestigeView(BaseView):

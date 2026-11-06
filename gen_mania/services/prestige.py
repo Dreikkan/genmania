@@ -22,6 +22,9 @@ class PrestigeRuntime:
         self._season_xp_amount_getter: Callable[[], Callable] = lambda: None
         self._prestige_points_getter: Callable[[], Callable] = lambda: None
         self._emoji_getter: Callable[[], Callable] = lambda: None
+        self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
+        self._price_formatter: Callable[[int], str] = str
         self.default_start_coins = 20
         self.base_requirement = 150_000
         self.step_requirement = 50_000
@@ -44,6 +47,9 @@ class PrestigeRuntime:
         season_xp_amount_getter: Callable[[], Callable],
         prestige_points_getter: Callable[[], Callable],
         emoji_getter: Callable[[], Callable],
+        embed_factory: Callable[..., Any],
+        emoji_fixer: Callable[[Any], Any],
+        price_formatter: Callable[[int], str],
         default_start_coins: int,
         base_requirement: int,
         step_requirement: int,
@@ -63,6 +69,9 @@ class PrestigeRuntime:
         self._season_xp_amount_getter = season_xp_amount_getter
         self._prestige_points_getter = prestige_points_getter
         self._emoji_getter = emoji_getter
+        self._embed_factory = embed_factory
+        self._emoji_fixer = emoji_fixer
+        self._price_formatter = price_formatter
         self.default_start_coins = default_start_coins
         self.base_requirement = base_requirement
         self.step_requirement = step_requirement
@@ -103,6 +112,15 @@ class PrestigeRuntime:
 
     def emoji(self, key: str):
         return self._emoji_getter()(key)
+
+    def embed(self, **kwargs):
+        return self._embed_factory(**kwargs)
+
+    async def fix_emojis(self, embed):
+        return await self._emoji_fixer(embed)
+
+    def format_price(self, value: int) -> str:
+        return self._price_formatter(value)
 
 
 def make_prestige_layer(runtime: PrestigeRuntime):
@@ -330,10 +348,100 @@ def make_prestige_layer(runtime: PrestigeRuntime):
             new_points,
         )
 
+    async def build_prestige_embed(interaction):
+        user_id = interaction.user.id
+        async with runtime.db.execute(
+            "SELECT lifetime_production, prestige_points "
+            "FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+
+        total, points = row if row else (0, 0)
+        total = total or 0
+        points = points or 0
+        gain = prestige_gain_from_lifetime(total, points)
+        next_need = (
+            max(0, prestige_point_cost(points) - total)
+            if gain <= 0
+            else 0
+        )
+        bonus_pct = int(
+            min(
+                points * runtime.bonus_per_point,
+                runtime.bonus_cap,
+            )
+            * 100
+        )
+
+        embed = runtime.embed(
+            title="🔁 Перерождение",
+            description=(
+                "Сбрось текущую энергостанцию и начни заново — "
+                "но уже с постоянным бонусом к доходу.\n"
+                "Это основной долгосрочный цикл игры."
+            ),
+            color=0x9B59B6,
+        )
+        embed.add_field(
+            name="Очки престижа",
+            value=f"**{points}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Бонус к доходу",
+            value=f"**+{bonus_pct}%**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Доступно сейчас",
+            value=f"**+{gain}** очков",
+            inline=True,
+        )
+        embed.add_field(
+            name="Всего заработано",
+            value=f"🪙 {runtime.format_price(total)}",
+            inline=True,
+        )
+        embed.add_field(
+            name="До следующего очка",
+            value=f"🪙 {runtime.format_price(next_need)}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Что сбросится",
+            value=(
+                "монеты, инвентарь, сетка, катализаторы, улучшения, "
+                "ежедневные квесты. Вклад, кредит и активные ордера "
+                "нужно закрыть заранее."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Что останется",
+            value=(
+                "гемы, питомцы, титулы, статусы "
+                "VIP/Gold/Platinum/Diamond, достижения, клан, "
+                "косметика, сюжетные квесты, статистика"
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                "Стоимость: 1-е очко "
+                f"{runtime.format_price(runtime.base_requirement)}, "
+                "дальше +"
+                f"{runtime.format_price(runtime.step_requirement)}; "
+                f"макс. бонус +{int(runtime.bonus_cap * 100)}%"
+            )
+        )
+        return await runtime.fix_emojis(embed)
+
     return (
         prestige_point_cost,
         prestige_gain_from_lifetime,
         prestige_points_from_lifetime,
         calculate_prestige_gain,
         do_prestige,
+        build_prestige_embed,
     )

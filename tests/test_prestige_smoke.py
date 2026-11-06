@@ -158,6 +158,15 @@ async def run_checks(db):
     ) as c:
         assert (await c.fetchone())[0] == 500
 
+    class FakeInteraction:
+        user = type("User", (), {"id": USER_ID})()
+
+    embed = await m.build_prestige_embed(FakeInteraction())
+    assert "Перерождение" in embed.title
+    values = "\n".join(field.value for field in embed.fields)
+    assert "**2**" in values
+    assert "+10%" in values
+
     print("PRESTIGE TEST: OK")
 
 
