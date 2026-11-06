@@ -21,10 +21,13 @@ class ClanWarRuntime:
         self._add_clan_xp_getter: Callable[[], Callable] = lambda: None
         self._clan_quest_getter: Callable[[], Callable] = lambda: None
         self._parse_time_getter: Callable[[], Callable] = lambda: None
+        self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self.declare_cost = 500
         self.reward = 1000
         self.attack_cooldown_hours = 1
         self.damage_rate = 0.15
+        self.war_duration_hours = 24
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -40,10 +43,13 @@ class ClanWarRuntime:
         add_clan_xp_getter: Callable[[], Callable],
         clan_quest_getter: Callable[[], Callable],
         parse_time_getter: Callable[[], Callable],
+        embed_factory: Callable[..., Any],
+        emoji_fixer: Callable[[Any], Any],
         declare_cost: int,
         reward: int,
         attack_cooldown_hours: int,
         damage_rate: float,
+        war_duration_hours: int,
         logger: logging.Logger,
     ) -> None:
         self._db_getter = db_getter
@@ -56,10 +62,13 @@ class ClanWarRuntime:
         self._add_clan_xp_getter = add_clan_xp_getter
         self._clan_quest_getter = clan_quest_getter
         self._parse_time_getter = parse_time_getter
+        self._embed_factory = embed_factory
+        self._emoji_fixer = emoji_fixer
         self.declare_cost = declare_cost
         self.reward = reward
         self.attack_cooldown_hours = attack_cooldown_hours
         self.damage_rate = damage_rate
+        self.war_duration_hours = war_duration_hours
         self.logger = logger
 
     @property
@@ -93,6 +102,12 @@ class ClanWarRuntime:
 
     def parse_db_time(self, value):
         return self._parse_time_getter()(value)
+
+    def embed(self, **kwargs):
+        return self._embed_factory(**kwargs)
+
+    async def fix_emojis(self, embed):
+        return await self._emoji_fixer(embed)
 
 
 def make_clan_war_layer(runtime: ClanWarRuntime):
@@ -326,4 +341,99 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
             False,
         )
 
-    return start_clan_war, attack_clan_war
+    async def build_clan_war_embed(interaction, war, clan_id: int):
+        (
+            war_id,
+            c1,
+            c2,
+            start_time,
+            c1_hp,
+            c2_hp,
+            c1_max,
+            c2_max,
+            c1_dmg,
+            c2_dmg,
+        ) = war
+
+        async with runtime.db.execute(
+            "SELECT id, name FROM clans WHERE id IN (?, ?)",
+            (c1, c2),
+        ) as c:
+            names = {r[0]: r[1] for r in await c.fetchall()}
+
+        own_id = clan_id
+        enemy_id = c2 if clan_id == c1 else c1
+        own_name = names.get(own_id, f"Клан {own_id}")
+        enemy_name = names.get(enemy_id, f"Клан {enemy_id}")
+
+        if clan_id == c1:
+            own_hp, own_max = c1_hp or 0, c1_max or 1
+            enemy_hp, enemy_max = c2_hp or 0, c2_max or 1
+            own_dmg, enemy_dmg = c1_dmg or 0, c2_dmg or 0
+        else:
+            own_hp, own_max = c2_hp or 0, c2_max or 1
+            enemy_hp, enemy_max = c1_hp or 0, c1_max or 1
+            own_dmg, enemy_dmg = c2_dmg or 0, c1_dmg or 0
+
+        def hp_bar(current: int, maximum: int) -> str:
+            pct = max(
+                0.0, min(1.0, current / max(1, maximum))
+            )
+            filled = int(pct * 10)
+            return "🟩" * filled + "⬛" * (10 - filled)
+
+        end = datetime.datetime.fromisoformat(
+            start_time
+        ) + datetime.timedelta(hours=runtime.war_duration_hours)
+        left = max(
+            0,
+            int(
+                (
+                    end - datetime.datetime.now()
+                ).total_seconds()
+            ),
+        )
+        hours = left // 3600
+        minutes = (left % 3600) // 60
+
+        embed = runtime.embed(
+            title=f"⚔️ Клановая война #{war_id}",
+            description=(
+                f"**{own_name}** против **{enemy_name}**\n"
+                f"До конца: **{hours} ч {minutes} мин**"
+            ),
+            color=0xE74C3C,
+        )
+        embed.add_field(
+            name=f"🏰 {own_name}",
+            value=(
+                f"HP: **{own_hp}/{own_max}**\n"
+                f"{hp_bar(own_hp, own_max)}\n"
+                f"Урон: **{own_dmg}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=f"🏴 {enemy_name}",
+            value=(
+                f"HP: **{enemy_hp}/{enemy_max}**\n"
+                f"{hp_bar(enemy_hp, enemy_max)}\n"
+                f"Урон: **{enemy_dmg}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Правила",
+            value=(
+                f"• Одна атака раз в "
+                f"**{runtime.attack_cooldown_hours} ч**\n"
+                f"• Урон — около "
+                f"**{int(runtime.damage_rate * 100)}%** мощи\n"
+                f"• Победитель забирает 🪙 "
+                f"**{runtime.reward}** в сундук"
+            ),
+            inline=False,
+        )
+        return await runtime.fix_emojis(embed)
+
+    return start_clan_war, attack_clan_war, build_clan_war_embed
