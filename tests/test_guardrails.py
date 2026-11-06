@@ -191,6 +191,48 @@ def test_advent_open_is_transactional_and_guards_event():
     asyncio.run(run())
 
 
+def test_advent_embed_pages_and_reward():
+    async def run():
+        db = await _init()
+        original_event = m.get_active_advent_event
+        event = {
+            "key": "test_event",
+            "name": "Тест",
+            "emoji": "🎄",
+            "days": 12,
+        }
+        m.get_active_advent_event = lambda: (event, 1)
+        try:
+            await db.execute(
+                "INSERT INTO players (user_id, coins, gems) "
+                "VALUES (1, 0, 0)"
+            )
+            await db.commit()
+
+            first = await m.build_advent_embed(FakeInteraction(1), 0)
+            assert "Тест" in first.title
+            assert any(
+                field.name == "Окошки 1–5"
+                for field in first.fields
+            )
+            assert any(
+                field.name == "Награда за окошко 1"
+                for field in first.fields
+            )
+
+            second = await m.build_advent_embed(FakeInteraction(1), 1)
+            assert any(
+                field.name == "Окошки 6–10"
+                for field in second.fields
+            )
+        finally:
+            m.get_active_advent_event = original_event
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_admin_advent_respects_event_day_bounds():
     async def run():
         db = await _init()

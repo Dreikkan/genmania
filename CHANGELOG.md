@@ -120,6 +120,8 @@
   `gen_mania.services.pvp`.
 - Refactor slice 47: moved the raid-party embed into
   `gen_mania.services.raid_combat`.
+- Refactor slice 48: extracted advent state, day opening and calendar
+  embed into `gen_mania.services.advent`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
