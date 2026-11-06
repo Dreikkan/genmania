@@ -3,6 +3,7 @@ import datetime
 import importlib.util
 import pathlib
 import sys
+import tempfile
 
 import aiosqlite
 
@@ -212,6 +213,44 @@ def test_retention_task_removes_old_rows():
                 actions = {row[0] for row in await c.fetchall()}
             assert "old" not in actions
             assert "new" in actions
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_health_writer_backup_and_status_expirer():
+    async def run():
+        db = await _init()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                m.bot.data_dir = pathlib.Path(tmp)
+                original_snapshot = m.bot.build_health_snapshot
+                original_backup = m.bot.backup_database
+                original_expire = m.expire_statuses
+
+                async def snapshot():
+                    return {"status": "ok"}
+
+                async def backup(*args, **kwargs):
+                    return None
+
+                async def expire():
+                    return []
+
+                m.bot.build_health_snapshot = snapshot
+                m.bot.backup_database = backup
+                m.expire_statuses = expire
+                try:
+                    await _run_once(m.bot.health_writer)
+                    assert (m.bot.data_dir / "health.json").exists()
+                    await _run_once(m.bot.backup_task)
+                    await _run_once(m.bot.status_expirer)
+                finally:
+                    m.bot.build_health_snapshot = original_snapshot
+                    m.bot.backup_database = original_backup
+                    m.expire_statuses = original_expire
         finally:
             await db.close()
             m.bot.db = None
