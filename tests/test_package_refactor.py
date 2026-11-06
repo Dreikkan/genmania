@@ -23,6 +23,7 @@ from gen_mania.services.auction import AuctionRuntime
 from gen_mania.services.bank import BankRuntime
 from gen_mania.services.clan_applications import ClanApplicationRuntime
 from gen_mania.services.clan_wars import ClanWarRuntime
+from gen_mania.services.content import ContentRuntime
 from gen_mania.services.giveaways import GiveawayRuntime
 from gen_mania.services.leaderboards import LeaderboardRuntime
 from gen_mania.services.market import (
@@ -81,6 +82,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.PET_RUNTIME, PetRuntime)
     assert isinstance(m.STATUS_RUNTIME, StatusRuntime)
     assert isinstance(m.NOTIFICATION_RUNTIME, NotificationRuntime)
+    assert isinstance(m.CONTENT_RUNTIME, ContentRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
