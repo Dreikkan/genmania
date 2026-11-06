@@ -21,6 +21,7 @@ from gen_mania.repositories.settings import (
 from gen_mania.repositories.settings import SettingsRuntime
 from gen_mania.services.auction import AuctionRuntime
 from gen_mania.services.bank import BankRuntime
+from gen_mania.services.clan_applications import ClanApplicationRuntime
 from gen_mania.services.clan_wars import ClanWarRuntime
 from gen_mania.services.giveaways import GiveawayRuntime
 from gen_mania.services.leaderboards import LeaderboardRuntime
@@ -73,6 +74,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.TOP_EXCLUSION_RUNTIME, TopExclusionRuntime)
     assert isinstance(m.PRESTIGE_RUNTIME, PrestigeRuntime)
     assert isinstance(m.CLAN_WAR_RUNTIME, ClanWarRuntime)
+    assert isinstance(m.CLAN_APPLICATION_RUNTIME, ClanApplicationRuntime)
     assert isinstance(m.MARKET_ORDER_RUNTIME, MarketOrderRuntime)
     assert isinstance(m.SEASON_RUNTIME, SeasonRuntime)
     assert isinstance(m.PET_RUNTIME, PetRuntime)

@@ -54,6 +54,10 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
+from gen_mania.services.clan_applications import (
+    ClanApplicationRuntime,
+    make_clan_application_layer,
+)
 from gen_mania.services.clan_wars import ClanWarRuntime, make_clan_war_layer
 from gen_mania.services.giveaways import (
     GIVEAWAY_COLUMNS,  # noqa: F401 - re-export
@@ -4438,6 +4442,24 @@ CLAN_WAR_RUNTIME.configure(
     logger=log,
 )
 start_clan_war, attack_clan_war = make_clan_war_layer(CLAN_WAR_RUNTIME)
+
+CLAN_APPLICATION_RUNTIME = ClanApplicationRuntime()
+CLAN_APPLICATION_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    commit_getter=lambda: commit_if_needed,
+    clan_getter=lambda: get_clan,
+    capacity_getter=lambda: get_clan_capacity,
+    member_count_getter=lambda: get_clan_member_count,
+    role_getter=lambda: get_clan_role,
+    log_getter=lambda: log_clan,
+    permission_getter=lambda: has_clan_permission,
+    story_quest_getter=lambda: update_story_quests,
+    logger=log,
+)
+apply_to_clan, decide_clan_application = make_clan_application_layer(
+    CLAN_APPLICATION_RUNTIME
+)
 
 RAID_RUNTIME = RaidRuntime()
 RAID_RUNTIME.configure(
@@ -13327,94 +13349,6 @@ class ClanInvitesView(SafeView):
         await interaction.edit_original_response(
             embed=embed, view=NoClanView(self.author_id)
         )
-
-
-async def apply_to_clan(user_id: int, clan_id: int) -> tuple[bool, str]:
-    if await get_clan(user_id):
-        return False, "Ты уже в клане."
-    async with bot.db.execute("SELECT name FROM clans WHERE id = ?", (clan_id,)) as c:
-        clan = await c.fetchone()
-    if not clan:
-        return False, "Клан уже не существует."
-    capacity = await get_clan_capacity(clan_id)
-    members = await get_clan_member_count(clan_id)
-    if members >= capacity:
-        return False, "Клан заполнен. Нужно расширить состав."
-    async with bot.db.execute(
-        "SELECT status FROM clan_applications WHERE clan_id = ? AND user_id = ?",
-        (clan_id, user_id),
-    ) as c:
-        row = await c.fetchone()
-    if row and row[0] == "pending":
-        return False, "Заявка уже отправлена."
-    await bot.db.execute(
-        "INSERT INTO clan_applications (clan_id, user_id, status) "
-        "VALUES (?, ?, 'pending') "
-        "ON CONFLICT(clan_id, user_id) DO UPDATE SET "
-        "status = 'pending', created_at = CURRENT_TIMESTAMP",
-        (clan_id, user_id),
-    )
-    await commit_if_needed()
-    await log_clan(clan_id, "application", f"<@{user_id}>")
-    return True, f"Заявка в клан **{clan[0]}** отправлена."
-
-
-async def decide_clan_application(
-    app_id: int, approve: bool, actor_id: int
-) -> tuple[bool, str]:
-    async with bot.db.execute(
-        "SELECT clan_id, user_id, status FROM clan_applications WHERE id = ?",
-        (app_id,),
-    ) as c:
-        app = await c.fetchone()
-    if not app:
-        return False, "Заявка не найдена."
-    clan_id, target_id, status = app
-    if status != "pending":
-        return False, "Заявка уже обработана."
-    role = await get_clan_role(actor_id, clan_id)
-    if not has_clan_permission(role, "invite"):
-        return False, "Недостаточно прав."
-    if approve:
-        try:
-            async with db_transaction():
-                async with bot.db.execute(
-                    "SELECT status FROM clan_applications WHERE id = ?",
-                    (app_id,),
-                ) as c:
-                    fresh = await c.fetchone()
-                if not fresh or fresh[0] != "pending":
-                    raise ValueError("Заявка уже обработана.")
-                if await get_clan(target_id):
-                    raise ValueError("Игрок уже состоит в клане.")
-                capacity = await get_clan_capacity(clan_id)
-                members = await get_clan_member_count(clan_id)
-                if members >= capacity:
-                    raise ValueError("Клан заполнен. Нужно расширить состав.")
-                await bot.db.execute(
-                    "INSERT INTO clan_members (user_id, clan_id, role) "
-                    "VALUES (?, ?, 'member')",
-                    (target_id, clan_id),
-                )
-                await bot.db.execute(
-                    "UPDATE clan_applications SET status = 'accepted' WHERE id = ?",
-                    (app_id,),
-                )
-                await bot.db.execute(
-                    "DELETE FROM clan_invites WHERE target_id = ?", (target_id,)
-                )
-        except (ValueError, aiosqlite.IntegrityError) as exc:
-            msg = str(exc) if isinstance(exc, ValueError) else "Игрок уже состоит в клане."
-            return False, msg
-        await log_clan(clan_id, "join", f"<@{target_id}> (заявка)")
-        await update_story_quests(target_id, "clan_join", 1)
-        return True, f"✅ <@{target_id}> принят в клан."
-    await bot.db.execute(
-        "UPDATE clan_applications SET status = 'declined' WHERE id = ?", (app_id,)
-    )
-    await commit_if_needed()
-    await log_clan(clan_id, "application_declined", f"<@{target_id}>")
-    return True, f"❌ Заявка <@{target_id}> отклонена."
 
 
 async def build_clan_browser_embed(
