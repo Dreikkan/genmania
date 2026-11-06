@@ -134,6 +134,8 @@
   giveaway and empty-state tests; coverage reached 70%.
 - Coverage slice 54: added remaining admin action modals and clan
   confirmation tests; coverage reached 71%.
+- Coverage slice 55: added UI constructors, auction/order screens,
+  mailbox, quests, emoji editor and deep UI tests; coverage reached 72%.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
