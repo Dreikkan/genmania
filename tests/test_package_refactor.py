@@ -43,6 +43,7 @@ from gen_mania.services.shop_ui import ShopUiRuntime
 from gen_mania.services.statuses import StatusRuntime
 from gen_mania.services.taxes import TaxRuntime
 from gen_mania.services.top_exclusion import TopExclusionRuntime
+from gen_mania.services.upgrades_ui import UpgradesUiRuntime
 
 BOT_PATH = pathlib.Path(__file__).resolve().parent.parent / "bot.py"
 spec = importlib.util.spec_from_file_location(
@@ -87,6 +88,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.CONTENT_RUNTIME, ContentRuntime)
     assert isinstance(m.PROFILE_UI_RUNTIME, ProfileUiRuntime)
     assert isinstance(m.SHOP_UI_RUNTIME, ShopUiRuntime)
+    assert isinstance(m.UPGRADES_UI_RUNTIME, UpgradesUiRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)

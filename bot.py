@@ -106,6 +106,10 @@ from gen_mania.services.raid_combat import (
 )
 from gen_mania.services.seasons import SeasonRuntime, make_season_layer
 from gen_mania.services.shop_ui import ShopUiRuntime, make_shop_ui_layer
+from gen_mania.services.upgrades_ui import (
+    UpgradesUiRuntime,
+    make_upgrades_ui_layer,
+)
 from gen_mania.services.statuses import StatusRuntime, make_status_layer
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 from gen_mania.services.top_exclusion import (
@@ -4443,6 +4447,40 @@ SHOP_UI_RUNTIME.configure(
     build_collection_embed,
 ) = make_shop_ui_layer(SHOP_UI_RUNTIME)
 
+UPGRADES_UI_RUNTIME = UpgradesUiRuntime()
+UPGRADES_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    active_statuses_getter=lambda: get_active_statuses,
+    pets_getter=lambda: get_user_pets,
+    active_pet_getter=lambda: get_active_pet,
+    autocollector_getter=lambda: get_autocollector,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    emoji_getter=lambda: get_emoji,
+    price_formatter=lambda value: format_price(value),
+    status_price=lambda status_id, days: status_price(status_id, days),
+    status_expiry=lambda value: format_status_expiry(value),
+    effect_summary=lambda ptype, level: format_pet_effect_summary(
+        ptype, level
+    ),
+    button_emojis=BOT_BTN_EMOJIS,
+    upgrades_page_size=UPGRADES_PAGE_SIZE,
+    status_bonuses=STATUS_BONUSES,
+    start_grid=START_GRID,
+    pet_types=PET_TYPES,
+    pet_max_level=PET_MAX_LEVEL,
+    autocollect_levels=AUTOCOLLECT_LEVELS,
+    autocollect_price=AUTOCOLLECT_PRICE_GEMS,
+    autocollect_max_level=AUTOCOLLECT_MAX_LEVEL,
+    gem=GEM,
+    logger=log,
+)
+(
+    build_upgrades_page,
+    build_pets_embed,
+    build_autocollector_embed,
+) = make_upgrades_ui_layer(UPGRADES_UI_RUNTIME)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -8206,121 +8244,6 @@ async def is_starter_shop_purchase(user_id: int, item_id: str) -> bool:
         return await c.fetchone() is None
 
 
-async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
-    guild_id = interaction.guild_id
-    gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
-    coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
-    up_emoji = str(BOT_BTN_EMOJIS.get("_upgrades", "💎"))
-    user_id = interaction.user.id
-
-    # Получаем текущий размер сетки игрока
-    async with bot.db.execute("SELECT grid_size FROM players WHERE user_id = ?", (user_id,)) as c:
-        row = await c.fetchone()
-        current_grid_size = (row[0] if row else START_GRID) or START_GRID
-
-    # Получаем все улучшения
-    async with bot.db.execute("""
-        SELECT id, name, description, price_coins as price, emoji, 'coins' as currency, size FROM grid_shop
-        UNION ALL
-        SELECT id, name, description, price_gems as price, emoji, 'gems' as currency, 0 as size FROM gem_shop
-    """) as c:
-        rows = await c.fetchall()
-
-    # Сортируем: сначала сетки по возрастанию, потом статусы
-    order = {
-        "grid_4x4": 1, "grid_5x5": 2, "grid_6x6": 3,
-        "grid_7x7": 4, "grid_8x8": 5, "grid_9x9": 6, "grid_10x10": 7,
-        "vip": 10, "gold": 11, "platinum": 12, "diamond": 13,
-    }
-    rows = sorted(rows, key=lambda r: order.get(r[0], 99))
-
-    # Получаем купленные улучшения и активные статусы
-    async with bot.db.execute(
-        "SELECT upgrade_id FROM player_upgrades WHERE user_id = ?", (user_id,)
-    ) as c:
-        owned = {r[0] for r in await c.fetchall()}
-    active_statuses = await get_active_statuses(user_id)
-
-    total = len(rows)
-    total_pages = max(1, (total + UPGRADES_PAGE_SIZE - 1) // UPGRADES_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * UPGRADES_PAGE_SIZE: page * UPGRADES_PAGE_SIZE + UPGRADES_PAGE_SIZE]
-    page_coins = sum(
-        price for _id, _name, _desc, price, _emoji, currency, _size in chunk
-        if currency == "coins"
-    )
-    page_gems = sum(
-        (status_price(item_id, 1) or price)
-        if item_id in STATUS_BONUSES
-        else price
-        for item_id, _name, _desc, price, _emoji, currency, _size in chunk
-        if currency == "gems"
-    )
-    async with bot.db.execute(
-        "SELECT coins, gems FROM players WHERE user_id = ?", (user_id,)
-    ) as c:
-        balance_row = await c.fetchone()
-    balance_coins = (balance_row[0] if balance_row else 0) or 0
-    balance_gems = (balance_row[1] if balance_row else 0) or 0
-
-    embed = BotEmbed(
-        title=f"{up_emoji} Магазин улучшений",
-        description=(
-            f"Страница {page + 1}/{total_pages}\n"
-            f"Баланс: {coin} **{format_price(balance_coins)}** | "
-            f"{gem} **{format_price(balance_gems)}**\n"
-            f"На странице: {coin} **{format_price(page_coins)}** | "
-            f"{gem} **{format_price(page_gems)}**"
-        ),
-        color=0x9b59b6,
-    )
-    
-    for gid, name, desc, price, emoji, currency, size in chunk:
-        if gid in STATUS_BONUSES:
-            min_price = status_price(gid, 1)
-            max_price = status_price(gid, 30)
-            price_str = (
-                f"{gem} {format_price(min_price)}–{format_price(max_price)} "
-                f"(1–30 дней)"
-            )
-        else:
-            price_str = (
-                f"{coin} {format_price(price)}"
-                if currency == "coins"
-                else f"{gem} {format_price(price)}"
-            )
-        
-        # Кастомные эмодзи для статусов
-        if gid == "vip": emoji = get_emoji("_vip")
-        elif gid == "gold": emoji = get_emoji("_gold")
-        elif gid == "platinum": emoji = get_emoji("_platinum")
-        elif gid == "diamond": emoji = get_emoji("_diamond")
-        
-        # --- ЛОГИКА СТАТУСОВ ---
-        if gid in STATUS_BONUSES:
-            if gid in active_statuses:
-                status = (
-                    "✅ Активен до "
-                    f"`{format_status_expiry(active_statuses[gid])}`"
-                )
-            else:
-                status = "🛒 Доступно (1–30 дней)"
-        elif gid in owned:
-            status = "✅ Куплено"
-        elif size > 0 and size <= current_grid_size:
-            # Если это сетка, и она меньше или равна текущей
-            status = f"🚫 Недоступно (у вас сетка {current_grid_size})"
-        else:
-            status = "🛒 Доступно для покупки"
-            
-        embed.add_field(
-            name=f"{emoji} {name} (`{gid}`)", 
-            value=f"{desc}\nЦена: {price_str}\n{status}", 
-            inline=False
-        )
-        
-    return await fix_embed_emojis(embed), total_pages
-
 async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
     guild_id = interaction.guild_id
@@ -8466,65 +8389,6 @@ async def build_cosmetics_embed(interaction: discord.Interaction) -> discord.Emb
     embed.add_field(name="Цвет эмбеда", value=f"`#{color:06X}`" if color else "по умолчанию", inline=True)
     embed.add_field(name="Фон (URL)", value=bg or "не задан", inline=True)
     embed.add_field(name="Иконка энергостанции", value=icon or "не задана", inline=True)
-    return embed
-
-async def build_pets_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    pets = await get_user_pets(user_id)
-    active = await get_active_pet(user_id)
-
-    embed = BotEmbed(
-        title="🐾 Питомцы",
-        description="Купи питомца, корми его и получай бонусы. Активный питомец даёт эффект.",
-        color=0x9b59b6
-    )
-
-    if not pets:
-        embed.add_field(name="У тебя пока нет питомцев", value="Загляни в магазин питомцев!", inline=False)
-    else:
-        for pet_id, level, last_fed in pets:
-            ptype = PET_TYPES.get(pet_id)
-            if not ptype:
-                continue
-            is_active = "✅ " if active and active[0] == pet_id else ""
-            embed.add_field(
-                name=f"{is_active}{ptype['emoji']} {ptype['name']} (ур. {level}/{PET_MAX_LEVEL})",
-                value=format_pet_effect_summary(ptype, level),
-                inline=False
-            )
-
-    embed.set_footer(text="Купить питомца — кнопка ниже.")
-    embed = await fix_embed_emojis(embed)
-    return embed
-
-async def build_autocollector_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    existing = await get_autocollector(user_id)
-
-    embed = BotEmbed(title="🤖 Автосборщик", color=0x3498db)
-
-    if not existing:
-        embed.description = (
-            f"Покупай автосборщик, чтобы доход собирался **автоматически** раз в "
-            f"{AUTOCOLLECT_LEVELS[1][1]} ч, даже когда ты офлайн.\n\n"
-            f"Цена: {GEM} {AUTOCOLLECT_PRICE_GEMS}"
-        )
-    else:
-        level, last_auto = existing
-        interval = AUTOCOLLECT_LEVELS[level][1]
-        next_level = level + 1
-        if next_level <= AUTOCOLLECT_MAX_LEVEL:
-            next_price, next_interval = AUTOCOLLECT_LEVELS[next_level]
-            upgrade_str = f"\nУлучшение до {next_level} ур.: 💎 {next_price} → раз в {next_interval} ч"
-        else:
-            upgrade_str = "\nМаксимальный уровень."
-        embed.description = (
-            f"Уровень: **{level}/{AUTOCOLLECT_MAX_LEVEL}**\n"
-            f"Интервал: раз в **{interval} ч**\n"
-            f"Последний сбор: `{last_auto or '—'}`"
-            f"{upgrade_str}"
-        )
-    embed = await fix_embed_emojis(embed)
     return embed
 
 async def build_notifications_embed(interaction: discord.Interaction) -> discord.Embed:
