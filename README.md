@@ -128,8 +128,8 @@ python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=50
 ruff check --select F821,F811,F401 bot.py tests gen_mania
 ```
 
-Текущий статус: **375 passed**, 116 test files.  
-Coverage `bot.py`: **90.01%**, минимальный порог — **50%**.
+Текущий статус: **382 passed**, 118 test files.  
+Coverage `bot.py`: **91.00%**, минимальный порог — **50%**.
 
 Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
 owner-only команда `/health` показывает метрики и состояние задач.
