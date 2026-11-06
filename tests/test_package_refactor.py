@@ -19,6 +19,7 @@ from gen_mania.repositories.settings import (
     SETTING_COLUMNS as REPOSITORY_SETTING_COLUMNS,
 )
 from gen_mania.repositories.settings import SettingsRuntime
+from gen_mania.services.analytics_ui import AnalyticsUiRuntime
 from gen_mania.services.auction import AuctionRuntime
 from gen_mania.services.bank import BankRuntime
 from gen_mania.services.clan_applications import ClanApplicationRuntime
@@ -89,6 +90,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.PROFILE_UI_RUNTIME, ProfileUiRuntime)
     assert isinstance(m.SHOP_UI_RUNTIME, ShopUiRuntime)
     assert isinstance(m.UPGRADES_UI_RUNTIME, UpgradesUiRuntime)
+    assert isinstance(m.ANALYTICS_UI_RUNTIME, AnalyticsUiRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)

@@ -54,6 +54,10 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
+from gen_mania.services.analytics_ui import (
+    AnalyticsUiRuntime,
+    make_analytics_ui_layer,
+)
 from gen_mania.services.clan_applications import (
     ClanApplicationRuntime,
     make_clan_application_layer,
@@ -4481,6 +4485,33 @@ UPGRADES_UI_RUNTIME.configure(
     build_autocollector_embed,
 ) = make_upgrades_ui_layer(UPGRADES_UI_RUNTIME)
 
+ANALYTICS_UI_RUNTIME = AnalyticsUiRuntime()
+ANALYTICS_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    accessibility_getter=lambda: is_accessibility_mode,
+    status_bonus_getter=lambda: get_status_bonus,
+    income_getter=lambda: get_per_second_income,
+    power_getter=lambda: get_combat_power,
+    sets_getter=lambda: get_set_synergy_details,
+    season_getter=lambda: get_season_data,
+    pet_getter=lambda: get_active_pet,
+    titles_getter=lambda: get_unlocked_titles,
+    prestige_getter=lambda: get_prestige_points,
+    collection_getter=lambda: get_collection_count,
+    bonus_line_getter=lambda: get_total_bonus_line,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    pet_types=PET_TYPES,
+    titles=TITLES,
+    castle=CASTLE,
+    season_levels=SEASON_LEVELS,
+    collection_bonus=COLLECTION_BONUS_PER_ITEM,
+    logger=log,
+)
+build_analytics_embed = make_analytics_ui_layer(
+    ANALYTICS_UI_RUNTIME
+)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6203,263 +6234,6 @@ async def build_advent_embed(interaction: discord.Interaction, page: int = 0) ->
         embed.add_field(name=f"Награда за окошко {next_day}", value=reward_str, inline=False)
 
     embed.set_footer(text=f"Страница {page + 1}/{total_pages}")
-    embed = await fix_embed_emojis(embed)
-    return embed
-
-
-async def build_analytics_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    compact = await is_accessibility_mode(user_id)
-
-    # --- Базовые данные ---
-    async with bot.db.execute("""
-        SELECT coins, gems, catalysts, total_crafts, total_successes,
-               grid_size, title
-        FROM players WHERE user_id = ?
-    """, (user_id,)) as c:
-        row = await c.fetchone()
-    if not row:
-        e = BotEmbed(title="❌ Профиль не найден", color=0xe74c3c)
-        e = await fix_embed_emojis(e)
-        return e
-
-    coins, gems, catalysts, crafts, successes, grid_size, title = row
-    bonus = await get_status_bonus(user_id)
-    successes = successes or 0
-    crafts = crafts or 0
-    winrate = (successes / crafts * 100) if crafts > 0 else 0.0
-
-    # --- Доход ---
-    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
-    income_coins_h = per_sec_coins * 3600
-    income_gems_h = per_sec_gems * 3600
-
-    # --- Генераторы ---
-    async with bot.db.execute("""
-        SELECT COUNT(*), 
-               SUM(CASE WHEN i.income_per_hour > 0 THEN 1 ELSE 0 END),
-               MAX(i.price)
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'profile'
-    """, (user_id,)) as c:
-        gens_total, gens_income, best_price = await c.fetchone()
-    gens_total = gens_total or 0
-    gens_income = gens_income or 0
-    best_price = best_price or 0
-
-    avg_income = (income_coins_h / gens_income) if gens_income > 0 else 0
-    power = await get_combat_power(user_id)
-    set_details = await get_set_synergy_details(user_id)
-    season_data = await get_season_data(user_id)
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM market_orders WHERE user_id = ? AND status = 'active'",
-        (user_id,),
-    ) as c:
-        active_orders = (await c.fetchone())[0] or 0
-    async with bot.db.execute(
-        "SELECT amount, due_time FROM bank_loans WHERE user_id = ? "
-        "AND COALESCE(status, 'active') = 'active'",
-        (user_id,),
-    ) as c:
-        loan_row = await c.fetchone()
-
-    # --- Питомцы ---
-    async with bot.db.execute(
-        "SELECT COUNT(*), MAX(level) FROM user_pets_v2 WHERE user_id = ?", (user_id,)
-    ) as c:
-        pet_count, pet_max = await c.fetchone()
-    pet_count = pet_count or 0
-    pet_max = pet_max or 0
-    active_pet = await get_active_pet(user_id)
-    active_pet_str = "нет"
-    if active_pet:
-        pid, lvl = active_pet
-        pt = PET_TYPES.get(pid)
-        if pt:
-            active_pet_str = f"{pt['emoji']} {pt['name']} (ур. {lvl})"
-
-    # --- Титулы ---
-    unlocked_titles = await get_unlocked_titles(user_id)
-
-    # --- Рейды/дуэли ---
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM duel_history WHERE winner_id = ?", (user_id,)
-    ) as c:
-        duel_wins = (await c.fetchone())[0] or 0
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM duel_history WHERE loser_id = ?", (user_id,)
-    ) as c:
-        duel_losses = (await c.fetchone())[0] or 0
-    duel_total = duel_wins + duel_losses
-    duel_wr = (duel_wins / duel_total * 100) if duel_total > 0 else 0.0
-
-    async with bot.db.execute(
-        "SELECT progress FROM player_quests WHERE user_id = ? AND quest_id = 'q_raid_1'", (user_id,)
-    ) as c:
-        r = await c.fetchone()
-        raid_wins = r[0] if r else 0
-
-    # --- Экономика ---
-    async with bot.db.execute(
-        "SELECT amount, interest_rate, end_time FROM bank_deposits WHERE user_id = ?", (user_id,)
-    ) as c:
-        deposit = await c.fetchone()
-    deposit_str = "нет"
-    if deposit:
-        amt, rate, end = deposit
-        deposit_str = f"🪙 {amt} ({int(rate*100)}%)"
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM tax_log WHERE user_id = ?", (user_id,)
-    ) as c:
-        tax_count = (await c.fetchone())[0] or 0
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM auctions WHERE seller_id = ?", (user_id,)
-    ) as c:
-        auction_sold = (await c.fetchone())[0] or 0
-
-    # --- Достижения ---
-    async with bot.db.execute(
-        "SELECT lifetime_production, total_gems_earned FROM players WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        tce, tge = await c.fetchone()
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)
-    ) as c:
-        ach_count = (await c.fetchone())[0] or 0
-
-    prestige_points = await get_prestige_points(user_id)
-    collection_count = await get_collection_count(user_id)
-
-    # --- Строим embed ---
-    embed = BotEmbed(
-        title=f"📈 Аналитика — {interaction.user.name}",
-        description="Подробная статистика твоего прогресса.",
-        color=0x3498db
-    )
-    if not compact:
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-
-    # Всего заработано (после создания embed!)
-    embed.add_field(
-        name="📊 Всего заработано",
-        value=f"🪙 {tce or 0}\n💎 {tge or 0}",
-        inline=True
-    )
-
-    # Доход
-    total_bonus_line = await get_total_bonus_line(user_id)
-    embed.add_field(
-        name="💰 Доход",
-        value=(
-            f"🪙 {income_coins_h:.2f}/час\n"
-            f"💎 {income_gems_h:.4f}/час\n"
-            f"{total_bonus_line}"
-        ),
-        inline=True
-    )
-
-    # Энергостанция
-    embed.add_field(
-        name=f"{CASTLE} Энергостанция",
-        value=(
-            f"Генераторов: **{gens_total}**\n"
-            f"Доходных: **{gens_income}**\n"
-            f"Средний: 🪙 {avg_income:.2f}/час\n"
-            f"Сетка: **{grid_size}**\n"
-            f"⚔️ Мощь: **{power}**"
-        ),
-        inline=True
-    )
-
-    # Коллекция и сеты
-    embed.add_field(
-        name="🧩 Коллекция и сеты",
-        value=(
-            f"Коллекция: **{collection_count}**\n"
-            f"Бонус коллекции: **+{collection_count * COLLECTION_BONUS_PER_ITEM * 100:.1f}%**\n"
-            f"Сеты: **+{int(set_details['total'] * 100)}%**\n"
-            f"Сезон: **{season_data['level']}/{SEASON_LEVELS}**"
-        ),
-        inline=True
-    )
-
-    # Синтез
-    embed.add_field(
-        name="⚗️ Синтез",
-        value=(
-            f"Попыток: **{crafts}**\n"
-            f"Успехов: **{successes}**\n"
-            f"Винрейт: **{winrate:.1f}%**\n"
-            f"Катализаторов: **{catalysts}**"
-        ),
-        inline=True
-    )
-
-    # Питомцы
-    embed.add_field(
-        name="🐾 Питомцы",
-        value=(
-            f"Куплено: **{pet_count}**\n"
-            f"Лучший ур.: **{pet_max}**\n"
-            f"Активный: {active_pet_str}"
-        ),
-        inline=True
-    )
-
-    # Титулы
-    embed.add_field(
-        name="🏅 Титулы",
-        value=(
-            f"Активный: **{title or 'Новичок'}**\n"
-            f"Открыто: **{len(unlocked_titles)}/{len(TITLES)}**"
-        ),
-        inline=True
-    )
-
-    # PvP
-    embed.add_field(
-        name="⚔️ PvP",
-        value=(
-            f"Дуэли: **{duel_wins}W / {duel_losses}L** ({duel_wr:.1f}%)\n"
-            f"Рейды (победы): **{raid_wins}**"
-        ),
-        inline=True
-    )
-
-    # Экономика
-    loan_text = "нет"
-    if loan_row:
-        loan_text = f"🪙 {loan_row[0]} до {str(loan_row[1])[:10]}"
-    embed.add_field(
-        name="🏦 Экономика",
-        value=(
-            f"Вклад: {deposit_str}\n"
-            f"Кредит: {loan_text}\n"
-            f"Активных ордеров: **{active_orders}**\n"
-            f"Налогов: **{tax_count}**\n"
-            f"Лотов продано: **{auction_sold}**"
-        ),
-        inline=True
-    )
-
-    # Прогресс
-    embed.add_field(
-        name="🏆 Прогресс",
-        value=(
-            f"Достижений: **{ach_count}**\n"
-            f"Престиж: **{prestige_points}** очк.\n"
-            f"Коллекция: **{collection_count}**\n"
-            f"Гемов: **{gems}**\n"
-            f"Монет: **{coins}**"
-        ),
-        inline=True
-    )
     embed = await fix_embed_emojis(embed)
     return embed
 
