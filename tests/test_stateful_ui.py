@@ -119,6 +119,27 @@ def test_stateful_ui_and_settings():
             saved = await m.get_settings(1)
             assert saved["admin_role_id"] == 123
 
+            added = []
+            role = SimpleNamespace(id=777)
+            member = SimpleNamespace(
+                add_roles=lambda *args, **kwargs: added.append(role)
+            )
+
+            async def add_roles(*args, **kwargs):
+                added.append(args[0] if args else role)
+
+            member.add_roles = add_roles
+            guild = SimpleNamespace(
+                get_member=lambda uid: member,
+                get_role=lambda role_id: role,
+            )
+            await m.save_setting(
+                1, "status_roles", {"vip": 777}, actor_id=1
+            )
+            interaction.guild = guild
+            await m.grant_status_role(interaction, 1, "vip")
+            assert added
+
             original_event = m.get_active_advent_event
             event = {
                 "key": "test_event",
@@ -138,6 +159,16 @@ def test_stateful_ui_and_settings():
                     "WHERE user_id = 1"
                 ) as c:
                     assert (await c.fetchone())[0] == 1
+
+                view = m.AdventView(1)
+                day_btn = next(
+                    item
+                    for item in view.children
+                    if getattr(item, "label", None) == "2"
+                )
+                interaction = FakeInteraction(1)
+                await day_btn.callback(interaction)
+                assert interaction.followup.sent
             finally:
                 m.get_active_advent_event = original_event
 

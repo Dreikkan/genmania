@@ -183,6 +183,42 @@ def test_war_closer_finishes_expired_war():
     asyncio.run(run())
 
 
+def test_retention_task_removes_old_rows():
+    async def run():
+        db = await _init()
+        try:
+            old = (
+                datetime.datetime.now() - datetime.timedelta(days=999)
+            ).isoformat()
+            await db.execute(
+                "INSERT INTO admin_log "
+                "(admin_id, target_id, action, timestamp) "
+                "VALUES (1, 2, 'old', ?)",
+                (old,),
+            )
+            await db.execute(
+                "INSERT INTO admin_log "
+                "(admin_id, target_id, action, timestamp) "
+                "VALUES (1, 2, 'new', ?)",
+                (datetime.datetime.now().isoformat(),),
+            )
+            await db.commit()
+
+            await _run_once(m.bot.retention_task)
+
+            async with db.execute(
+                "SELECT action FROM admin_log"
+            ) as c:
+                actions = {row[0] for row in await c.fetchall()}
+            assert "old" not in actions
+            assert "new" in actions
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_market_updater_updates_prices():
     async def run():
         db = await _init()
