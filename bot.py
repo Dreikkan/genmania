@@ -56,6 +56,7 @@ from gen_mania.repositories.settings import (
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
 from gen_mania.services.admin_ui import AdminUiRuntime, make_admin_ui_layer
+from gen_mania.services.advent import AdventRuntime, make_advent_layer
 from gen_mania.services.analytics_ui import (
     AnalyticsUiRuntime,
     make_analytics_ui_layer,
@@ -4670,6 +4671,28 @@ ADMIN_UI_RUNTIME.configure(
     build_admin_market_embed,
 ) = make_admin_ui_layer(ADMIN_UI_RUNTIME)
 
+ADVENT_RUNTIME = AdventRuntime()
+ADVENT_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    grant_item_getter=lambda: grant_item_or_compensation,
+    achievements_getter=lambda: check_achievements,
+    parse_time_getter=lambda: _parse_market_datetime,
+    event_getter=lambda: get_active_advent_event,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    rewards=ADVENT_REWARDS,
+    page_size=ADVENT_PAGE_SIZE,
+    logger=log,
+)
+(
+    get_advent_state,
+    get_advent_opened,
+    can_open_advent_today,
+    open_advent_day,
+    build_advent_embed,
+) = make_advent_layer(ADVENT_RUNTIME)
+
 AUDIT_RUNTIME = AuditRuntime()
 AUDIT_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -5935,196 +5958,6 @@ async def deny_content_edit(interaction: discord.Interaction) -> bool:
         ephemeral=True,
     )
     return True
-
-
-async def get_advent_state(user_id: int) -> tuple:
-    """Возвращает (last_opened_day, last_opened_date, event_key)."""
-    async with bot.db.execute(
-        "SELECT last_opened_day, last_opened_date, event_key "
-        "FROM advent_state WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return 0, None, None
-    return row[0] or 0, row[1], row[2]
-
-
-async def get_advent_opened(user_id: int) -> set:
-    """Возвращает set открытых дней текущего праздничного события."""
-    event, _day = get_active_advent_event()
-    if not event:
-        return set()
-    _last_day, _last_date, event_key = await get_advent_state(user_id)
-    if event_key != event["key"]:
-        return set()
-    async with bot.db.execute(
-        "SELECT day FROM advent_progress WHERE user_id = ?", (user_id,)
-    ) as c:
-        return {r[0] for r in await c.fetchall()}
-
-
-async def can_open_advent_today(user_id: int) -> tuple[bool, str]:
-    """Проверяет, можно ли открыть окошко сегодня."""
-    event, _day = get_active_advent_event()
-    if not event:
-        return False, "Сейчас нет активного праздничного календаря."
-    last_day, last_date, event_key = await get_advent_state(user_id)
-    if event_key == event["key"] and last_day >= event["days"]:
-        return False, f"{event['emoji']} Все окошки события уже открыты!"
-    last = _parse_market_datetime(last_date)
-    if last and (datetime.date.today() - last.date()).days < 1:
-        return False, "⏳ Ты уже открывал окошко сегодня. Возвращайся завтра!"
-    return True, ""
-
-
-async def open_advent_day(user_id: int, day: int) -> tuple[bool, str, dict]:
-    """Открывает окошко активного праздничного события."""
-    event, _current_day = get_active_advent_event()
-    if not event:
-        return False, "🎄 Сейчас нет активного праздничного календаря.", {}
-    if day < 1 or day > event["days"]:
-        return False, f"❌ В этом событии доступны дни 1–{event['days']}.", {}
-
-    try:
-        async with db_transaction():
-            last_day, last_date, event_key = await get_advent_state(user_id)
-            if event_key != event["key"]:
-                await bot.db.execute(
-                    "DELETE FROM advent_progress WHERE user_id = ?", (user_id,)
-                )
-                last_day = 0
-                last_date = None
-
-            if last_day >= event["days"]:
-                raise ValueError(
-                    f"❌ {event['emoji']} Все окошки события уже открыты!"
-                )
-            last_date_value = _parse_market_datetime(last_date)
-            if last_date_value:
-                if (
-                    datetime.date.today() - last_date_value.date()
-                ).days < 1:
-                    raise ValueError(
-                        "⏳ Ты уже открывал окошко сегодня. "
-                        "Возвращайся завтра!"
-                    )
-            async with bot.db.execute(
-                "SELECT 1 FROM advent_progress "
-                "WHERE user_id = ? AND day = ?",
-                (user_id, day),
-            ) as c:
-                if await c.fetchone():
-                    raise ValueError("❌ Это окошко уже открыто.")
-            if day != last_day + 1:
-                raise ValueError(
-                    f"❌ Сейчас можно открыть только окошко **{last_day + 1}**."
-                )
-
-            coins, gems, item_id = ADVENT_REWARDS[day]
-            await bot.db.execute(
-                "UPDATE players SET coins = coins + ?, gems = gems + ?, "
-                "total_coins_earned = total_coins_earned + ?, "
-                "lifetime_production = lifetime_production + ?, "
-                "total_gems_earned = total_gems_earned + ? "
-                "WHERE user_id = ?",
-                (coins, gems, coins, coins, gems, user_id),
-            )
-
-            item_name = None
-            if item_id:
-                item_name, _ = await grant_item_or_compensation(
-                    user_id, item_id, 1
-                )
-
-            now_iso = datetime.datetime.now().isoformat()
-            today_str = datetime.date.today().isoformat()
-            await bot.db.execute(
-                "INSERT INTO advent_progress (user_id, day) VALUES (?, ?)",
-                (user_id, day),
-            )
-            await bot.db.execute("""
-                INSERT INTO advent_state
-                    (user_id, last_opened_day, last_opened_date, event_key)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    last_opened_day = ?,
-                    last_opened_date = ?,
-                    event_key = ?
-            """, (
-                user_id, day, today_str, event["key"],
-                day, today_str, event["key"],
-            ))
-    except ValueError as exc:
-        return False, str(exc), {}
-
-    await check_achievements(user_id)
-
-    return True, f"🎁 Окошко **{day}** открыто!", {
-        "day": day, "coins": coins, "gems": gems, "item": item_name
-    }
-
-
-async def build_advent_embed(interaction: discord.Interaction, page: int = 0) -> discord.Embed:
-    event, _current_day = get_active_advent_event()
-    if not event:
-        e = BotEmbed(
-            title="🎄 Праздничный календарь",
-            description=(
-                "Сейчас нет активного события. Календарь открывается на праздники: "
-                "зимние праздники, Хэллоуин, майские, 23 февраля и 8 Марта."
-            ),
-            color=0xe74c3c,
-        )
-        return await fix_embed_emojis(e)
-    event_days = event["days"]
-    user_id = interaction.user.id
-    opened = await get_advent_opened(user_id)
-    last_day, _last_date, event_key = await get_advent_state(user_id)
-    if event_key != event["key"]:
-        last_day = 0
-
-    can_today, reason = await can_open_advent_today(user_id)
-    next_day = last_day + 1
-    total_pages = max(1, (event_days + ADVENT_PAGE_SIZE - 1) // ADVENT_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start_day = page * ADVENT_PAGE_SIZE + 1
-    end_day = min(start_day + ADVENT_PAGE_SIZE - 1, event_days)
-
-    embed = BotEmbed(
-        title=f"{event['emoji']} {event['name']}",
-        description=(
-            f"Открыто: **{len(opened)}/{event_days}**\n"
-            f"Следующее окошко: **{next_day if next_day <= event_days else '—'}**\n"
-            + ("✅ Можно открыть!" if can_today else f"⏳ {reason}")
-        ),
-        color=0xe74c3c,
-    )
-
-    lines = []
-    for day in range(start_day, end_day + 1):
-        if day in opened:
-            lines.append(f"✅ **{day}**")
-        elif day == next_day and can_today:
-            lines.append(f"🎁 **{day}**")
-        else:
-            lines.append(f"🔒 {day}")
-
-    grid = ""
-    for i in range(0, len(lines), 6):
-        grid += "  ".join(lines[i:i+6]) + "\n"
-    embed.add_field(name=f"Окошки {start_day}–{end_day}", value=grid or "—", inline=False)
-
-    if next_day <= event_days:
-        c, g, it = ADVENT_REWARDS.get(next_day, (50, 1, None))
-        reward_str = f"🪙 {c} | 💎 {g}"
-        if it:
-            reward_str += f" | 🎁 {it}"
-        embed.add_field(name=f"Награда за окошко {next_day}", value=reward_str, inline=False)
-
-    embed.set_footer(text=f"Страница {page + 1}/{total_pages}")
-    embed = await fix_embed_emojis(embed)
-    return embed
 
 
 async def delete_message_later(message, delay: int):

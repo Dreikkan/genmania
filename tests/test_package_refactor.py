@@ -21,6 +21,7 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.repositories.settings import SettingsRuntime
 from gen_mania.services.admin_ui import AdminUiRuntime
+from gen_mania.services.advent import AdventRuntime
 from gen_mania.services.analytics_ui import AnalyticsUiRuntime
 from gen_mania.services.auction import AuctionRuntime
 from gen_mania.services.bank import BankRuntime
@@ -102,6 +103,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.UPGRADES_UI_RUNTIME, UpgradesUiRuntime)
     assert isinstance(m.ANALYTICS_UI_RUNTIME, AnalyticsUiRuntime)
     assert isinstance(m.ADMIN_UI_RUNTIME, AdminUiRuntime)
+    assert isinstance(m.ADVENT_RUNTIME, AdventRuntime)
     assert isinstance(m.AUDIT_RUNTIME, AuditRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
