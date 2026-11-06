@@ -122,6 +122,7 @@ from gen_mania.services.raid_combat import (
     make_raid_combat_layer,
 )
 from gen_mania.services.seasons import SeasonRuntime, make_season_layer
+from gen_mania.services.sets import SetRuntime, make_set_layer
 from gen_mania.services.shop_ui import ShopUiRuntime, make_shop_ui_layer
 from gen_mania.services.upgrades_ui import (
     UpgradesUiRuntime,
@@ -4350,6 +4351,30 @@ SEASON_RUNTIME.configure(
     build_season_embed,
 ) = make_season_layer(SEASON_RUNTIME)
 
+SET_RUNTIME = SetRuntime()
+SET_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    grid_size_getter=lambda: get_grid_size,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    set_definitions=SET_DEFINITIONS,
+    item_set=ITEM_SET,
+    adjacency_bonus=SET_ADJACENCY_BONUS,
+    adjacency_max=SET_ADJACENCY_MAX,
+    floor_bonus=SET_FLOOR_BONUS,
+    floor_max=SET_FLOOR_MAX,
+    total_max=SET_TOTAL_MAX,
+    logger=log,
+)
+(
+    get_set_tier,
+    compute_set_synergy,
+    get_set_synergy_details,
+    get_set_bonus,
+    build_sets_embed,
+) = make_set_layer(SET_RUNTIME)
+
 PET_RUNTIME = PetRuntime()
 PET_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6144,89 +6169,6 @@ async def get_collection_count(user_id: int) -> int:
 
 async def get_collection_bonus(user_id: int) -> float:
     return (await get_collection_count(user_id)) * COLLECTION_BONUS_PER_ITEM
-
-
-def get_set_tier(set_id: str, count: int) -> tuple[int, float]:
-    """Возвращает лучший достигнутый порог сета и его бонус."""
-    for threshold, bonus in SET_DEFINITIONS[set_id]["tiers"]:
-        if count >= threshold:
-            return threshold, bonus
-    return 0, 0.0
-
-
-def compute_set_synergy(rows, grid_size: int) -> dict:
-    """Считает бонусы сетов по раскладке энергостанции.
-
-    rows: [(slot, item_id), ...] только из location='profile'.
-    """
-    set_items = {set_id: set() for set_id in SET_DEFINITIONS}
-    slot_sets = {}
-
-    for slot, item_id in rows:
-        set_id = ITEM_SET.get(item_id)
-        if not set_id:
-            continue
-        set_items[set_id].add(item_id)
-        slot_sets[int(slot)] = set_id
-
-    set_counts = {set_id: len(items) for set_id, items in set_items.items()}
-    set_tiers = {}
-    set_bonus = 0.0
-    for set_id, count in set_counts.items():
-        threshold, bonus = get_set_tier(set_id, count)
-        set_tiers[set_id] = (threshold, bonus)
-        set_bonus += bonus
-
-    width = max(1, int(grid_size ** 0.5))
-    adjacency_pairs = 0
-    for slot, set_id in slot_sets.items():
-        right = slot + 1
-        if right < grid_size and slot % width != width - 1:
-            if slot_sets.get(right) == set_id:
-                adjacency_pairs += 1
-        down = slot + width
-        if down < grid_size and slot_sets.get(down) == set_id:
-            adjacency_pairs += 1
-
-    full_rows = 0
-    for start in range(0, grid_size, width):
-        row_sets = [
-            slot_sets.get(slot)
-            for slot in range(start, min(start + width, grid_size))
-        ]
-        if row_sets and all(row_sets) and len(set(row_sets)) == 1:
-            full_rows += 1
-
-    adjacency_bonus = min(adjacency_pairs * SET_ADJACENCY_BONUS, SET_ADJACENCY_MAX)
-    floor_bonus = min(full_rows * SET_FLOOR_BONUS, SET_FLOOR_MAX)
-    total = min(set_bonus + adjacency_bonus + floor_bonus, SET_TOTAL_MAX)
-
-    return {
-        "set_counts": set_counts,
-        "set_tiers": set_tiers,
-        "set_bonus": set_bonus,
-        "adjacency_pairs": adjacency_pairs,
-        "adjacency_bonus": adjacency_bonus,
-        "full_rows": full_rows,
-        "floor_bonus": floor_bonus,
-        "total": total,
-    }
-
-
-async def get_set_synergy_details(user_id: int) -> dict:
-    grid_size = await get_grid_size(user_id)
-    async with bot.db.execute(
-        "SELECT slot, item_id FROM inventory "
-        "WHERE user_id = ? AND location = 'profile'",
-        (user_id,),
-    ) as c:
-        rows = await c.fetchall()
-    return compute_set_synergy(rows, grid_size)
-
-
-async def get_set_bonus(user_id: int) -> float:
-    details = await get_set_synergy_details(user_id)
-    return details["total"]
 
 
 def prestige_required_total(points: int) -> int:
@@ -14325,69 +14267,6 @@ class GemsToCoinsModal(discord.ui.Modal, title="Обмен гемов на мо�
 # ============================================================
 #  ⚡ ЭНЕРГОСТАНЦИЯ
 # ============================================================
-
-async def build_sets_embed(user_id: int) -> discord.Embed:
-    details = await get_set_synergy_details(user_id)
-    embed = BotEmbed(
-        title=f"{get_emoji('_inventory')} Сеты генераторов",
-        description=(
-            "Сеты дают бонус за разные генераторы одного набора, "
-            "соседство и полностью заполненные ряды."
-        ),
-        color=0x9b59b6,
-    )
-
-    set_lines = []
-    for set_id, set_def in SET_DEFINITIONS.items():
-        count = details["set_counts"].get(set_id, 0)
-        total = len(set_def["items"])
-        _, current_bonus = details["set_tiers"].get(set_id, (0, 0.0))
-        line = (
-            f"{set_def['emoji']} **{set_def['name']}** — "
-            f"{count}/{total} (+{int(current_bonus * 100)}%)"
-        )
-        if count < total:
-            next_tier = None
-            for threshold, bonus in reversed(set_def["tiers"]):
-                if count < threshold:
-                    next_tier = (threshold, bonus)
-                    break
-            if next_tier:
-                line += (
-                    f" · след. {next_tier[0]} → "
-                    f"+{int(next_tier[1] * 100)}%"
-                )
-        set_lines.append(line)
-
-    embed.add_field(name="Наборы", value="\n".join(set_lines), inline=False)
-    embed.add_field(
-        name="Синергия",
-        value=(
-            f"Сеты: **+{int(details['set_bonus'] * 100)}%**\n"
-            f"Соседство: **{details['adjacency_pairs']}** пар → "
-            f"+{int(details['adjacency_bonus'] * 100)}%\n"
-            f"Этажи: **{details['full_rows']}** рядов → "
-            f"+{int(details['floor_bonus'] * 100)}%\n"
-            f"**Итого: +{int(details['total'] * 100)}%**"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Как усилить",
-        value=(
-            "Собери 2/4/6 разных генераторов одного сета, "
-            "ставь их соседними слотами и заполняй целые ряды."
-        ),
-        inline=False,
-    )
-    embed.set_footer(
-        text=(
-            f"Соседство: +{int(SET_ADJACENCY_BONUS * 1000)}‰ за пару · "
-            f"ряд: +{int(SET_FLOOR_BONUS * 100)}%"
-        )
-    )
-    return embed
-
 
 class SetsView(BaseView):
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)

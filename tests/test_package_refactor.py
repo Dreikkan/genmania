@@ -47,6 +47,7 @@ from gen_mania.services.progress import ProgressRuntime
 from gen_mania.services.pvp import PvpRuntime
 from gen_mania.services.raid_combat import RaidCombatRuntime
 from gen_mania.services.seasons import SeasonRuntime
+from gen_mania.services.sets import SetRuntime
 from gen_mania.services.shop_ui import ShopUiRuntime
 from gen_mania.services.statuses import StatusRuntime
 from gen_mania.services.storage_ui import StorageUiRuntime
@@ -92,6 +93,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.CLAN_APPLICATION_RUNTIME, ClanApplicationRuntime)
     assert isinstance(m.MARKET_ORDER_RUNTIME, MarketOrderRuntime)
     assert isinstance(m.SEASON_RUNTIME, SeasonRuntime)
+    assert isinstance(m.SET_RUNTIME, SetRuntime)
     assert isinstance(m.PET_RUNTIME, PetRuntime)
     assert isinstance(m.STATUS_RUNTIME, StatusRuntime)
     assert isinstance(m.STORAGE_UI_RUNTIME, StorageUiRuntime)

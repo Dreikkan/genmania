@@ -124,6 +124,8 @@
   embed into `gen_mania.services.advent`.
 - Refactor slice 49: extracted clan overview and browser embeds into
   `gen_mania.services.clan_ui`.
+- Refactor slice 50: extracted set synergy calculations and embed into
+  `gen_mania.services.sets`; coverage reached 60%.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
