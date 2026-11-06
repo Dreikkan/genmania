@@ -171,6 +171,9 @@
 - Coverage slice 71: added raid invite guards, clan confirmations, build-main
   onboarding, guide split, star/craft edges, cosmetics/clan menus, exchange
   and content selection tests. Coverage reached **89%**.
+- Coverage slice 72: added guard/confirm views, open helpers, background error
+  branches, shop/bulk/raid edges, settings/sell/profile/season callbacks.
+  Coverage reached **90%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
