@@ -4745,6 +4745,10 @@ PVP_RUNTIME.configure(
     achievements_getter=lambda: check_achievements,
     season_xp_getter=lambda: add_season_xp,
     season_xp_amount_getter=lambda: season_xp_amount,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    raid_cooldown_getter=lambda: get_raid_cooldown_seconds,
+    format_cooldown_getter=lambda: format_cooldown,
     duel_cooldown_seconds=DUEL_COOLDOWN_SECONDS,
     espionage_cooldown_seconds=ESPIONAGE_COOLDOWN_SECONDS,
     duel_max_bet_pct=DUEL_MAX_BET_PCT,
@@ -4760,6 +4764,7 @@ PVP_RUNTIME.configure(
     power_duel_allowed,
     validate_power_duel,
     resolve_duel,
+    build_battle_log_embed,
 ) = make_pvp_layer(PVP_RUNTIME)
 
 CLAN_RUNTIME = ClanRuntime()
@@ -13044,72 +13049,6 @@ async def build_pvp_hub_embed(user_id: int) -> discord.Embed:
         ),
         color=0xe74c3c,
     )
-
-
-async def build_battle_log_embed(
-    user_id: int, filter_type: str = "all"
-) -> discord.Embed:
-    events = []
-    if filter_type in ("all", "duel"):
-        async with bot.db.execute(
-            "SELECT winner_id, loser_id, bet, type, timestamp FROM duel_history "
-            "WHERE winner_id = ? OR loser_id = ? ORDER BY id DESC LIMIT 10",
-            (user_id, user_id),
-        ) as c:
-            for winner, loser, bet, mode, ts in await c.fetchall():
-                won = winner == user_id
-                opponent = loser if won else winner
-                events.append((
-                    _parse_db_time(ts) or datetime.datetime.min,
-                    (
-                        f"{'🏆' if won else '💥'} Дуэль ({mode}) "
-                        f"против <@{opponent}> · ставка 🪙 {bet}"
-                    ),
-                ))
-    if filter_type in ("all", "raid"):
-        async with bot.db.execute(
-            "SELECT target_id, amount, timestamp FROM raid_loot_log "
-            "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
-            (user_id,),
-        ) as c:
-            for target, amount, ts in await c.fetchall():
-                events.append((
-                    _parse_db_time(ts) or datetime.datetime.min,
-                    f"🏰 Рейд: украдено 🪙 {amount} у <@{target}>",
-                ))
-
-    events.sort(key=lambda item: item[0], reverse=True)
-    filter_labels = {"all": "все", "duel": "дуэли", "raid": "рейды"}
-    description = (
-        f"Последние 10 событий · режим: "
-        f"{filter_labels.get(filter_type, filter_type)}."
-    )
-    raid_cd = await get_raid_cooldown_seconds(user_id)
-    duel_cd = await get_duel_cooldown_seconds(user_id)
-    cooldown_parts = []
-    if raid_cd:
-        cooldown_parts.append(f"Рейд: **{format_cooldown(raid_cd)}**")
-    if duel_cd:
-        cooldown_parts.append(f"Дуэль: **{format_cooldown(duel_cd)}**")
-    if cooldown_parts:
-        description += "\n" + " · ".join(cooldown_parts)
-    embed = BotEmbed(
-        title=f"{get_emoji('_history')} Боевой журнал",
-        description=description,
-        color=0xe74c3c,
-    )
-    if not events:
-        embed.description = (
-            "Пока нет боёв. Начни с рейда или дуэли в PvP-хабе."
-        )
-        return embed
-    for timestamp, text in events[:10]:
-        embed.add_field(
-            name=text[:256],
-            value=f"`{timestamp.strftime('%d.%m %H:%M')}`",
-            inline=False,
-        )
-    return embed
 
 
 async def get_pvp_targets(viewer_id: int, mode: str = "raid") -> list[dict]:
