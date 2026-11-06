@@ -148,6 +148,8 @@
 - Coverage slice 61: added market/admin modals, health writer, backup task,
   status expirer and notifications command tests.
 - Coverage slice 62: added remaining command, callback and error-path tests.
+- Coverage slice 63: crossed 80% with service-branch, auction, bank, clan-war,
+  notification, setup-hook and UI-flow tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
