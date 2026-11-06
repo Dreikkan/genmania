@@ -88,6 +88,8 @@
   (detailed player analytics embed).
 - Refactor slice 31: extracted `gen_mania.services.admin_ui`
   (player card, season and market admin embeds).
+- Added `bothost.json` and deployment instructions for Bothost
+  (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
