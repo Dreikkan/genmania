@@ -223,6 +223,16 @@ def test_commands_and_misc_screens():
             await clan_role.on_submit(interaction)
             assert interaction.followup.sent
 
+            await db.execute(
+                "INSERT INTO notification_fallback "
+                "(user_id, notif_type, title, body) "
+                "VALUES (1, 'daily_ready', 'Дейли', 'Забери награду')"
+            )
+            await db.commit()
+            interaction = FakeInteraction(1)
+            await m.notifications_cmd.callback(interaction)
+            assert interaction.response.messages
+
             social = m.SocialView(1)
             tax_btn = next(
                 (
