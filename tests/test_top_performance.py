@@ -40,6 +40,38 @@ async def _close(db):
     m._top_cache.clear()
 
 
+def test_top_embed_formats_players_and_empty_state():
+    async def run():
+        db = await _init()
+        try:
+            interaction = SimpleNamespace(guild_id=1)
+            with patch.object(
+                m.bot,
+                "get_user",
+                side_effect=lambda uid: SimpleNamespace(
+                    id=uid, name=f"User{uid}"
+                ),
+            ):
+                embed = await m.build_top_embed(
+                    interaction, "coins", limit=10, scope="global"
+                )
+            assert "Топ — По монетам" in embed.title
+            values = "\n".join(field.value for field in embed.fields)
+            assert "User1" in values
+            assert "Места 1–3" in "\n".join(
+                field.name for field in embed.fields
+            )
+
+            empty = await m.build_top_embed(
+                interaction, "duels", limit=10, scope="global"
+            )
+            assert "Пока нет данных" in empty.description
+        finally:
+            await _close(db)
+
+    asyncio.run(run())
+
+
 def test_combat_power_many_matches_single():
     async def run():
         db = await _init()

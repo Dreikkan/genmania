@@ -1,9 +1,12 @@
-"""Leaderboard queries and short-lived cache."""
+"""Leaderboard queries, cache and embeds."""
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 from typing import Any, Callable
+
+import discord
 
 
 class LeaderboardRuntime:
@@ -14,6 +17,11 @@ class LeaderboardRuntime:
         self._bot_getter: Callable[[], Any] = lambda: None
         self._combat_power_many_getter: Callable[[], Callable] = lambda: None
         self._cache_getter: Callable[[], dict] = lambda: {}
+        self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_getter: Callable[[], Callable] = lambda: None
+        self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
+        self.top_types: dict = {}
+        self.top_type_emojis: dict = {}
         self.cache_ttl = 300
         self.logger = logging.getLogger("gen_mania")
 
@@ -24,6 +32,11 @@ class LeaderboardRuntime:
         bot_getter: Callable[[], Any],
         combat_power_many_getter: Callable[[], Callable],
         cache_getter: Callable[[], dict],
+        embed_factory: Callable[..., Any],
+        emoji_getter: Callable[[], Callable],
+        emoji_fixer: Callable[[Any], Any],
+        top_types: dict,
+        top_type_emojis: dict,
         cache_ttl: int,
         logger: logging.Logger,
     ) -> None:
@@ -31,6 +44,11 @@ class LeaderboardRuntime:
         self._bot_getter = bot_getter
         self._combat_power_many_getter = combat_power_many_getter
         self._cache_getter = cache_getter
+        self._embed_factory = embed_factory
+        self._emoji_getter = emoji_getter
+        self._emoji_fixer = emoji_fixer
+        self.top_types = top_types
+        self.top_type_emojis = top_type_emojis
         self.cache_ttl = cache_ttl
         self.logger = logger
 
@@ -49,6 +67,15 @@ class LeaderboardRuntime:
     async def combat_power_many(self, user_ids):
         getter = self._combat_power_many_getter()
         return await getter(user_ids)
+
+    def embed(self, **kwargs):
+        return self._embed_factory(**kwargs)
+
+    def emoji(self, key: str):
+        return self._emoji_getter()(key)
+
+    async def fix_emojis(self, embed):
+        return await self._emoji_fixer(embed)
 
 
 def make_leaderboard_layer(runtime: LeaderboardRuntime):
@@ -248,4 +275,89 @@ def make_leaderboard_layer(runtime: LeaderboardRuntime):
         runtime.cache[cache_key] = (now, rows)
         return rows
 
-    return get_top_players, get_top_players_cached
+    async def build_top_embed(
+        interaction,
+        top_type: str,
+        limit: int = 10,
+        scope: str = "global",
+    ):
+        """Строит embed для указанного топа (global/local)."""
+        if top_type not in runtime.top_types:
+            top_type = "coins"
+        title, _ = runtime.top_types[top_type]
+        top_emoji = runtime.emoji(
+            runtime.top_type_emojis.get(top_type, "_stats")
+        )
+        guild_id = interaction.guild_id if scope == "local" else None
+
+        rows = await get_top_players_cached(top_type, limit, guild_id)
+
+        embed = runtime.embed(
+            title=f"{top_emoji} Топ — {title}",
+            description=(
+                f"{'Локальный' if scope == 'local' else 'Глобальный'} "
+                f"топ-{limit} "
+                f"{'кланов' if top_type == 'clans' else 'игроков'}"
+            ),
+            color=0xF1C40F,
+        )
+
+        if not rows:
+            embed.description = "Пока нет данных."
+            return embed
+
+        user_cache: dict[int, object] = {}
+        if top_type != "clans":
+            missing = []
+            for uid, _value in rows:
+                user = runtime.bot.get_user(uid)
+                if user is not None:
+                    user_cache[uid] = user
+                else:
+                    missing.append(uid)
+            if missing:
+                semaphore = asyncio.Semaphore(5)
+
+                async def fetch_one(uid: int):
+                    async with semaphore:
+                        try:
+                            return uid, await runtime.bot.fetch_user(uid)
+                        except (
+                            discord.NotFound,
+                            discord.HTTPException,
+                        ):
+                            return uid, None
+
+                fetched = await asyncio.gather(
+                    *(fetch_one(uid) for uid in missing)
+                )
+                for uid, user in fetched:
+                    if user is not None:
+                        user_cache[uid] = user
+
+        lines = []
+        for i, row in enumerate(rows, start=1):
+            if top_type == "clans":
+                clan_id, name, power = row
+                lines.append(f"**{i}.** 🏰 {name} — ⚔️ {power}")
+            else:
+                uid, value = row
+                user = user_cache.get(uid)
+                display = (
+                    f"**{user.name}**" if user else f"`{uid}`"
+                )
+                lines.append(f"**{i}.** {display} — {value}")
+
+        chunk_size = 10
+        for i in range(0, len(lines), chunk_size):
+            chunk = lines[i:i + chunk_size]
+            start = i + 1
+            end = i + len(chunk)
+            embed.add_field(
+                name=f"Места {start}–{end}",
+                value="\n".join(chunk),
+                inline=False,
+            )
+        return await runtime.fix_emojis(embed)
+
+    return get_top_players, get_top_players_cached, build_top_embed

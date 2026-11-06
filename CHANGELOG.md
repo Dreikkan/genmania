@@ -104,6 +104,8 @@
   and order-book embeds into `gen_mania.services.market_ui`.
 - Refactor slice 39: extracted storage and temporary-storage embeds
   into `gen_mania.services.storage_ui`.
+- Refactor slice 40: moved top leaderboard embed into
+  `gen_mania.services.leaderboards`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.

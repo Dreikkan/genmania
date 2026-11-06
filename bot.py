@@ -4914,12 +4914,19 @@ LEADERBOARD_RUNTIME.configure(
     bot_getter=lambda: bot,
     combat_power_many_getter=lambda: get_combat_power_many,
     cache_getter=lambda: _top_cache,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    top_types=TOP_TYPES,
+    top_type_emojis=TOP_TYPE_EMOJIS,
     cache_ttl=TOP_CACHE_TTL,
     logger=log,
 )
-get_top_players, get_top_players_cached = make_leaderboard_layer(
-    LEADERBOARD_RUNTIME
-)
+(
+    get_top_players,
+    get_top_players_cached,
+    build_top_embed,
+) = make_leaderboard_layer(LEADERBOARD_RUNTIME)
 
 RAID_COMBAT_RUNTIME = RaidCombatRuntime()
 RAID_COMBAT_RUNTIME.configure(
@@ -6128,85 +6135,6 @@ async def open_advent_day(user_id: int, day: int) -> tuple[bool, str, dict]:
         "day": day, "coins": coins, "gems": gems, "item": item_name
     }
 
-
-async def build_top_embed(
-    interaction: discord.Interaction,
-    top_type: str,
-    limit: int = 10,
-    scope: str = "global",
-) -> discord.Embed:
-    """Строит embed для указанного топа (global/local)."""
-    if top_type not in TOP_TYPES:
-        top_type = "coins"
-    title, _ = TOP_TYPES[top_type]
-    top_emoji = get_emoji(TOP_TYPE_EMOJIS.get(top_type, "_stats"))
-    guild_id = interaction.guild_id if scope == "local" else None
-
-    rows = await get_top_players_cached(top_type, limit, guild_id)
-
-    embed = BotEmbed(
-        title=f"{top_emoji} Топ — {title}",
-        description=(
-            f"{'Локальный' if scope == 'local' else 'Глобальный'} топ-{limit} "
-            f"{'кланов' if top_type == 'clans' else 'игроков'}"
-        ),
-        color=0xf1c40f,
-    )
-
-    if not rows:
-        embed.description = "Пока нет данных."
-        return embed
-
-    user_cache: dict[int, object] = {}
-    if top_type != "clans":
-        missing = []
-        for uid, _value in rows:
-            user = bot.get_user(uid)
-            if user is not None:
-                user_cache[uid] = user
-            else:
-                missing.append(uid)
-        if missing:
-            semaphore = asyncio.Semaphore(5)
-
-            async def fetch_one(uid: int):
-                async with semaphore:
-                    try:
-                        return uid, await bot.fetch_user(uid)
-                    except (discord.NotFound, discord.HTTPException):
-                        return uid, None
-
-            fetched = await asyncio.gather(
-                *(fetch_one(uid) for uid in missing)
-            )
-            for uid, user in fetched:
-                if user is not None:
-                    user_cache[uid] = user
-
-    lines = []
-    for i, row in enumerate(rows, start=1):
-        if top_type == "clans":
-            clan_id, name, power = row
-            lines.append(f"**{i}.** 🏰 {name} — ⚔️ {power}")
-        else:
-            uid, value = row
-            user = user_cache.get(uid)
-            display = f"**{user.name}**" if user else f"`{uid}`"
-            lines.append(f"**{i}.** {display} — {value}")
-
-    # Разбиваем на поля по 10 строк, чтобы не превысить лимит 1024 символа в поле
-    chunk_size = 10
-    for i in range(0, len(lines), chunk_size):
-        chunk = lines[i:i+chunk_size]
-        start = i + 1
-        end = i + len(chunk)
-        embed.add_field(
-            name=f"Места {start}–{end}",
-            value="\n".join(chunk),
-            inline=False
-        )
-    embed = await fix_embed_emojis(embed)
-    return embed
 
 async def build_advent_embed(interaction: discord.Interaction, page: int = 0) -> discord.Embed:
     event, _current_day = get_active_advent_event()
