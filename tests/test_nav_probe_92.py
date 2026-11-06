@@ -392,6 +392,15 @@ def test_probe_all_views_and_modals():
                 for values in (
                     ["1", "ДА", "basic_gen", "👑", "999"],
                     ["0", "нет", "missing", "abc", "2"],
+                    ["-1", "", "vip", "cat", "0"],
+                    ["999999", "да", "grid_4x4", "🚀", "1"],
+                    ["1", "1", "1", "1", "1"],
+                    ["abc", "abc", "abc", "abc", "abc"],
+                    ["missing", "missing", "missing", "missing", "missing"],
+                    ["", "", "", "", ""],
+                    ["ДА", "ДА", "ДА", "ДА", "ДА"],
+                    ["cat", "cat", "cat", "cat", "cat"],
+                    ["vip", "vip", "vip", "vip", "vip"],
                 ):
                     for index, field in enumerate(fields):
                         try:

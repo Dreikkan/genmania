@@ -185,6 +185,9 @@
 - Coverage slice 76: added pagination/select pass in the UI probe, plain module
   helpers, small view branches and bank modal edge cases. Coverage reached
   **98%**.
+- Coverage slice 77: expanded modal value sets, added craft/clan/admin guards,
+  background cancellation and service error-branch tests. Coverage reached
+  **99%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
