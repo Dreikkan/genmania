@@ -168,6 +168,9 @@
   market cancel, bank repay, raids, status helpers) and final callbacks
   (social/shop, sort menus, star/PvP, content modals, bulk sell, auction,
   advent and giveaway embed). Coverage reached **88%**.
+- Coverage slice 71: added raid invite guards, clan confirmations, build-main
+  onboarding, guide split, star/craft edges, cosmetics/clan menus, exchange
+  and content selection tests. Coverage reached **89%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
