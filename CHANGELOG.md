@@ -159,6 +159,8 @@
 - Coverage slice 67: added clan flows, daily/member helpers, SafeView/AdminView,
   notifications, pets/lock/autocollector, shop and extra callback tests.
   Coverage reached **85%**.
+- Coverage slice 68: added view constructors, move/swap callbacks, admin
+  advent/give-item/profile/reset and market-order confirmation tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
