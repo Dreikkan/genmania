@@ -99,6 +99,11 @@ def test_deep_ui_batch_two():
                 craft = m.CraftConfirmView(1, "basic_gen")
                 await craft.do_craft(interaction, True)
                 assert interaction.embed is not None
+
+                interaction = FakeInteraction(1)
+                craft = m.CraftConfirmView(1, "basic_gen")
+                await craft.do_craft(interaction, False)
+                assert interaction.embed is not None
             finally:
                 m.random.random = original_random
 
@@ -127,6 +132,14 @@ def test_deep_ui_batch_two():
             await view.next_page(interaction)
             assert interaction.view is not None
 
+            for slot in range(4):
+                await db.execute(
+                    "INSERT OR REPLACE INTO inventory "
+                    "(user_id, slot, item_id, location, stars) "
+                    "VALUES (1, ?, 'basic_gen', 'storage', 0)",
+                    (slot,),
+                )
+            await db.commit()
             embed, swap_view, error = await m._build_swap_first_page(
                 "storage", 1, 1, 0, None
             )
@@ -135,6 +148,35 @@ def test_deep_ui_batch_two():
             interaction = FakeInteraction(1, ["1"])
             swap = m.SwapSecondView(1, "storage", 0, [], 0, 1)
             await swap.second_select(interaction)
+            assert interaction.embed is not None
+
+            class MainMessage:
+                async def edit(self, *args, **kwargs):
+                    return None
+
+            async with db.execute(
+                "SELECT slot, item_id, stars FROM inventory "
+                "WHERE user_id = 1 AND location = 'profile' LIMIT 1"
+            ) as c:
+                slot, item_id, stars = await c.fetchone()
+            move_profile = m.MoveView(
+                1, "profile", [], 0, 1, MainMessage()
+            )
+            interaction = FakeInteraction(1)
+            await move_profile.do_move(
+                interaction, slot, item_id, stars
+            )
+            assert interaction.embed is not None
+
+            await db.execute(
+                "INSERT INTO inventory "
+                "(user_id, slot, item_id, location, stars) "
+                "VALUES (1, 0, 'basic_gen', 'temp', 0)"
+            )
+            await db.commit()
+            move_temp = m.MoveView(1, "temp", [], 0, 1, MainMessage())
+            interaction = FakeInteraction(1)
+            await move_temp.do_move(interaction, 0, "basic_gen", 0)
             assert interaction.embed is not None
 
             interaction = FakeInteraction(1)

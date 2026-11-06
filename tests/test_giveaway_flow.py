@@ -78,6 +78,15 @@ def test_giveaway_creation_and_modal():
             ) as c:
                 assert (await c.fetchone())[0] == 1
 
+            class FailingChannel(FakeChannel):
+                async def send(self, *args, **kwargs):
+                    raise RuntimeError("send failed")
+
+            ok, _ = await m.create_giveaway(
+                1, 1, FailingChannel(), "coins", None, "100", "1", "24"
+            )
+            assert not ok
+
             original_guilds = m.global_giveaway_guilds
             original_send = m._send_global_giveaway_to_guild
 
@@ -91,6 +100,12 @@ def test_giveaway_creation_and_modal():
                     1, "coins", None, "100", "1", "24"
                 )
                 assert ok, message
+
+                m.global_giveaway_guilds = lambda: []
+                ok, _ = await m.create_global_giveaway(
+                    1, "coins", None, "100", "1", "24"
+                )
+                assert not ok
             finally:
                 m.global_giveaway_guilds = original_guilds
                 m._send_global_giveaway_to_guild = original_send

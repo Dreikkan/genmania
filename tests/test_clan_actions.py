@@ -60,7 +60,14 @@ def test_clan_actions_and_modals():
             await m.bot.init_db()
             await db.executemany(
                 "INSERT INTO players (user_id, coins) VALUES (?, ?)",
-                [(1, 1000), (2, 1000), (3, 1000), (4, 1000), (5, 1000)],
+                [
+                    (1, 1000),
+                    (2, 1000),
+                    (3, 1000),
+                    (4, 1000),
+                    (5, 1000),
+                    (6, 1000),
+                ],
             )
             await db.execute(
                 "INSERT INTO clans (id, name, leader_id, treasury, capacity) "
@@ -136,6 +143,11 @@ def test_clan_actions_and_modals():
             m.ClanBrowserView(1, [], 0, 2, None)
             quests = await m.build_clan_quests_embed(1)
             assert quests is not None
+
+            interaction = FakeInteraction(1)
+            target_view = m.ClanTargetSelectView(1, 1, "invite")
+            await target_view._invite(interaction, 6)
+            assert interaction.followup.sent
         finally:
             await db.close()
             m.bot.db = None

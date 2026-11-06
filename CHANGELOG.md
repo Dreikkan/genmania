@@ -138,6 +138,8 @@
   mailbox, quests, emoji editor and deep UI tests; coverage reached 72%.
 - Coverage slice 56: added command, health, shop, order-book, pets,
   daily, taxes and misc modal tests; coverage reached 73%.
+- Coverage slice 57: added retention, giveaway rollback, raid invite,
+  backup/reset, final admin and UI branch tests; coverage reached 75%.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.

@@ -89,6 +89,9 @@ def test_ui_batch():
             m.OrderBookSelectView(1, [], 0, 2, "market")
             m.AdminLogsView(1, 0, 2)
             m.StarEmojiPaginatedView(1, [], 0, 2)
+            m.MarketFiltersView(1, None, "change")
+            m.CollectionView(1, 0, 2)
+            m.GuideSectionView(1, "economy", 0, 0, 2)
 
             interaction = FakeInteraction(1, ["1"])
             cancel = m.AuctionCancelSelectView(1, [])
@@ -124,6 +127,16 @@ def test_ui_batch():
             shop = m.ShopBuySelectView(1, [])
             await shop.item_select(interaction)
             assert interaction.embed is not None
+
+            quests_view = m.QuestsView(1)
+            claim_btn = next(
+                item
+                for item in quests_view.children
+                if getattr(item, "label", None) == "Забрать награду"
+            )
+            interaction = FakeInteraction(1)
+            await claim_btn.callback(interaction)
+            assert interaction.embed is not None or interaction.followup.sent
         finally:
             await db.close()
             m.bot.db = None
