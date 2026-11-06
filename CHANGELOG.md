@@ -152,6 +152,8 @@
   notification, setup-hook and UI-flow tests.
 - Coverage slice 64: added admin modal validation, missing-entity and
   content/settings modal branch tests.
+- Coverage slice 65: added duel/PvP/profile/raid-invite, cosmetic, exchange,
+  bank, auction, shop, quest and craft UI branch tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
