@@ -29,6 +29,7 @@ from gen_mania.services.clan_wars import ClanWarRuntime
 from gen_mania.services.content import ContentRuntime
 from gen_mania.services.giveaways import GiveawayRuntime
 from gen_mania.services.guide import GuideRuntime
+from gen_mania.services.guild_access import GuildAccessRuntime
 from gen_mania.services.leaderboards import LeaderboardRuntime
 from gen_mania.services.market import (
     SHOP_MARKET_MIN_RATIO,
@@ -93,6 +94,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.STORAGE_UI_RUNTIME, StorageUiRuntime)
     assert isinstance(m.NOTIFICATION_RUNTIME, NotificationRuntime)
     assert isinstance(m.GUIDE_RUNTIME, GuideRuntime)
+    assert isinstance(m.GUILD_ACCESS_RUNTIME, GuildAccessRuntime)
     assert isinstance(m.MARKET_UI_RUNTIME, MarketUiRuntime)
     assert isinstance(m.CONTENT_RUNTIME, ContentRuntime)
     assert isinstance(m.PROFILE_UI_RUNTIME, ProfileUiRuntime)

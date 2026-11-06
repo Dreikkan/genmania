@@ -72,6 +72,10 @@ from gen_mania.services.giveaways import (
     make_giveaway_layer,
 )
 from gen_mania.services.guide import GuideRuntime, make_guide_layer
+from gen_mania.services.guild_access import (
+    GuildAccessRuntime,
+    make_guild_access_layer,
+)
 from gen_mania.services.leaderboards import (
     LeaderboardRuntime,
     make_leaderboard_layer,
@@ -5026,6 +5030,17 @@ def _role_has_administrator(role) -> bool:
     return bool(getattr(permissions, "administrator", False))
 
 
+GUILD_ACCESS_RUNTIME = GuildAccessRuntime()
+GUILD_ACCESS_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    settings_getter=lambda: get_settings,
+    role_admin_predicate=_role_has_administrator,
+    logger=log,
+)
+sync_guild_access = make_guild_access_layer(GUILD_ACCESS_RUNTIME)
+
+
 async def resolve_guild_member(guild, user):
     """Достаёт Member даже при пустом кэше участников.
 
@@ -5098,133 +5113,6 @@ async def read_member_access(guild, user) -> dict:
         ],
         "admin_role_ids": admin_role_ids,
     }
-
-
-async def sync_guild_access(guild, reason: str = "join") -> dict | None:
-    """Считывает владельца, роли и права бота при заходе на сервер."""
-    guild_id = getattr(guild, "id", None)
-    if guild_id is None:
-        return None
-    try:
-        async with db_transaction():
-            await bot.db.execute(
-                "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)",
-                (guild_id,),
-            )
-    except Exception:
-        log.exception("GUILD_ACCESS: не удалось создать настройки %s", guild_id)
-    _settings_cache.pop(guild_id, None)
-    try:
-        settings = await get_settings(guild_id)
-    except Exception:
-        settings = {}
-
-    owner_id = getattr(guild, "owner_id", None)
-    owner = getattr(guild, "owner", None)
-    if owner is None and owner_id is not None:
-        fetch_member = getattr(guild, "fetch_member", None)
-        if fetch_member is not None:
-            try:
-                owner = await fetch_member(owner_id)
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-                AttributeError,
-                TypeError,
-            ):
-                owner = None
-    owner_name = (
-        getattr(owner, "display_name", None)
-        or getattr(owner, "name", None)
-        or ""
-    )
-
-    roles = list(getattr(guild, "roles", ()) or ())
-    roles_data = [
-        {
-            "id": getattr(role, "id", None),
-            "name": str(getattr(role, "name", "")),
-            "position": int(getattr(role, "position", 0) or 0),
-            "administrator": _role_has_administrator(role),
-            "permissions": int(
-                getattr(getattr(role, "permissions", None), "value", 0) or 0
-            ),
-        }
-        for role in roles
-    ]
-    admin_role_ids = [
-        item["id"]
-        for item in roles_data
-        if item["administrator"] and item["id"] is not None
-    ]
-    admin_role_id = settings.get("admin_role_id")
-    admin_role_name = next(
-        (
-            item["name"]
-            for item in roles_data
-            if item["id"] == admin_role_id
-        ),
-        None,
-    )
-    bot_member = getattr(guild, "me", None)
-    bot_permissions = int(
-        getattr(getattr(bot_member, "guild_permissions", None), "value", 0) or 0
-    )
-    member_count = int(getattr(guild, "member_count", 0) or 0)
-
-    try:
-        async with db_transaction():
-            await bot.db.execute("""
-                INSERT INTO guild_access
-                    (guild_id, owner_id, owner_name, admin_role_id,
-                     admin_role_name, admin_role_ids, roles_json,
-                     member_count, bot_permissions, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    owner_id = excluded.owner_id,
-                    owner_name = excluded.owner_name,
-                    admin_role_id = excluded.admin_role_id,
-                    admin_role_name = excluded.admin_role_name,
-                    admin_role_ids = excluded.admin_role_ids,
-                    roles_json = excluded.roles_json,
-                    member_count = excluded.member_count,
-                    bot_permissions = excluded.bot_permissions,
-                    updated_at = CURRENT_TIMESTAMP
-            """, (
-                guild_id,
-                owner_id,
-                owner_name,
-                admin_role_id,
-                admin_role_name,
-                json.dumps(admin_role_ids),
-                json.dumps(roles_data, ensure_ascii=False),
-                member_count,
-                bot_permissions,
-            ))
-    except Exception:
-        log.exception("GUILD_ACCESS: не удалось сохранить снимок %s", guild_id)
-
-    snapshot = {
-        "guild_id": guild_id,
-        "owner_id": owner_id,
-        "owner_name": owner_name,
-        "admin_role_id": admin_role_id,
-        "admin_role_name": admin_role_name,
-        "admin_role_ids": admin_role_ids,
-        "role_count": len(roles_data),
-        "member_count": member_count,
-        "bot_permissions": bot_permissions,
-    }
-    log.info(
-        "GUILD_ACCESS: guild=%s owner=%s admin_roles=%s roles=%s reason=%s",
-        guild_id,
-        owner_id,
-        admin_role_ids,
-        len(roles_data),
-        reason,
-    )
-    return snapshot
 
 
 async def sync_all_guild_access():
