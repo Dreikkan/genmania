@@ -26,12 +26,19 @@ class RaidCombatRuntime:
         self._achievements_getter: Callable[[], Callable] = lambda: None
         self._season_xp_getter: Callable[[], Callable] = lambda: None
         self._season_xp_amount_getter: Callable[[], Callable] = lambda: None
+        self._party_getter: Callable[[], Callable] = lambda: None
+        self._party_member_ids_getter: Callable[[], Callable] = lambda: None
+        self._raid_cooldown_getter: Callable[[], Callable] = lambda: None
+        self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_getter: Callable[[], Callable] = lambda: None
         self.group_synergy = 0.10
         self.min_target_power_ratio = 0.25
         self.target_shield_hours = 6
         self.daily_loss_cap = 0.25
         self.loot_rate = 0.08
         self.cooldown_seconds = 3600
+        self.party_max_members = 3
+        self.party_ttl_minutes = 30
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -52,12 +59,19 @@ class RaidCombatRuntime:
         achievements_getter: Callable[[], Callable],
         season_xp_getter: Callable[[], Callable],
         season_xp_amount_getter: Callable[[], Callable],
+        party_getter: Callable[[], Callable],
+        party_member_ids_getter: Callable[[], Callable],
+        raid_cooldown_getter: Callable[[], Callable],
+        embed_factory: Callable[..., Any],
+        emoji_getter: Callable[[], Callable],
         group_synergy: float,
         min_target_power_ratio: float,
         target_shield_hours: int,
         daily_loss_cap: float,
         loot_rate: float,
         cooldown_seconds: int,
+        party_max_members: int,
+        party_ttl_minutes: int,
         logger: logging.Logger,
     ) -> None:
         self._db_getter = db_getter
@@ -75,12 +89,19 @@ class RaidCombatRuntime:
         self._achievements_getter = achievements_getter
         self._season_xp_getter = season_xp_getter
         self._season_xp_amount_getter = season_xp_amount_getter
+        self._party_getter = party_getter
+        self._party_member_ids_getter = party_member_ids_getter
+        self._raid_cooldown_getter = raid_cooldown_getter
+        self._embed_factory = embed_factory
+        self._emoji_getter = emoji_getter
         self.group_synergy = group_synergy
         self.min_target_power_ratio = min_target_power_ratio
         self.target_shield_hours = target_shield_hours
         self.daily_loss_cap = daily_loss_cap
         self.loot_rate = loot_rate
         self.cooldown_seconds = cooldown_seconds
+        self.party_max_members = party_max_members
+        self.party_ttl_minutes = party_ttl_minutes
         self.logger = logger
 
     @property
@@ -131,6 +152,21 @@ class RaidCombatRuntime:
 
     def season_xp_amount(self, action: str):
         return self._season_xp_amount_getter()(action)
+
+    async def get_party_by_id(self, party_id: int):
+        return await self._party_getter()(party_id)
+
+    def party_member_ids(self, party):
+        return self._party_member_ids_getter()(party)
+
+    async def get_raid_cooldown_seconds(self, user_id: int):
+        return await self._raid_cooldown_getter()(user_id)
+
+    def embed(self, **kwargs):
+        return self._embed_factory(**kwargs)
+
+    def emoji(self, key: str):
+        return self._emoji_getter()(key)
 
 
 def make_raid_combat_layer(runtime: RaidCombatRuntime):
@@ -452,4 +488,93 @@ def make_raid_combat_layer(runtime: RaidCombatRuntime):
                     "Не удалось обновить прогресс рейда для %s", uid
                 )
 
-    return perform_raid, finalize_raid
+    async def build_raid_party_embed(party_id: int, viewer_id: int):
+        party = await runtime.get_party_by_id(party_id)
+        if not party:
+            return None
+
+        members = runtime.party_member_ids(party)
+        powers = {}
+        for uid in members:
+            powers[uid] = await runtime.get_combat_power(uid)
+
+        lines = []
+        for uid in members:
+            crown = "👑 " if uid == party[1] else ""
+            cooldown = await runtime.get_raid_cooldown_seconds(uid)
+            status = (
+                f"⏳ ~{max(1, cooldown // 60 + 1)} мин."
+                if cooldown
+                else "✅ готов"
+            )
+            lines.append(
+                f"{crown}<@{uid}> — {powers[uid]} мощи · {status}"
+            )
+
+        total_power = sum(powers.values())
+        if len(members) > 1:
+            total_power = int(
+                total_power
+                * (
+                    1
+                    + runtime.group_synergy * (len(members) - 1)
+                )
+            )
+
+        async with runtime.db.execute(
+            "SELECT COUNT(*) FROM raid_party_invites "
+            "WHERE party_id = ?",
+            (party_id,),
+        ) as c:
+            pending_invites = (await c.fetchone())[0] or 0
+
+        is_leader = party[1] == viewer_id
+        embed = runtime.embed(
+            title=f"{runtime.emoji('_coop')} Отряд",
+            description=(
+                "Ты лидер отряда. Приглашай игроков и начинай рейд."
+                if is_leader
+                else "Ты участник отряда. Лидер приглашает "
+                "игроков и начинает рейд."
+            ),
+            color=0xE74C3C,
+        )
+        embed.add_field(
+            name="Состав", value="\n".join(lines), inline=False
+        )
+
+        power_text = f"**{total_power}**"
+        if len(members) > 1:
+            synergy = int(
+                round(
+                    runtime.group_synergy
+                    * 100
+                    * (len(members) - 1)
+                )
+            )
+            power_text += f"\nСинергия: +{synergy}%"
+        embed.add_field(
+            name="Мощь отряда", value=power_text, inline=False
+        )
+        embed.add_field(
+            name="Свободные места",
+            value=(
+                f"{runtime.party_max_members - len(members)} "
+                f"из {runtime.party_max_members}"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Приглашения",
+            value=str(pending_invites),
+            inline=True,
+        )
+        embed.set_footer(
+            text=(
+                f"Отряд распадается после "
+                f"{runtime.party_ttl_minutes} минут бездействия."
+            )
+        )
+        return embed
+
+    return perform_raid, finalize_raid, build_raid_party_embed
