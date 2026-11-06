@@ -132,6 +132,8 @@
   embed and economy-modal tests; coverage reached 65%.
 - Coverage slice 53: added admin, clan, deep-UI, auction/bank/war,
   giveaway and empty-state tests; coverage reached 70%.
+- Coverage slice 54: added remaining admin action modals and clan
+  confirmation tests; coverage reached 71%.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
