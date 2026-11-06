@@ -39,6 +39,7 @@ from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
 )
+from gen_mania.repositories.audit import AuditRuntime, make_audit_layer
 from gen_mania.repositories.clans import ClanRuntime, make_clan_layer
 from gen_mania.repositories.inventory import (
     InventoryRuntime,
@@ -4528,6 +4529,17 @@ ADMIN_UI_RUNTIME.configure(
     build_admin_market_embed,
 ) = make_admin_ui_layer(ADMIN_UI_RUNTIME)
 
+AUDIT_RUNTIME = AuditRuntime()
+AUDIT_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    commit_getter=lambda: commit_if_needed,
+    guild_context_getter=lambda: _CURRENT_GUILD_ID.get(),
+    logger=log,
+)
+log_admin_action, get_admin_logs_page = make_audit_layer(
+    AUDIT_RUNTIME
+)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -5845,26 +5857,6 @@ async def get_menu_welcome_notification(user_id: int, guild_id: int = None) -> s
         f"*(Доход уже добавлен в кошелёк, он отображён в меню ниже).*"
     )
 
-
-async def log_admin_action(
-    admin_id: int,
-    target_id: int,
-    action: str,
-    details: str = "",
-    guild_id: int | None = None,
-):
-    if guild_id is None:
-        guild_id = _CURRENT_GUILD_ID.get()
-    await bot.db.execute(
-        "INSERT INTO admin_log (admin_id, target_id, guild_id, action, details) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (admin_id, target_id, guild_id, action, details),
-    )
-    await commit_if_needed()
-
-# ============================================================
-#  📦 КОНТЕНТ-РЕДАКТОР: ВАЛИДАЦИЯ И РЕВИЗИИ
-# ============================================================
 
 async def deny_content_edit(interaction: discord.Interaction) -> bool:
     """True, если правку контента нужно отклонить."""
@@ -24113,26 +24105,9 @@ class AdminTakeView(AdminView):
 
 async def open_admin_logs(interaction: discord.Interaction, author_id: int, page: int = 0):
     guild_id = interaction.guild_id
-    where = ""
-    params: list = []
-    if guild_id:
-        where = "WHERE guild_id = ? OR guild_id IS NULL"
-        params.append(guild_id)
-
-    async with bot.db.execute(
-        f"SELECT COUNT(*) FROM admin_log {where}", params
-    ) as c:
-        total = (await c.fetchone())[0]
-
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-
-    async with bot.db.execute(
-        f"SELECT admin_id, target_id, action, details, timestamp, guild_id "
-        f"FROM admin_log {where} ORDER BY id DESC LIMIT ? OFFSET ?",
-        (*params, PAGE_SIZE, page * PAGE_SIZE),
-    ) as c:
-        rows = await c.fetchall()
+    rows, total, page, total_pages = await get_admin_logs_page(
+        guild_id, page, PAGE_SIZE
+    )
 
     embed = BotEmbed(
         title="📜 Логи администрации",

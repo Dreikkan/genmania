@@ -10,6 +10,7 @@ from gen_mania.config import (
 )
 from gen_mania.db.transaction import TransactionRuntime
 from gen_mania.metrics import METRICS, MetricsRegistry
+from gen_mania.repositories.audit import AuditRuntime
 from gen_mania.repositories.clans import ClanRuntime
 from gen_mania.repositories.inventory import InventoryRuntime
 from gen_mania.repositories.market import MarketRuntime
@@ -93,6 +94,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.UPGRADES_UI_RUNTIME, UpgradesUiRuntime)
     assert isinstance(m.ANALYTICS_UI_RUNTIME, AnalyticsUiRuntime)
     assert isinstance(m.ADMIN_UI_RUNTIME, AdminUiRuntime)
+    assert isinstance(m.AUDIT_RUNTIME, AuditRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
