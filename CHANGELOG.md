@@ -154,6 +154,8 @@
   content/settings modal branch tests.
 - Coverage slice 65: added duel/PvP/profile/raid-invite, cosmetic, exchange,
   bank, auction, shop, quest and craft UI branch tests.
+- Coverage slice 66: added background task wrappers, giveaway helpers,
+  clan/admin open helpers and status-role removal tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
