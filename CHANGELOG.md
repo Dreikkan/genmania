@@ -72,6 +72,8 @@
   (pet feeding, bonuses and autocollector).
 - Refactor slice 23: extracted `gen_mania.services.statuses`
   (purchase, bonus recalculation and expiry).
+- Refactor slice 24: extracted `gen_mania.services.clan_applications`
+  (submission, review and membership acceptance).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
