@@ -114,6 +114,8 @@
   `gen_mania.services.prestige`.
 - Refactor slice 44: moved the clan-war embed into
   `gen_mania.services.clan_wars`.
+- Refactor slice 45: moved guild-access snapshot synchronization into
+  `gen_mania.services.guild_access`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
