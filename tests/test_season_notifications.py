@@ -91,3 +91,45 @@ def test_notification_center_events():
             m.bot.db = None
 
     asyncio.run(run())
+
+
+def test_notification_center_orders_auctions_autocollector():
+    async def run():
+        db = await _init()
+        try:
+            now = datetime.datetime.now()
+            await db.execute(
+                "INSERT INTO players (user_id, last_daily) VALUES (1, ?)",
+                (now.isoformat(),),
+            )
+            await db.commit()
+
+            quiet = await m.build_notification_center_embed(1)
+            assert "спокойно" in quiet.description
+
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(user_id, side, item_id, price, quantity, status, expires_at) "
+                "VALUES (1, 'sell', 'basic_gen', 10, 1, 'active', ?)",
+                ((now + datetime.timedelta(hours=1)).isoformat(),),
+            )
+            await db.execute(
+                "INSERT INTO auctions (seller_id, item_id, start_price, "
+                "end_time, status) VALUES (1, 'basic_gen', 10, ?, 'active')",
+                ((now + datetime.timedelta(hours=2)).isoformat(),),
+            )
+            await db.execute(
+                "INSERT INTO autocollectors (user_id, level, last_auto) "
+                "VALUES (1, 1, NULL)"
+            )
+            await db.commit()
+
+            embed = await m.build_notification_center_embed(1)
+            assert "Ордера биржи" in embed.description
+            assert "Аукцион" in embed.description
+            assert "Автосборщик" in embed.description
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())

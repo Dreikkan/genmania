@@ -4363,8 +4363,16 @@ NOTIFICATION_RUNTIME.configure(
     transaction_getter=lambda: db_transaction,
     commit_getter=lambda: commit_if_needed,
     bot_getter=lambda: bot,
+    parse_db_time_getter=lambda: _parse_db_time,
+    price_formatter=lambda value: format_price(value),
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    now_getter=lambda: datetime.datetime.now(),
     notification_types=NOTIFICATION_TYPES,
     cooldown_hours=NOTIFICATION_COOLDOWN_HOURS,
+    pet_max_level=PET_MAX_LEVEL,
+    pet_feed_cooldown_hours=PET_FEED_COOLDOWN_HOURS,
+    autocollect_levels=AUTOCOLLECT_LEVELS,
     logger=log,
 )
 (
@@ -4373,6 +4381,7 @@ NOTIFICATION_RUNTIME.configure(
     can_send_notification,
     mark_notification_sent,
     send_dm_notification,
+    build_notification_center_embed,
 ) = make_notification_layer(NOTIFICATION_RUNTIME)
 
 CONTENT_RUNTIME = ContentRuntime()
@@ -6916,98 +6925,6 @@ async def build_guide_section_page(
     if total_pages > 1:
         embed.set_footer(text=f"Страница {page + 1}/{total_pages}")
     return await fix_embed_emojis(embed), total_pages
-
-
-async def build_notification_center_embed(user_id: int) -> discord.Embed:
-    now = datetime.datetime.now()
-    lines: list[str] = []
-
-    async with bot.db.execute(
-        "SELECT last_daily FROM players WHERE user_id = ?", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    last_daily = _parse_db_time(row[0]) if row else None
-    if not last_daily or last_daily.date() != now.date():
-        lines.append("🎁 **Дейли доступен** — забери награду в главном меню.")
-
-    async with bot.db.execute(
-        "SELECT up.level, up.last_fed FROM user_pets_v2 up "
-        "JOIN players p ON p.active_pet = up.pet_id WHERE p.user_id = ?",
-        (user_id,),
-    ) as c:
-        pet = await c.fetchone()
-    if pet:
-        level, last_fed = pet
-        fed = _parse_db_time(last_fed)
-        if level < PET_MAX_LEVEL and (
-            not fed
-            or (now - fed).total_seconds() >= PET_FEED_COOLDOWN_HOURS * 3600
-        ):
-            lines.append("🐾 **Питомец голоден** — покорми в «Питомцах».")
-
-    async with bot.db.execute(
-        "SELECT amount, due_time FROM bank_loans WHERE user_id = ? "
-        "AND COALESCE(status, 'active') = 'active'",
-        (user_id,),
-    ) as c:
-        loan = await c.fetchone()
-    if loan:
-        amount, due_time = loan
-        due = _parse_db_time(due_time)
-        if due:
-            left = (due - now).total_seconds()
-            if left <= 0:
-                lines.append("🏦 **Кредит просрочен** — залог может быть потерян.")
-            elif left <= 24 * 3600:
-                lines.append(
-                    f"🏦 **Кредит** {format_price(amount)} — "
-                    f"осталось {max(1, int(left // 3600))} ч."
-                )
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM market_orders WHERE user_id = ? "
-        "AND status = 'active' AND expires_at <= ?",
-        (user_id, (now + datetime.timedelta(hours=2)).isoformat()),
-    ) as c:
-        expiring_orders = (await c.fetchone())[0] or 0
-    if expiring_orders:
-        lines.append(
-            f"📋 **Ордера биржи**: {expiring_orders} истекают в ближайшие 2 ч."
-        )
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM auctions WHERE status = 'active' "
-        "AND (seller_id = ? OR current_bidder = ?) AND end_time <= ?",
-        (user_id, user_id, (now + datetime.timedelta(hours=6)).isoformat()),
-    ) as c:
-        ending_auctions = (await c.fetchone())[0] or 0
-    if ending_auctions:
-        lines.append(
-            f"🏛️ **Аукцион**: {ending_auctions} лотов заканчиваются в ближайшие 6 ч."
-        )
-
-    async with bot.db.execute(
-        "SELECT level, last_auto FROM autocollectors WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        autoc = await c.fetchone()
-    if autoc:
-        level, last_auto = autoc
-        interval = AUTOCOLLECT_LEVELS.get(level, (0, 4))[1]
-        last = _parse_db_time(last_auto)
-        if not last or (now - last).total_seconds() >= interval * 3600:
-            lines.append("🤖 **Автосборщик готов** — доход можно забрать.")
-
-    embed = BotEmbed(
-        title="🔔 Центр уведомлений",
-        description="Актуальные события твоей энергостанции.",
-        color=0x3498db,
-    )
-    if lines:
-        embed.description = "\n\n".join(lines)
-    else:
-        embed.description = "✅ Всё спокойно: срочных событий нет."
-    return await fix_embed_emojis(embed)
 
 
 async def build_guide_section_embed(key: str) -> discord.Embed:
