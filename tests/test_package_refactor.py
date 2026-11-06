@@ -30,6 +30,7 @@ from gen_mania.services.market import (
     market_price_bounds,
 )
 from gen_mania.services.market_orders import MarketOrderRuntime
+from gen_mania.services.notifications import NotificationRuntime
 from gen_mania.services.pets import PetRuntime
 from gen_mania.services.prestige import PrestigeRuntime
 from gen_mania.services.progress import ProgressRuntime
@@ -79,6 +80,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.SEASON_RUNTIME, SeasonRuntime)
     assert isinstance(m.PET_RUNTIME, PetRuntime)
     assert isinstance(m.STATUS_RUNTIME, StatusRuntime)
+    assert isinstance(m.NOTIFICATION_RUNTIME, NotificationRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)

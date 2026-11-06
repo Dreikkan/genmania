@@ -74,6 +74,8 @@
   (purchase, bonus recalculation and expiry).
 - Refactor slice 24: extracted `gen_mania.services.clan_applications`
   (submission, review and membership acceptance).
+- Refactor slice 25: extracted `gen_mania.services.notifications`
+  (preferences, cooldowns and DM fallback).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

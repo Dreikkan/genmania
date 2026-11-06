@@ -72,6 +72,10 @@ from gen_mania.services.market_orders import (
     MarketOrderRuntime,
     make_market_order_layer,
 )
+from gen_mania.services.notifications import (
+    NotificationRuntime,
+    make_notification_layer,
+)
 from gen_mania.services.market import (
     MARKET_MAX_RATIO,  # noqa: F401 - re-export
     MARKET_MIN_RATIO,  # noqa: F401 - re-export
@@ -4326,6 +4330,24 @@ STATUS_RUNTIME.configure(
     expire_statuses,
 ) = make_status_layer(STATUS_RUNTIME)
 
+NOTIFICATION_RUNTIME = NotificationRuntime()
+NOTIFICATION_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    commit_getter=lambda: commit_if_needed,
+    bot_getter=lambda: bot,
+    notification_types=NOTIFICATION_TYPES,
+    cooldown_hours=NOTIFICATION_COOLDOWN_HOURS,
+    logger=log,
+)
+(
+    get_notifications,
+    set_notification,
+    can_send_notification,
+    mark_notification_sent,
+    send_dm_notification,
+) = make_notification_layer(NOTIFICATION_RUNTIME)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6292,18 +6314,6 @@ async def get_unlocked_titles(user_id: int) -> set:
 
     return unlocked
 
-async def get_notifications(user_id: int) -> dict:
-    """Возвращает {notif_type: (enabled, last_sent)} для всех типов. Если записи нет — enabled=True по умолчанию."""
-    async with bot.db.execute(
-        "SELECT notif_type, enabled, last_sent FROM user_notifications WHERE user_id = ?", (user_id,)
-    ) as c:
-        rows = await c.fetchall()
-
-    result = {t: (1, None) for t in NOTIFICATION_TYPES}  # по умолчанию включено
-    for ntype, enabled, last_sent in rows:
-        result[ntype] = (enabled, last_sent)
-    return result
-
 async def get_advent_state(user_id: int) -> tuple:
     """Возвращает (last_opened_day, last_opened_date, event_key)."""
     async with bot.db.execute(
@@ -6828,91 +6838,6 @@ async def build_analytics_embed(interaction: discord.Interaction) -> discord.Emb
     )
     embed = await fix_embed_emojis(embed)
     return embed
-
-
-async def set_notification(user_id: int, notif_type: str, enabled: bool):
-    """Включает/выключает уведомление. Создаёт запись, если её нет."""
-    if notif_type not in NOTIFICATION_TYPES:
-        return
-    await bot.db.execute("""
-        INSERT INTO user_notifications (user_id, notif_type, enabled)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id, notif_type) DO UPDATE SET enabled = ?
-    """, (user_id, notif_type, int(enabled), int(enabled)))
-    await commit_if_needed()
-
-
-async def can_send_notification(user_id: int, notif_type: str) -> bool:
-    """Проверяет, включено ли уведомление и прошёл ли кулдаун."""
-    async with bot.db.execute(
-        "SELECT enabled, last_sent FROM user_notifications WHERE user_id = ? AND notif_type = ?",
-        (user_id, notif_type)
-    ) as c:
-        row = await c.fetchone()
-
-    if not row:
-        return True  # по умолчанию включено, ещё не слали
-
-    enabled, last_sent = row
-    if not enabled:
-        return False
-
-    if last_sent:
-        last = datetime.datetime.fromisoformat(last_sent)
-        cooldown = NOTIFICATION_COOLDOWN_HOURS.get(notif_type, 24)
-        if (datetime.datetime.now() - last).total_seconds() < cooldown * 3600:
-            return False
-    return True
-
-
-async def mark_notification_sent(user_id: int, notif_type: str):
-    """Отмечает, что уведомление отправлено (обновляет last_sent)."""
-    now_iso = datetime.datetime.now().isoformat()
-    async with db_transaction():
-        await bot.db.execute("""
-            INSERT INTO user_notifications (user_id, notif_type, enabled, last_sent)
-            VALUES (?, ?, 1, ?)
-            ON CONFLICT(user_id, notif_type) DO UPDATE SET last_sent = ?
-        """, (user_id, notif_type, now_iso, now_iso))
-
-
-async def send_dm_notification(user_id: int, notif_type: str, text: str, embed: discord.Embed = None) -> bool:
-    """Пытается отправить ЛС. Возвращает True при успехе, False при Forbidden/NotFound."""
-    try:
-        user = bot.get_user(user_id)
-        if user is None:
-            user = await bot.fetch_user(user_id)
-        if user is None:
-            return False
-
-        if embed:
-            await user.send(embed=embed)
-        else:
-            await user.send(text)
-        await mark_notification_sent(user_id, notif_type)
-        await asyncio.sleep(0.25)  # мягкий throttle, чтобы не ловить rate limit
-        return True
-    except discord.Forbidden:
-        # ЛС закрыты — сохраняем для эфемерной выдачи через /уведомления.
-        # Одна запись на тип, чтобы повторные циклы не плодили дубли.
-        title = NOTIFICATION_TYPES.get(notif_type, (notif_type, ""))[0]
-        body = text or (embed.description if embed else "")
-        async with db_transaction():
-            await bot.db.execute(
-                "DELETE FROM notification_fallback "
-                "WHERE user_id = ? AND notif_type = ?",
-                (user_id, notif_type),
-            )
-            await bot.db.execute(
-                "INSERT INTO notification_fallback "
-                "(user_id, notif_type, title, body) VALUES (?, ?, ?, ?)",
-                (user_id, notif_type, title, body[:1000]),
-            )
-        return False
-    except discord.NotFound:
-        return False
-    except discord.HTTPException:
-        return False
 
 
 async def delete_message_later(message, delay: int):
