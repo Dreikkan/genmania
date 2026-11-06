@@ -108,6 +108,8 @@
   `gen_mania.services.leaderboards`.
 - Refactor slice 41: moved the season overview embed into
   `gen_mania.services.seasons`.
+- Refactor slice 42: moved bank and bank-history embeds into
+  `gen_mania.services.bank`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
