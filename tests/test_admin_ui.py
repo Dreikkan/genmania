@@ -47,6 +47,16 @@ async def run_checks(db):
         embed = await m.build_admin_market_embed()
         assert "Управление биржей" in embed.title
 
+        season_embed = m.build_admin_season_embed(False)
+        assert "отключён" in season_embed.description
+
+        card = await m.build_admin_player_card(user_id)
+        assert "Карточка игрока" in card.title
+        assert any(field.name == "Баланс" for field in card.fields)
+
+        missing = await m.build_admin_player_card(999)
+        assert "не найден" in missing.title
+
         # При выключенном баттлпасе XP не начисляется.
         gained = await m.add_season_xp(user_id, 100, guild_id)
         assert gained == 0, gained

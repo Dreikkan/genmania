@@ -54,6 +54,7 @@ from gen_mania.repositories.settings import (
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
+from gen_mania.services.admin_ui import AdminUiRuntime, make_admin_ui_layer
 from gen_mania.services.analytics_ui import (
     AnalyticsUiRuntime,
     make_analytics_ui_layer,
@@ -4511,6 +4512,21 @@ ANALYTICS_UI_RUNTIME.configure(
 build_analytics_embed = make_analytics_ui_layer(
     ANALYTICS_UI_RUNTIME
 )
+
+ADMIN_UI_RUNTIME = AdminUiRuntime()
+ADMIN_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    price_formatter=lambda value: format_price(value),
+    start_grid=START_GRID,
+    logger=log,
+)
+(
+    build_admin_player_card,
+    build_admin_season_embed,
+    build_admin_market_embed,
+) = make_admin_ui_layer(ADMIN_UI_RUNTIME)
 
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
@@ -22042,89 +22058,6 @@ class AdminPanelView(AdminView):
         await interaction.edit_original_response(embed=embed, view=AdminPanelPage2(self.author_id))
 
 
-async def build_admin_player_card(user_id: int) -> discord.Embed:
-    async with bot.db.execute(
-        "SELECT coins, gems, prestige_points, title, grid_size, "
-        "lifetime_production, last_collected, last_tax_time "
-        "FROM players WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return BotEmbed(
-            title="❌ Игрок не найден",
-            description=f"В базе нет профиля <@{user_id}>.",
-            color=0xe74c3c,
-        )
-
-    coins, gems, points, title, grid, lifetime, last_col, last_tax = row
-    embed = BotEmbed(
-        title=f"👤 Карточка игрока — {title or 'Новичок'}",
-        description=f"<@{user_id}> · `{user_id}`",
-        color=0x3498db,
-    )
-    embed.add_field(
-        name="Баланс",
-        value=f"🪙 {format_price(coins or 0)} | 💎 {format_price(gems or 0)}",
-        inline=False,
-    )
-    embed.add_field(
-        name="Прогресс",
-        value=(
-            f"Престиж: **{points or 0}** · Сетка: **{grid or START_GRID}**\n"
-            f"Всего произведено: **{format_price(lifetime or 0)}**"
-        ),
-        inline=False,
-    )
-
-    async with bot.db.execute(
-        "SELECT c.name, cm.role FROM clan_members cm "
-        "JOIN clans c ON c.id = cm.clan_id WHERE cm.user_id = ?",
-        (user_id,),
-    ) as c:
-        clan_row = await c.fetchone()
-    embed.add_field(
-        name="Клан",
-        value=(
-            f"**{clan_row[0]}** ({clan_row[1]})"
-            if clan_row
-            else "не состоит в клане"
-        ),
-        inline=True,
-    )
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM market_orders WHERE user_id = ? AND status = 'active'",
-        (user_id,),
-    ) as c:
-        orders = (await c.fetchone())[0] or 0
-    async with bot.db.execute(
-        "SELECT amount, end_time FROM bank_deposits WHERE user_id = ?", (user_id,)
-    ) as c:
-        deposit = await c.fetchone()
-    async with bot.db.execute(
-        "SELECT amount, due_time FROM bank_loans WHERE user_id = ? "
-        "AND COALESCE(status, 'active') = 'active'",
-        (user_id,),
-    ) as c:
-        loan = await c.fetchone()
-    embed.add_field(
-        name="Обязательства",
-        value=(
-            f"Ордера: **{orders}**\n"
-            f"Вклад: {'**' + format_price(deposit[0]) + '**' if deposit else 'нет'}\n"
-            f"Кредит: {'**' + format_price(loan[0]) + '**' if loan else 'нет'}"
-        ),
-        inline=True,
-    )
-    embed.add_field(
-        name="Активность",
-        value=f"Сбор: `{str(last_col)[:16]}`\nНалог: `{str(last_tax)[:16]}`",
-        inline=False,
-    )
-    return embed
-
-
 class AdminPlayerSelectView(AdminView):
     home_row = 2
 
@@ -22463,21 +22396,6 @@ class AdminMiscView(AdminView):
         await interaction.edit_original_response(embed=embed, view=AdminPanelPage2(self.author_id))
 
 
-def build_admin_season_embed(enabled: bool) -> discord.Embed:
-    status = "включён" if enabled else "отключён"
-    color = 0x2ecc71 if enabled else 0xe74c3c
-    embed = BotEmbed(
-        title=f"{get_emoji('_advent')} Управление баттлпассом",
-        description=(
-            f"Статус: **{status}**\n\n"
-            "Отключение скрывает сезонный экран и блокирует начисление XP "
-            "за действия в этом сервере. Прогресс игроков сохраняется."
-        ),
-        color=color,
-    )
-    return embed
-
-
 class AdminSeasonView(AdminView):
     def __init__(self, author_id: int, enabled: bool, timeout: int = 300):
         super().__init__(timeout=timeout)
@@ -22636,31 +22554,6 @@ class AdminSeasonXpModal(discord.ui.Modal, title="Выдать сезонный 
         await interaction.followup.send(
             f"✅ <@{uid}> получил **{amount}** сезонного XP.", ephemeral=True
         )
-
-
-async def build_admin_market_embed() -> discord.Embed:
-    async with bot.db.execute(
-        "SELECT status, COUNT(*) FROM market_orders GROUP BY status"
-    ) as c:
-        status_rows = await c.fetchall()
-    counts = {status: count for status, count in status_rows}
-    async with bot.db.execute(
-        "SELECT side, COUNT(*) FROM market_orders WHERE status = 'active' GROUP BY side"
-    ) as c:
-        side_rows = await c.fetchall()
-    sides = {side: count for side, count in side_rows}
-    embed = BotEmbed(
-        title=f"{get_emoji('_market')} Управление биржей",
-        description=(
-            f"Активных ордеров: **{counts.get('active', 0)}**\n"
-            f"На покупку: **{sides.get('buy', 0)}** · "
-            f"На продажу: **{sides.get('sell', 0)}**\n"
-            f"Истёкших: **{counts.get('expired', 0)}** · "
-            f"Отменённых: **{counts.get('cancelled', 0)}**"
-        ),
-        color=0x9b59b6,
-    )
-    return embed
 
 
 class AdminMarketView(AdminView):
