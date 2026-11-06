@@ -130,6 +130,8 @@
   `gen_mania.services.notifications` and covered it with tests.
 - Coverage slice 52: added background-task, navigation, screen,
   embed and economy-modal tests; coverage reached 65%.
+- Coverage slice 53: added admin, clan, deep-UI, auction/bank/war,
+  giveaway and empty-state tests; coverage reached 70%.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
