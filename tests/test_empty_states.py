@@ -63,6 +63,20 @@ def test_empty_storage_cta():
     asyncio.run(run())
 
 
+def test_empty_temp_storage_cta():
+    async def run():
+        db = await _init()
+        try:
+            embed = await m.build_temp_storage_embed(FakeInteraction(1))
+            assert "Временное хранилище пусто" in embed.description
+            assert f"0/{m.TEMP_STORAGE_SIZE}" in embed.description
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_shop_shows_balance_and_page_total():
     async def run():
         db = await _init()

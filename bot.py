@@ -122,6 +122,10 @@ from gen_mania.services.upgrades_ui import (
     make_upgrades_ui_layer,
 )
 from gen_mania.services.statuses import StatusRuntime, make_status_layer
+from gen_mania.services.storage_ui import (
+    StorageUiRuntime,
+    make_storage_ui_layer,
+)
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 from gen_mania.services.top_exclusion import (
     TopExclusionRuntime,
@@ -4385,6 +4389,27 @@ STATUS_RUNTIME.configure(
     expire_statuses,
 ) = make_status_layer(STATUS_RUNTIME)
 
+STORAGE_UI_RUNTIME = StorageUiRuntime()
+STORAGE_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
+    settings_getter=lambda: get_settings,
+    storage_size_getter=lambda: get_storage_size,
+    star_emoji_getter=lambda: get_star_emoji,
+    filter_rows=filter_storage_rows,
+    sell_price=calculate_sell_price,
+    storage_filters=STORAGE_FILTERS,
+    sell_allowed_rarities=SELL_ALLOWED_RARITIES,
+    temp_storage_size=TEMP_STORAGE_SIZE,
+    logger=log,
+)
+(
+    build_storage_embed,
+    build_temp_storage_embed,
+) = make_storage_ui_layer(STORAGE_UI_RUNTIME)
+
 NOTIFICATION_RUNTIME = NotificationRuntime()
 NOTIFICATION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6593,126 +6618,6 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
         cache.add(user_id)
     embed = await fix_embed_emojis(embed)
     return embed
-
-async def build_storage_embed(
-    interaction: discord.Interaction, filter_mode: str = "all"
-) -> discord.Embed:
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
-    settings = await get_settings(guild_id)
-    grid_size = await get_storage_size(user_id)
-    filter_mode = filter_mode if filter_mode in STORAGE_FILTERS else "all"
-
-    async with bot.db.execute("""
-        SELECT inv.slot, i.id, i.emoji, inv.stars, i.price, i.rarity,
-               COALESCE(inv.is_locked, 0)
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'storage'
-    """, (user_id,)) as c:
-        rows = await c.fetchall()
-
-    custom = settings["custom_emojis"]
-    visible_rows = filter_storage_rows(rows, filter_mode)
-    zero_star = sum(1 for row in rows if (row[3] or 0) == 0)
-    starred = len(rows) - zero_star
-    locked_count = sum(1 for row in rows if row[6])
-    sellable = [
-        row for row in rows
-        if (row[3] or 0) == 0
-        and row[5] in SELL_ALLOWED_RARITIES
-        and not row[6]
-    ]
-    sell_total = sum(
-        calculate_sell_price(row[4], 0) for row in sellable
-    )
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND location = 'temp'",
-        (user_id,),
-    ) as c:
-        temp_count = (await c.fetchone())[0] or 0
-
-    storage_emoji = custom.get("_storage", "🎒")
-    width = max(1, int(grid_size ** 0.5))
-    embed = BotEmbed(title=f"{storage_emoji} Хранилище {interaction.user.name}", color=0x808080)
-    embed.description = (
-        f"Слотов: **{grid_size}** | "
-        f"Временное: **{temp_count}/{TEMP_STORAGE_SIZE}**\n"
-        f"0★: **{zero_star}** | Со звёздами: **{starred}** | "
-        f"🔒 Заблокировано: **{locked_count}**\n"
-    )
-    if sellable:
-        embed.description += (
-            f"Быстрая продажа 0★: **{len(sellable)}** шт. за "
-            f"🪙 **{format_price(sell_total)}**\n"
-        )
-    else:
-        embed.description += "Быстрая продажа 0★: нет подходящих предметов\n"
-    embed.description += (
-        f"Фильтр: **{STORAGE_FILTERS[filter_mode]}** · "
-        f"Показано **{len(visible_rows)}/{len(rows)}**\n"
-        "-# Звёздные, epic+ и предметы из энергостанции не входят в быструю продажу."
-    )
-    if rows and not visible_rows:
-        embed.description += "\n\nПо выбранному фильтру ничего нет."
-    if not rows:
-        embed.description += (
-            "\n\nХранилище пусто. Перемести сюда предметы из энергостанции, "
-            "чтобы освободить слоты."
-        )
-
-    # Выводим сетку по рядам (поддерживает неквадратные размеры)
-    visible_items = {}
-    for slot, item_id, default_emoji, stars, _price, _rarity, _locked in visible_rows:
-        emoji = custom.get(item_id, default_emoji)
-        emoji = await get_star_emoji(item_id, stars, emoji)
-        visible_items[slot] = emoji
-    for start in range(0, grid_size, width):
-        row_items = [visible_items.get(slot, "⬛") for slot in range(start, min(start + width, grid_size))]
-        embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
-    embed = await fix_embed_emojis(embed)
-    return embed
-
-async def build_temp_storage_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
-    settings = await get_settings(guild_id)
-    custom = settings["custom_emojis"]
-
-    async with bot.db.execute("""
-        SELECT inv.slot, i.id, i.emoji, inv.stars FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'temp'
-    """, (user_id,)) as c:
-        rows = await c.fetchall()
-
-    items = {}
-    for slot, item_id, default_emoji, stars in rows:
-        emoji = custom.get(item_id, default_emoji)
-        emoji = await get_star_emoji(item_id, stars, emoji)
-        items[slot] = emoji
-
-    width = 10
-    embed = BotEmbed(
-        title=f"📦 Временное хранилище — {interaction.user.name}",
-        description=(
-            f"Занято: **{len(rows)}/{TEMP_STORAGE_SIZE}**\n"
-            "Сюда попадают предметы, которым не хватило слотов на энергостанции и хранилище."
-            + (
-                "\n\nВременное хранилище пусто."
-                if not rows
-                else ""
-            )
-        ),
-        color=0x808080,
-    )
-    for start in range(0, TEMP_STORAGE_SIZE, width):
-        row_items = [items.get(slot, "⬛") for slot in range(start, start + width)]
-        embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
-    embed = await fix_embed_emojis(embed)
-    return embed
-
 
 async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Embed:
     # clan = (id, name, leader_id, treasury, bonus, created_at)
