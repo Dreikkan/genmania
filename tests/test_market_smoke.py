@@ -228,6 +228,12 @@ async def run_checks(db):
     )
     assert "Биржа" in market_embed.title
 
+    missing = await m.build_market_history_embed("missing_item")
+    assert "не найден" in missing.description
+
+    hub = await m.build_trading_hub_embed()
+    assert "Трейд-хаб" in hub.title
+
     print("MARKET SMOKE TEST: OK")
 
 

@@ -100,6 +100,8 @@
   `gen_mania.services.notifications`.
 - Refactor slice 37: moved guide sections, paging and embeds into
   `gen_mania.services.guide`.
+- Refactor slice 38: extracted market history, exchange, trading hub
+  and order-book embeds into `gen_mania.services.market_ui`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.

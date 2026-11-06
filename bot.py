@@ -80,6 +80,10 @@ from gen_mania.services.market_orders import (
     MarketOrderRuntime,
     make_market_order_layer,
 )
+from gen_mania.services.market_ui import (
+    MarketUiRuntime,
+    make_market_ui_layer,
+)
 from gen_mania.services.notifications import (
     NotificationRuntime,
     make_notification_layer,
@@ -93,7 +97,7 @@ from gen_mania.services.market import (
     clamp_market_price,
     market_order_price_bounds,  # noqa: F401 - re-export
     market_price_bounds,  # noqa: F401 - re-export
-    market_sparkline,
+    market_sparkline,  # noqa: F401 - re-export
 )
 from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
 from gen_mania.services.pets import PetRuntime, make_pet_layer
@@ -4270,6 +4274,29 @@ MARKET_ORDER_RUNTIME.configure(
     expire_market_orders,
 ) = make_market_order_layer(MARKET_ORDER_RUNTIME)
 
+MARKET_UI_RUNTIME = MarketUiRuntime()
+MARKET_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
+    synthesis_only_getter=lambda: is_synthesis_only,
+    gen_synthesis_only=GEN_SYNTHESIS_ONLY,
+    market_sell_rate=MARKET_SELL_RATE,
+    rarity_names=RARITY_NAMES,
+    shop_market_min_ratio=SHOP_MARKET_MIN_RATIO,
+    shop_market_max_ratio=SHOP_MARKET_MAX_RATIO,
+    market_history_limit=MARKET_HISTORY_LIMIT,
+    logger=log,
+)
+(
+    build_market_history_embed,
+    build_market_embed,
+    build_trading_hub_embed,
+    build_order_book_embed,
+) = make_market_ui_layer(MARKET_UI_RUNTIME)
+
 SEASON_RUNTIME = SeasonRuntime()
 SEASON_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6855,163 +6882,6 @@ async def build_clan_war_embed(interaction: discord.Interaction, war, clan_id: i
     return embed
 
 
-async def build_market_history_embed(item_id: str) -> discord.Embed:
-    async with bot.db.execute(
-        "SELECT i.name, i.emoji, mp.base_price, mp.current_price, "
-        "mp.demand, mp.supply FROM items i "
-        "JOIN market_prices mp ON mp.item_id = i.id WHERE i.id = ?",
-        (item_id,),
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return BotEmbed(
-            title="История цен",
-            description="Предмет не найден на бирже.",
-            color=0xe74c3c,
-        )
-
-    name, emoji, base, current, demand, supply = row
-    async with bot.db.execute(
-        "SELECT price FROM market_history WHERE item_id = ? "
-        "ORDER BY id DESC LIMIT ?",
-        (item_id, MARKET_HISTORY_LIMIT),
-    ) as c:
-        history = [r[0] for r in await c.fetchall()]
-    history.reverse()
-    if not history:
-        history = [current]
-
-    change = history[-1] - history[0]
-    change_pct = (change / history[0] * 100) if history[0] else 0
-    spark = market_sparkline(history)
-    embed = BotEmbed(
-        title=f"{get_emoji('_history')} История цен: {name}",
-        description=(
-            f"{emoji or '📦'} База: 🪙 **{base}** · Сейчас: 🪙 **{current}**\n"
-            f"`{spark}`\n"
-            f"Изменение: **{change:+d}** ({change_pct:+.1f}%)"
-        ),
-        color=0x9b59b6,
-    )
-    embed.add_field(
-        name="Диапазон",
-        value=(
-            f"Мин: 🪙 **{min(history)}**\n"
-            f"Макс: 🪙 **{max(history)}**\n"
-            f"Точек: **{len(history)}**"
-        ),
-        inline=True,
-    )
-    embed.add_field(
-        name="Спрос / предложение",
-        value=f"Спрос: **{demand or 0}**\nПредложение: **{supply or 0}**",
-        inline=True,
-    )
-    embed.set_footer(text="История обновляется при покупках, продажах и рыночных циклах.")
-    return embed
-
-
-async def build_market_embed(
-    interaction: discord.Interaction,
-    rarity: str | None = None,
-    sort: str = "change",
-    page: int = 0,
-) -> tuple[discord.Embed, int]:
-    sort_map = {
-        "change": "ABS(mp.current_price - mp.base_price) DESC",
-        "price_desc": "mp.current_price DESC",
-        "price_asc": "mp.current_price ASC",
-        "demand": "mp.demand DESC, mp.supply ASC",
-        "name": "i.name ASC",
-    }
-    sort = sort if sort in sort_map else "change"
-    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
-    hidden_ph = ",".join("?" for _ in hidden)
-    conditions = [f"mp.item_id NOT IN ({hidden_ph})"]
-    params: list = list(hidden)
-    if rarity:
-        conditions.append("i.rarity = ?")
-        params.append(rarity)
-    where = "WHERE " + " AND ".join(conditions)
-
-    async with bot.db.execute(
-        f"SELECT COUNT(*) FROM market_prices mp "
-        f"JOIN items i ON i.id = mp.item_id {where}",
-        params,
-    ) as c:
-        total = (await c.fetchone())[0] or 0
-    page_size = 10
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-
-    async with bot.db.execute(
-        f"""
-        SELECT mp.item_id, i.name, i.emoji, mp.base_price, mp.current_price,
-               mp.demand, mp.supply, i.price, i.buyable,
-               (SELECT GROUP_CONCAT(price, ',') FROM (
-                    SELECT price FROM market_history mh
-                    WHERE mh.item_id = mp.item_id ORDER BY mh.id DESC LIMIT 6
-               )) AS recent
-        FROM market_prices mp
-        JOIN items i ON i.id = mp.item_id
-        {where}
-        ORDER BY {sort_map[sort]}
-        LIMIT ? OFFSET ?
-        """,
-        (*params, page_size, page * page_size),
-    ) as c:
-        rows = await c.fetchall()
-
-    rarity_label = RARITY_NAMES.get(rarity, "Все") if rarity else "Все"
-    sort_names = {
-        "change": "по изменению",
-        "price_desc": "дорогие",
-        "price_asc": "дешёвые",
-        "demand": "по спросу",
-        "name": "по названию",
-    }
-    embed = BotEmbed(
-        title=f"{get_emoji('_market')} Биржа",
-        description=(
-            f"Страница {page + 1}/{total_pages}\n"
-            "Покупка — по средней цене пачки. Продажа — "
-            f"**{int(MARKET_SELL_RATE * 100)}%** от текущей цены.\n"
-            "Для магазинных генераторов цена ограничена "
-            f"**{int(SHOP_MARKET_MIN_RATIO * 100)}–"
-            f"{int(SHOP_MARKET_MAX_RATIO * 100)}%** цены магазина.\n"
-            f"Фильтр: **{rarity_label}** · Сортировка: **{sort_names[sort]}**"
-        ),
-        color=0x9b59b6,
-    )
-    if not rows:
-        embed.add_field(name="Пусто", value="На бирже пока нет товаров.")
-        return await fix_embed_emojis(embed), total_pages
-
-    for item_id, name, emoji, base, current, demand, supply, item_price, buyable, recent in rows:
-        current = clamp_market_price(
-            current or item_price or base or 1,
-            item_price or base or 1,
-            bool(buyable),
-        )
-        base = item_price or base
-        trend = "🟢" if current > base else ("🔴" if current < base else "⚪")
-        prices = [
-            int(value) for value in (recent or "").split(",") if value
-        ]
-        spark = market_sparkline(prices) if prices else "—"
-        embed.add_field(
-            name=f"{trend} {emoji} {name}",
-            value=(
-                f"Цена: 🪙 **{current}** (база {base})\n"
-                f"Спрос: **{demand}** | Предложение: **{supply}**\n"
-                f"`{spark}`"
-            ),
-            inline=False,
-        )
-    embed.set_footer(text="Обновление цен — раз в 6 часов")
-    return await fix_embed_emojis(embed), total_pages
-
-
 def starter_shop_total(price: int, qty: int) -> int:
     """Стоимость покупки со скидкой на первую штуку."""
     if qty <= 0:
@@ -8815,154 +8685,6 @@ async def open_market_view(
         embed=embed,
         view=MarketView(author_id, rarity, sort, page, total_pages),
     )
-
-
-async def build_trading_hub_embed() -> discord.Embed:
-    hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
-    hidden_ph = ",".join("?" for _ in hidden)
-    async with bot.db.execute(
-        "SELECT mp.item_id, i.name, i.emoji, mp.current_price, mp.base_price, "
-        "mp.demand, mp.supply, i.price, i.buyable FROM market_prices mp "
-        f"JOIN items i ON i.id = mp.item_id "
-        f"WHERE mp.item_id NOT IN ({hidden_ph}) ORDER BY i.price ASC",
-        hidden,
-    ) as c:
-        rows = await c.fetchall()
-
-    embed = BotEmbed(
-        title=f"{get_emoji('_market')} Трейд-хаб",
-        description="Лучшие цены и активные ордера по предметам.",
-        color=0x2ecc71,
-    )
-    shown = 0
-    for item_id, name, emoji, current, base, demand, supply, item_price, buyable in rows:
-        current = clamp_market_price(
-            current or item_price or base or 1,
-            item_price or base or 1,
-            bool(buyable),
-        )
-        base = item_price or base
-        async with bot.db.execute(
-            "SELECT COUNT(*), MIN(price) FROM market_orders "
-            "WHERE item_id = ? AND side = 'sell' AND status = 'active'",
-            (item_id,),
-        ) as c:
-            sell_count, sell_min = await c.fetchone()
-        async with bot.db.execute(
-            "SELECT COUNT(*), MAX(price) FROM market_orders "
-            "WHERE item_id = ? AND side = 'buy' AND status = 'active'",
-            (item_id,),
-        ) as c:
-            buy_count, buy_max = await c.fetchone()
-        change = 0.0
-        if base:
-            change = (current - base) / base * 100
-        embed.add_field(
-            name=f"{emoji} {name}"[:100],
-            value=(
-                f"Цена: 🪙 **{format_price(current)}** "
-                f"({change:+.1f}% к базовой)\n"
-                f"Продажа: **{sell_count}** ордеров"
-                + (f", мин. 🪙 {format_price(sell_min)}" if sell_min else "")
-                + f"\nПокупка: **{buy_count}** ордеров"
-                + (f", макс. 🪙 {format_price(buy_max)}" if buy_max else "")
-            ),
-            inline=False,
-        )
-        shown += 1
-        if shown >= 8:
-            break
-    if not shown:
-        embed.description = "На бирже пока нет предметов."
-    return await fix_embed_emojis(embed)
-
-
-async def build_order_book_embed(item_id: str) -> discord.Embed:
-    async with bot.db.execute(
-        "SELECT i.name, i.emoji, i.price, i.buyable, mp.current_price "
-        "FROM items i LEFT JOIN market_prices mp ON mp.item_id = i.id "
-        "WHERE i.id = ?",
-        (item_id,),
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return BotEmbed(
-            title="❌ Предмет не найден", color=0xe74c3c
-        )
-    name, emoji, item_price, buyable, current = row
-    if is_synthesis_only(item_id):
-        return BotEmbed(
-            title=f"{get_emoji('_market')} {name}",
-            description="Этот генератор доступен только через синтез.",
-            color=0x9b59b6,
-        )
-
-    now = datetime.datetime.now().isoformat()
-    async with bot.db.execute(
-        "SELECT side, price, SUM(quantity - filled) AS remaining, COUNT(*) "
-        "FROM market_orders WHERE item_id = ? AND status = 'active' "
-        "AND expires_at > ? GROUP BY side, price",
-        (item_id, now),
-    ) as c:
-        levels = await c.fetchall()
-
-    asks = sorted(
-        (price, remaining, count)
-        for side, price, remaining, count in levels
-        if side == "sell" and remaining > 0
-    )
-    bids = sorted(
-        (
-            (price, remaining, count)
-            for side, price, remaining, count in levels
-            if side == "buy" and remaining > 0
-        ),
-        reverse=True,
-    )
-    current = clamp_market_price(
-        current or item_price or 1, item_price or 1, bool(buyable)
-    )
-    best_ask = asks[0][0] if asks else None
-    best_bid = bids[0][0] if bids else None
-    if best_ask is not None and best_bid is not None:
-        spread = best_ask - best_bid
-        spread_pct = spread / best_ask * 100 if best_ask else 0
-        spread_text = f"🪙 {format_price(spread)} ({spread_pct:+.1f}%)"
-    else:
-        spread_text = "нет встречных заявок"
-
-    embed = BotEmbed(
-        title=f"{get_emoji('_market')} Стакан — {name}",
-        description=(
-            f"Текущая цена биржи: 🪙 **{format_price(current)}**\n"
-            f"Лучший bid: **{format_price(best_bid) if best_bid else '—'}** · "
-            f"Лучший ask: **{format_price(best_ask) if best_ask else '—'}**\n"
-            f"Спред: **{spread_text}**"
-        ),
-        color=0x9b59b6,
-    )
-
-    def level_lines(levels_data):
-        if not levels_data:
-            return "нет заявок"
-        return "\n".join(
-            f"🪙 **{format_price(price)}** × {remaining} "
-            f"({count} заявк{'' if count == 1 else 'и'})"
-            for price, remaining, count in levels_data[:5]
-        )
-
-    embed.add_field(
-        name="📉 Продажа",
-        value=level_lines(asks),
-        inline=True,
-    )
-    embed.add_field(
-        name="📈 Покупка",
-        value=level_lines(bids),
-        inline=True,
-    )
-    embed.set_footer(text="Исполнение заявок — в разделе «Ордера».")
-    return await fix_embed_emojis(embed)
 
 
 async def open_order_book_select(
