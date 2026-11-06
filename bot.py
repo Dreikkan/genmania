@@ -105,6 +105,7 @@ from gen_mania.services.raid_combat import (
     make_raid_combat_layer,
 )
 from gen_mania.services.seasons import SeasonRuntime, make_season_layer
+from gen_mania.services.shop_ui import ShopUiRuntime, make_shop_ui_layer
 from gen_mania.services.statuses import StatusRuntime, make_status_layer
 from gen_mania.services.taxes import TaxRuntime, make_tax_layer
 from gen_mania.services.top_exclusion import (
@@ -4419,6 +4420,29 @@ build_stats_embed, build_user_profile_embed = make_profile_ui_layer(
     PROFILE_UI_RUNTIME
 )
 
+SHOP_UI_RUNTIME = ShopUiRuntime()
+SHOP_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    settings_getter=lambda: get_settings,
+    accessibility_getter=lambda: is_accessibility_mode,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
+    emoji_getter=lambda: get_emoji,
+    button_emojis=BOT_BTN_EMOJIS,
+    page_size=PAGE_SIZE,
+    income_hint=INCOME_HINT,
+    synthesis_only=GEN_SYNTHESIS_ONLY,
+    rarity_names=RARITY_NAMES,
+    collection_bonus=COLLECTION_BONUS_PER_ITEM,
+    logger=log,
+)
+(
+    build_shop_page,
+    build_achievements_page,
+    build_collection_embed,
+) = make_shop_ui_layer(SHOP_UI_RUNTIME)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -8180,194 +8204,6 @@ async def is_starter_shop_purchase(user_id: int, item_id: str) -> bool:
         (user_id,),
     ) as c:
         return await c.fetchone() is None
-
-
-async def build_shop_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
-    guild_id = interaction.guild_id
-    settings = await get_settings(guild_id)
-    compact = await is_accessibility_mode(interaction.user.id)
-    custom = settings["custom_emojis"]
-    coin = str(BOT_BTN_EMOJIS.get("_coin", "🪙"))
-    gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
-    shop_emoji = str(BOT_BTN_EMOJIS.get("_generators", "🏭"))
-
-    async with bot.db.execute(
-        "SELECT id, name, price, income_per_hour, emoji, rarity, income_gems_per_hour, buyable "
-        "FROM items WHERE id LIKE '%_gen' ORDER BY price ASC"
-    ) as c:
-        rows = await c.fetchall()
-
-    async with bot.db.execute(
-        "SELECT item_id, current_price FROM market_prices"
-    ) as c:
-        market_current = dict(await c.fetchall())
-
-    total = len(rows)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
-    page_total = sum(
-        price for _id, _name, price, _inc, _emoji, _rarity, _gems, buyable in chunk
-        if buyable
-    )
-    async with bot.db.execute(
-        "SELECT coins, gems FROM players WHERE user_id = ?", (interaction.user.id,)
-    ) as c:
-        player_row = await c.fetchone()
-    balance_coins = (player_row[0] if player_row else 0) or 0
-    balance_gems = (player_row[1] if player_row else 0) or 0
-
-    embed = BotEmbed(
-        title=f"{shop_emoji} Магазин",
-        description=(
-            f"Страница {page + 1}/{total_pages}\n"
-            f"Баланс: {coin} **{format_price(balance_coins)}** | "
-            f"{gem} **{format_price(balance_gems)}**\n"
-            f"Стоимость всей страницы: {coin} **{format_price(page_total)}**\n"
-            "Магазин — фиксированная цена, биржа — вторичный рынок."
-            + ("" if compact else f"\n-# {INCOME_HINT}")
-        ),
-        color=0xf1c40f,
-    )
-    
-    for item_id, name, price, income_coins, default_emoji, rarity, income_gems, buyable in chunk:
-        emoji = custom.get(item_id, default_emoji)
-        inc = []
-        if income_coins > 0: inc.append(f"{coin} {income_coins * 3600:.2f}/час")
-        if income_gems > 0: inc.append(f"{gem} {income_gems * 3600:.4f}/час")
-        inc_str = " ".join(inc) if inc else "без дохода"
-        
-        # --- ЛОГИКА ЦЕНЫ ---
-        if buyable:
-            price_str = f"Цена: {coin} {format_price(price)}"
-        elif item_id in GEN_SYNTHESIS_ONLY:
-            price_str = "Цена: `Только синтез`"
-        else:
-            price_str = "Покупка на бирже/аукционе"
-
-        market_str = ""
-        if item_id not in GEN_SYNTHESIS_ONLY and item_id in market_current:
-            market_price = clamp_market_price(
-                market_current[item_id] or price,
-                price,
-                bool(buyable),
-            )
-            market_str = f"Биржа: {coin} {format_price(market_price)}"
-
-        value_parts = [price_str]
-        if market_str:
-            value_parts.append(market_str)
-        value_parts.extend([inc_str, RARITY_NAMES.get(rarity, rarity)])
-
-        embed.add_field(
-            name=f"{emoji} {name} (`{item_id}`)",
-            value=" | ".join(value_parts),
-            inline=False
-        )
-        
-    return await fix_embed_emojis(embed), total_pages
-
-
-async def build_achievements_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
-    custom = (await get_settings(guild_id))["custom_emojis"]
-    ach_emoji = custom.get("_achievements", "🏆")
-    gem = str(BOT_BTN_EMOJIS.get("_gem", "💎"))
-
-    async with bot.db.execute(
-        "SELECT id, name, description, reward_gems, emoji FROM achievements ORDER BY reward_gems ASC"
-    ) as c:
-        all_ach = await c.fetchall()
-
-    async with bot.db.execute(
-        "SELECT achievement_id FROM player_achievements WHERE user_id = ?", (user_id,)
-    ) as c:
-        unlocked = {r[0] for r in await c.fetchall()}
-
-    total = len(all_ach)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = all_ach[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
-
-    embed = BotEmbed(
-        title=f"{ach_emoji} Достижения — {interaction.user.name}",
-        description=f"Страница {page + 1}/{total_pages} | Открыто: {len(unlocked)}/{total}",
-        color=0xf1c40f
-    )
-    for ach_id, name, desc, reward, emoji in chunk:
-        status = "✅ Открыто" if ach_id in unlocked else "🔒 Закрыто"
-        embed.add_field(
-            name=f"{emoji} {name}",
-            value=f"{desc}\nНаграда: {gem} {reward} — {status}",
-            inline=False
-        )
-    embed = await fix_embed_emojis(embed)
-    return embed, total_pages
-
-
-async def build_collection_embed(interaction: discord.Interaction, page: int = 0) -> tuple[discord.Embed, int]:
-    user_id = interaction.user.id
-    async with bot.db.execute(
-        "SELECT id, name, emoji, rarity, price FROM items "
-        "WHERE id LIKE '%\\_gen' ESCAPE '\\' ORDER BY price ASC"
-    ) as c:
-        all_items = await c.fetchall()
-
-    async with bot.db.execute(
-        "SELECT item_id FROM player_collection WHERE user_id = ?", (user_id,)
-    ) as c:
-        unlocked = {r[0] for r in await c.fetchall()}
-
-    async with bot.db.execute(
-        "SELECT item_id, stars FROM player_star_collection WHERE user_id = ?",
-        (user_id,),
-    ) as c:
-        star_rows = await c.fetchall()
-    star_map: dict[str, set[int]] = {}
-    for item_id, stars in star_rows:
-        star_map.setdefault(item_id, set()).add(stars)
-    for item_id in unlocked:
-        star_map.setdefault(item_id, set()).add(0)
-
-    total = len(all_items)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = all_items[page * PAGE_SIZE:page * PAGE_SIZE + PAGE_SIZE]
-    discovered = sum(1 for item_id, *_ in all_items if item_id in unlocked)
-    bonus_pct = discovered * COLLECTION_BONUS_PER_ITEM * 100
-    stars_found = sum(len(stars) for stars in star_map.values())
-    stars_total = total * 6
-
-    embed = BotEmbed(
-        title=f"{get_emoji('_collection')} Коллекция генераторов",
-        description=(
-            f"Генераторов: **{discovered}/{total}** · "
-            f"звёзд: **{stars_found}/{stars_total}**\n"
-            f"Бонус к доходу: **+{bonus_pct:.1f}%**\n"
-            f"Страница {page + 1}/{total_pages}"
-        ),
-        color=0x3498db,
-    )
-    for item_id, name, emoji, rarity, price in chunk:
-        is_open = item_id in unlocked
-        stars = star_map.get(item_id, set())
-        if is_open:
-            marks = " ".join(
-                f"{star}★{'✅' if star in stars else '⬜'}" for star in range(6)
-            )
-            field_name = f"✅ {emoji} {name}"
-        else:
-            marks = "0★⬜ 1★⬜ 2★⬜ 3★⬜ 4★⬜ 5★⬜"
-            field_name = f"🔒 {emoji} ???"
-        embed.add_field(
-            name=field_name[:100],
-            value=f"{RARITY_NAMES.get(rarity, rarity)}\n{marks}",
-            inline=False,
-        )
-    embed.set_footer(text="Каждый новый генератор даёт +0.5% к доходу; звёзды отмечаются отдельно")
-    embed = await fix_embed_emojis(embed)
-    return embed, total_pages
 
 
 async def build_upgrades_page(interaction: discord.Interaction, page: int) -> tuple[discord.Embed, int]:
