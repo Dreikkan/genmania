@@ -190,6 +190,8 @@
   **99%**.
 - Coverage slice 78: added transaction/bank/raid/season/advent/service edge
   tests and UI history/upgrade branches. Coverage reached **99.51%**.
+- Coverage slice 79: added market-order flow, pets/autocollector, notifications
+  and remaining service/UI branches. Coverage reached **99.57%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.

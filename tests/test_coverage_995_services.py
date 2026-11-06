@@ -990,3 +990,174 @@ def test_runtime_compensation_wrappers():
             await _close(db)
 
     asyncio.run(run())
+
+
+def test_market_orders_and_misc_service_branches():
+    async def run():
+        db = await _init()
+        try:
+            await db.executemany(
+                "INSERT INTO players (user_id, coins, gems) VALUES (?, 10000, 1000)",
+                [(1,), (2,), (3,), (4,)],
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO items "
+                "(id, name, price, income_per_hour, emoji, rarity, buyable) "
+                "VALUES ('basic_gen', 'Basic', 100, 1, 'X', 'common', 1)"
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO market_prices "
+                "(item_id, base_price, current_price, demand, supply) "
+                "VALUES ('basic_gen', 100, 100, 0, 0)"
+            )
+            await db.execute(
+                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                "VALUES (1, 0, 'basic_gen', 'storage', 0)"
+            )
+            await db.commit()
+
+            await db.execute(
+                "CREATE TRIGGER trg_mo_buy_ignore BEFORE UPDATE OF coins ON players "
+                "WHEN OLD.user_id = 1 AND NEW.coins < OLD.coins BEGIN SELECT RAISE(IGNORE); END"
+            )
+            await db.commit()
+            await m.buy_market_item(1, "basic_gen", 1)
+            await db.execute("DROP TRIGGER trg_mo_buy_ignore")
+            await db.commit()
+
+            await db.execute(
+                "CREATE TRIGGER trg_mo_sell_ignore BEFORE DELETE ON inventory "
+                "WHEN OLD.user_id = 1 AND OLD.location = 'storage' BEGIN SELECT RAISE(IGNORE); END"
+            )
+            await db.commit()
+            await m.sell_market_item(1, "basic_gen", 1)
+            await db.execute("DROP TRIGGER trg_mo_sell_ignore")
+            await db.commit()
+
+            await db.execute(
+                "CREATE TRIGGER trg_mo_create_ignore BEFORE UPDATE OF coins ON players "
+                "WHEN OLD.user_id = 1 AND NEW.coins < OLD.coins BEGIN SELECT RAISE(IGNORE); END"
+            )
+            await db.commit()
+            await m.create_market_order(1, "buy", "basic_gen", 1, 100)
+            await db.execute("DROP TRIGGER trg_mo_create_ignore")
+            await db.commit()
+
+            await m.create_market_order(2, "buy", "basic_gen", 1, 100)
+
+            future = (m.datetime.datetime.now() + m.datetime.timedelta(hours=1)).isoformat()
+            past = (m.datetime.datetime.now() - m.datetime.timedelta(hours=1)).isoformat()
+
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(id, user_id, side, item_id, stars, price, quantity, filled, status, expires_at) "
+                "VALUES (101, 2, 'sell', 'basic_gen', 0, 1, 1, 0, 'active', ?)",
+                (future,),
+            )
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(id, user_id, side, item_id, stars, price, quantity, filled, status, expires_at) "
+                "VALUES (102, 2, 'sell', 'basic_gen', 0, 100, 1, 1, 'active', ?)",
+                (future,),
+            )
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(id, user_id, side, item_id, stars, price, quantity, filled, status, expires_at) "
+                "VALUES (103, 2, 'sell', 'basic_gen', 0, 100, 1, 0, 'active', ?)",
+                (future,),
+            )
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(id, user_id, side, item_id, stars, price, quantity, filled, status, expires_at) "
+                "VALUES (104, 2, 'buy', 'basic_gen', 0, 100, 1, 0, 'active', ?)",
+                (future,),
+            )
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(id, user_id, side, item_id, stars, price, quantity, filled, status, expires_at) "
+                "VALUES (105, 2, 'buy', 'basic_gen', 0, 100, 1, 0, 'active', ?)",
+                (future,),
+            )
+            await db.execute(
+                "INSERT INTO market_orders "
+                "(id, user_id, side, item_id, stars, price, quantity, filled, status, expires_at) "
+                "VALUES (106, 2, 'sell', 'basic_gen', 0, 100, 1, 1, 'active', ?)",
+                (past,),
+            )
+            await db.commit()
+            await m.fill_market_order(101, 1)
+            await m.fill_market_order(102, 1)
+            await db.execute("UPDATE players SET coins = 0 WHERE user_id = 3")
+            await db.commit()
+            await m.fill_market_order(103, 3)
+            await m.fill_market_order(104, 1)
+            await db.execute(
+                "CREATE TRIGGER trg_mo_fill_ignore BEFORE DELETE ON inventory "
+                "WHEN OLD.user_id = 1 BEGIN SELECT RAISE(IGNORE); END"
+            )
+            await db.commit()
+            await m.fill_market_order(105, 1)
+            await db.execute("DROP TRIGGER trg_mo_fill_ignore")
+            await db.commit()
+            await m.expire_market_orders()
+
+            await db.execute(
+                "INSERT INTO user_pets_v2 (user_id, pet_id, level) VALUES (2, 'cat', 1)"
+            )
+            await db.execute("UPDATE players SET active_pet = 'cat' WHERE user_id = 2")
+            await db.execute(
+                "CREATE TRIGGER trg_pet_feed_ignore BEFORE UPDATE ON user_pets_v2 "
+                "WHEN OLD.user_id = 2 BEGIN SELECT RAISE(IGNORE); END"
+            )
+            await db.execute(
+                "INSERT INTO autocollectors (user_id, level, last_auto) VALUES (3, 1, NULL)"
+            )
+            await db.commit()
+            await m.feed_active_pet(2)
+            await m.buy_autocollector(3)
+            await db.execute(
+                "CREATE TRIGGER trg_autocollector_ignore BEFORE UPDATE ON autocollectors "
+                "WHEN OLD.user_id = 3 BEGIN SELECT RAISE(IGNORE); END"
+            )
+            await db.commit()
+            await m.upgrade_autocollector(3)
+            await db.execute("DROP TRIGGER trg_pet_feed_ignore")
+            await db.execute("DROP TRIGGER trg_autocollector_ignore")
+            await db.commit()
+
+            m.ANALYTICS_UI_RUNTIME.get_status_bonus  # wrapper exists
+            await m.ANALYTICS_UI_RUNTIME.get_status_bonus(1)
+            await m.PRESTIGE_RUNTIME.get_settings(1)
+            await m.ADVENT_RUNTIME.grant_item(1, "basic_gen", 1)
+            await m.get_top_players("clans", 10, 1)
+            await m.get_top_players("level", 10, 1)
+
+            await db.execute("DELETE FROM market_history WHERE item_id = 'basic_gen'")
+            await db.commit()
+            await m.build_market_history_embed("basic_gen")
+
+            await db.execute(
+                "INSERT INTO player_upgrades (user_id, upgrade_id, expires_at) "
+                "VALUES (1, 'vip', '9999-01-01T00:00:00')"
+            )
+            await db.execute(
+                "INSERT OR IGNORE INTO items "
+                "(id, name, price, income_per_hour, income_gems_per_hour, emoji, rarity, buyable) "
+                "VALUES ('gem_gen', 'Gem', 100, 1, 1, 'X', 'common', 1)"
+            )
+            await db.execute(
+                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                "VALUES (1, 1, 'gem_gen', 'profile', 0)"
+            )
+            await db.commit()
+            interaction = _Interaction(1)
+            await m.build_upgrades_page(interaction, 0)
+            await m.build_generator_details_embed(interaction, 0)
+
+            res = await m.claim_daily(1)
+            assert res["ok"]
+            assert await m.check_achievements(999) == []
+        finally:
+            await _close(db)
+
+    asyncio.run(run())
