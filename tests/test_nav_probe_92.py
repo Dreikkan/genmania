@@ -98,7 +98,42 @@ def _value_for(name, annotation):
         return _options()
     if name in ("rarity", "query", "main_message", "selected_lot", "selected_order"):
         return None
-    if name in ("lots", "rows", "targets", "items"):
+    if name == "total_pages":
+        return 3
+    if name == "page":
+        return 1
+    if name == "lots":
+        return [
+            (
+                1,
+                2,
+                "basic_gen",
+                0,
+                10,
+                None,
+                100,
+                "9999-01-01T00:00:00",
+                "Basic",
+                "??",
+            )
+        ]
+    if name == "rows":
+        return [
+            (
+                1,
+                2,
+                "buy",
+                "basic_gen",
+                0,
+                100,
+                2,
+                0,
+                "9999-01-01T00:00:00",
+                "Basic",
+                "??",
+            )
+        ]
+    if name in ("targets", "items"):
         return []
     if name == "data":
         return {
@@ -138,18 +173,25 @@ def _value_for(name, annotation):
 def _make_view(cls):
     signature = inspect.signature(cls.__init__)
     args = []
+    kwargs = {}
     for parameter in signature.parameters.values():
         if parameter.name == "self":
-            continue
-        if parameter.default is not inspect.Parameter.empty:
             continue
         if parameter.kind not in (
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
         ):
             continue
-        args.append(_value_for(parameter.name, parameter.annotation))
-    return cls(*args)
+        if parameter.default is inspect.Parameter.empty:
+            args.append(_value_for(parameter.name, parameter.annotation))
+            continue
+        if parameter.name == "total_pages":
+            kwargs[parameter.name] = 3
+        elif parameter.name == "page":
+            kwargs[parameter.name] = 1
+        elif parameter.name in ("selected_lot", "selected_order"):
+            kwargs[parameter.name] = 1
+    return cls(*args, **kwargs)
 
 
 def _collect_views():
@@ -286,6 +328,30 @@ def test_probe_all_views_and_modals():
                 m.bot.fetch_user = fetch_user
                 for view in _collect_views():
                     await _exercise(view)
+                    for method_name in (
+                        "prev_page",
+                        "next_page",
+                        "back",
+                        "select",
+                        "select_lot",
+                        "select_order",
+                        "select_item",
+                        "select_type",
+                        "select_rarity",
+                        "select_sort",
+                        "quantity_select",
+                        "do_move",
+                        "accept",
+                        "decline",
+                        "on_timeout",
+                    ):
+                        method = getattr(view, method_name, None)
+                        if method is None or not inspect.iscoroutinefunction(method):
+                            continue
+                        try:
+                            await method(FakeInteraction(1))
+                        except Exception:
+                            pass
                     for attr, value in (
                         ("selected_lot", 1),
                         ("selected_order", 1),
