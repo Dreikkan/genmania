@@ -94,6 +94,8 @@
   with the public/espionage profile embed.
 - Refactor slice 34: moved station and generator-detail embeds
   into `gen_mania.services.profile_ui`.
+- Refactor slice 35: moved title-unlock queries and rules into
+  `gen_mania.repositories.players`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
