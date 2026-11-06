@@ -183,6 +183,33 @@ def test_war_closer_finishes_expired_war():
     asyncio.run(run())
 
 
+def test_market_updater_updates_prices():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute(
+                "INSERT OR REPLACE INTO market_prices "
+                "(item_id, base_price, current_price, demand, supply) "
+                "VALUES ('basic_gen', 100, 100, 10, 0)"
+            )
+            await db.commit()
+
+            await _run_once(m.bot.market_updater)
+
+            async with db.execute(
+                "SELECT current_price, demand, supply "
+                "FROM market_prices WHERE item_id = 'basic_gen'"
+            ) as c:
+                current, demand, supply = await c.fetchone()
+            assert current != 100
+            assert demand == 0 and supply == 0
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_auction_closer_pays_seller_and_finishes():
     async def run():
         db = await _init()
