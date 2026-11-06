@@ -4415,8 +4415,14 @@ PROFILE_UI_RUNTIME.configure(
     titles_getter=lambda: get_unlocked_titles,
     pet_getter=lambda: get_active_pet,
     autocollector_getter=lambda: get_autocollector,
+    combat_power_getter=lambda: get_combat_power,
+    income_getter=lambda: get_per_second_income,
+    pet_bonus_getter=lambda: get_pet_bonus,
+    title_bonus_getter=lambda: get_title_bonus,
+    collection_count_getter=lambda: get_collection_count,
     embed_factory=lambda **kwargs: BotEmbed(**kwargs),
     emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
     titles=TITLES,
     title_bonuses=TITLE_BONUSES,
     btype_names=BTYPE_NAMES,
@@ -4424,11 +4430,16 @@ PROFILE_UI_RUNTIME.configure(
     pet_types=PET_TYPES,
     autocollect_levels=AUTOCOLLECT_LEVELS,
     castle=CASTLE,
+    prestige_bonus_per_point=PRESTIGE_BONUS_PER_POINT,
+    prestige_bonus_cap=PRESTIGE_BONUS_CAP,
+    start_grid=START_GRID,
     logger=log,
 )
-build_stats_embed, build_user_profile_embed = make_profile_ui_layer(
-    PROFILE_UI_RUNTIME
-)
+(
+    build_stats_embed,
+    build_user_profile_embed,
+    build_public_profile_embed,
+) = make_profile_ui_layer(PROFILE_UI_RUNTIME)
 
 SHOP_UI_RUNTIME = ShopUiRuntime()
 SHOP_UI_RUNTIME.configure(
@@ -7379,182 +7390,6 @@ async def build_generator_details_embed(
     embed.set_footer(text=f"Генераторов: {len(details)} | Доход на слот — в каждой строке")
     embed = await fix_embed_emojis(embed)
     return embed, total_pages
-
-
-async def build_public_profile_embed(
-    target_id: int, detailed: bool = False
-) -> discord.Embed:
-    async with bot.db.execute(
-        "SELECT coins, gems, title, grid_size, prestige_points "
-        "FROM players WHERE user_id = ?",
-        (target_id,),
-    ) as c:
-        row = await c.fetchone()
-    if not row:
-        return BotEmbed(
-            title="❌ Игрок не найден",
-            description=f"Профиль <@{target_id}> не найден.",
-            color=0xe74c3c,
-        )
-
-    coins, gems, title, grid_size, prestige = row
-    income_bonus = await get_status_bonus(target_id)
-    grid_size = grid_size or START_GRID
-    title = title or "Новичок"
-
-    async with bot.db.execute(
-        "SELECT c.name, cm.role FROM clan_members cm "
-        "JOIN clans c ON c.id = cm.clan_id WHERE cm.user_id = ?",
-        (target_id,),
-    ) as c:
-        clan_row = await c.fetchone()
-
-    power = await get_combat_power(target_id)
-    per_sec_coins, per_sec_gems = await get_per_second_income(target_id)
-    pet = await get_active_pet(target_id)
-    autoc = await get_autocollector(target_id)
-
-    async with bot.db.execute(
-        "SELECT inv.slot, inv.item_id, i.name, i.emoji, inv.stars, i.price "
-        "FROM inventory inv JOIN items i ON inv.item_id = i.id "
-        "WHERE inv.user_id = ? AND inv.location = 'profile'",
-        (target_id,),
-    ) as c:
-        rows = await c.fetchall()
-
-    pet_power = await get_pet_bonus(target_id, "combat_power")
-    title_power = await get_title_bonus(target_id, "combat_power")
-    combat_mult = 1 + pet_power + title_power
-
-    grid = {}
-    power_rows = []
-    for slot, item_id, name, emoji, stars, price in rows:
-        grid[slot] = emoji
-        power_rows.append(
-            (name, emoji, stars, int((price or 0) * (1 + stars * 0.5) * combat_mult))
-        )
-
-    embed = BotEmbed(
-        title=(
-            f"🕵️ Шпионаж: <@{target_id}>"
-            if detailed
-            else f"👤 Профиль: <@{target_id}>"
-        ),
-        description=(
-            "Данные разведки: баланс, доход, мощь и энергостанция."
-            if detailed
-            else "Публичный обзор: титул, клан, доход, коллекция и энергостанция."
-        ),
-        color=0x9b59b6 if detailed else 0x3498db,
-    )
-    embed.add_field(
-        name="Основное",
-        value=(
-            f"Титул: **{title}**\n"
-            f"Клан: **{clan_row[0]}** ({clan_row[1]})"
-            if clan_row
-            else f"Титул: **{title}**\nКлан: не состоит"
-        ),
-        inline=False,
-    )
-    if detailed:
-        embed.add_field(
-            name="Баланс",
-            value=f"🪙 {format_price(coins or 0)} | 💎 {format_price(gems or 0)}",
-            inline=True,
-        )
-        embed.add_field(
-            name="Престиж",
-            value=f"**{prestige or 0}** очков · бонус +{int(min((prestige or 0) * PRESTIGE_BONUS_PER_POINT, PRESTIGE_BONUS_CAP) * 100)}%",
-            inline=True,
-        )
-    if detailed:
-        embed.add_field(
-            name="⚔️ Мощь",
-            value=f"**{power}**",
-            inline=True,
-        )
-    embed.add_field(
-        name="Доход",
-        value=(
-            f"🪙 {per_sec_coins * 3600:.2f}/час"
-            + (f"\n💎 {per_sec_gems * 3600:.4f}/час" if per_sec_gems > 0 else "")
-        ),
-        inline=True,
-    )
-    if detailed:
-        pet_text = "нет"
-        if pet:
-            pet_type = PET_TYPES.get(pet[0])
-            if pet_type:
-                pet_text = f"{pet_type['emoji']} {pet_type['name']} (ур. {pet[1]})"
-        embed.add_field(
-            name="Активность",
-            value=(
-                f"Питомец: {pet_text}\n"
-                f"Автосборщик: {'ур. ' + str(autoc[0]) if autoc else 'нет'}\n"
-                f"Бонус статуса: +{int((income_bonus or 0) * 100)}%"
-            ),
-            inline=False,
-        )
-
-    if detailed and power_rows:
-        top = sorted(power_rows, key=lambda row: row[3], reverse=True)[:5]
-        embed.add_field(
-            name="Топ генераторов по мощи",
-            value="\n".join(
-                f"{emoji} {name} ({stars}★) — **{gen_power}**"
-                for name, emoji, stars, gen_power in top
-            ),
-            inline=False,
-        )
-
-    if not detailed:
-        async with bot.db.execute(
-            "SELECT COUNT(*) FROM items WHERE id LIKE '%\\_gen' ESCAPE '\\'"
-        ) as c:
-            total_generators = (await c.fetchone())[0] or 0
-        collection_count = await get_collection_count(target_id)
-        async with bot.db.execute(
-            "SELECT COUNT(*) FROM player_achievements WHERE user_id = ?",
-            (target_id,),
-        ) as c:
-            achievements_count = (await c.fetchone())[0] or 0
-        async with bot.db.execute("SELECT COUNT(*) FROM achievements") as c:
-            achievements_total = (await c.fetchone())[0] or 0
-        embed.add_field(
-            name=f"{CASTLE} Энергостанция",
-            value=(
-                f"Сетка: **{grid_size}**\n"
-                f"Занято: **{len(rows)}/{grid_size}**"
-            ),
-            inline=True,
-        )
-        embed.add_field(
-            name="📚 Коллекция",
-            value=f"**{collection_count}/{total_generators}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="🏆 Достижения",
-            value=f"**{achievements_count}/{achievements_total}**",
-            inline=True,
-        )
-
-    width = max(1, int(grid_size ** 0.5))
-    embed.add_field(
-        name=f"Энергостанция · сетка {grid_size}",
-        value="\n".join(
-            "  ".join(
-                grid.get(slot, "⬛") if detailed
-                else ("🟦" if slot in grid else "⬛")
-                for slot in range(start, min(start + width, grid_size))
-            )
-            for start in range(0, grid_size, width)
-        ),
-        inline=False,
-    )
-    return await fix_embed_emojis(embed)
 
 
 async def build_storage_embed(
