@@ -80,6 +80,7 @@ from gen_mania.services.market import (
     market_sparkline,
 )
 from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
+from gen_mania.services.pets import PetRuntime, make_pet_layer
 from gen_mania.services.prestige import (
     PrestigeRuntime,
     make_prestige_layer,
@@ -4270,6 +4271,32 @@ SEASON_RUNTIME.configure(
     claim_season_rewards,
 ) = make_season_layer(SEASON_RUNTIME)
 
+PET_RUNTIME = PetRuntime()
+PET_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    pet_types=PET_TYPES,
+    pet_max_level=PET_MAX_LEVEL,
+    feed_cost_coins=PET_FEED_COST_COINS,
+    feed_cost_gems=PET_FEED_COST_GEMS,
+    feed_xp=PET_FEED_XP,
+    feed_cooldown_hours=PET_FEED_COOLDOWN_HOURS,
+    autocollect_price_gems=AUTOCOLLECT_PRICE_GEMS,
+    autocollect_max_level=AUTOCOLLECT_MAX_LEVEL,
+    autocollect_levels=AUTOCOLLECT_LEVELS,
+    logger=log,
+)
+(
+    get_active_pet,
+    pet_effect_bonus,
+    get_pet_bonus,
+    feed_active_pet,
+    get_autocollector,
+    buy_autocollector,
+    upgrade_autocollector,
+    get_user_pets,
+) = make_pet_layer(PET_RUNTIME)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6218,133 +6245,6 @@ async def get_unlocked_titles(user_id: int) -> set:
 
     return unlocked
 
-async def get_active_pet(user_id: int):
-    """Возвращает (pet_id, level) активного питомца или None."""
-    async with bot.db.execute(
-        "SELECT active_pet FROM players WHERE user_id = ?", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    if not row or not row[0]:
-        return None
-    pet_id = row[0]
-    async with bot.db.execute(
-        "SELECT level FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?", (user_id, pet_id)
-    ) as c:
-        r = await c.fetchone()
-    if not r:
-        return None
-    return pet_id, r[0]
-
-
-def pet_effect_bonus(
-    pet_id: str | None, level: int, effect_type: str
-) -> float:
-    """Бонус питомца по типу эффекта без обращения к БД."""
-    ptype = PET_TYPES.get(pet_id or "")
-    if not ptype:
-        return 0.0
-    per_level = 0.0
-    if ptype.get("effect") == effect_type:
-        per_level += ptype.get("per_level", 0.0)
-    per_level += ptype.get("extra_effects", {}).get(effect_type, 0.0)
-    return per_level * max(0, int(level or 0))
-
-
-async def get_pet_bonus(user_id: int, effect_type: str) -> float:
-    """Суммарный бонус от активного питомца для указанного эффекта."""
-    pet = await get_active_pet(user_id)
-    if not pet:
-        return 0.0
-    pet_id, level = pet
-    return pet_effect_bonus(pet_id, level, effect_type)
-
-async def feed_active_pet(user_id: int) -> tuple[bool, str, int, str]:
-    """Кормит активного питомца с повторной проверкой внутри транзакции."""
-    pet_id = ""
-    new_level = 0
-    try:
-        async with db_transaction():
-            pet = await get_active_pet(user_id)
-            if not pet:
-                raise ValueError("❌ У тебя нет активного питомца.")
-            pet_id, level = pet
-            ptype = PET_TYPES.get(pet_id)
-            if not ptype:
-                raise ValueError("❌ Питомец не найден.")
-            if level >= PET_MAX_LEVEL:
-                raise ValueError(
-                    f"❌ {ptype['emoji']} {ptype['name']} уже максимального уровня."
-                )
-
-            async with bot.db.execute(
-                "SELECT last_fed FROM user_pets_v2 "
-                "WHERE user_id = ? AND pet_id = ?",
-                (user_id, pet_id),
-            ) as c:
-                row = await c.fetchone()
-            last_fed = row[0] if row else None
-            now = datetime.datetime.now()
-            last = _parse_market_datetime(last_fed)
-            if last:
-                left = (
-                    PET_FEED_COOLDOWN_HOURS * 3600
-                    - (now - last).total_seconds()
-                )
-                if left > 0:
-                    hours = int(left // 3600)
-                    minutes = int((left % 3600) // 60)
-                    raise ValueError(
-                        f"⏳ Питомец не голоден. Подожди {hours}ч {minutes}м."
-                    )
-
-            cur = await bot.db.execute(
-                "UPDATE players SET coins = coins - ?, gems = gems - ? "
-                "WHERE user_id = ? AND coins >= ? AND gems >= ?",
-                (
-                    PET_FEED_COST_COINS,
-                    PET_FEED_COST_GEMS,
-                    user_id,
-                    PET_FEED_COST_COINS,
-                    PET_FEED_COST_GEMS,
-                ),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(
-                    f"❌ Нужно 🪙 {PET_FEED_COST_COINS} и "
-                    f"💎 {PET_FEED_COST_GEMS}."
-                )
-            cur = await bot.db.execute(
-                "UPDATE user_pets_v2 SET level = level + ?, last_fed = ? "
-                "WHERE user_id = ? AND pet_id = ? AND level < ?",
-                (
-                    PET_FEED_XP,
-                    now.isoformat(),
-                    user_id,
-                    pet_id,
-                    PET_MAX_LEVEL,
-                ),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("❌ Питомец уже максимального уровня.")
-            new_level = min(PET_MAX_LEVEL, level + PET_FEED_XP)
-    except ValueError as exc:
-        return False, str(exc), 0, ""
-    return (
-        True,
-        f"🍖 {ptype['emoji']} {ptype['name']} покормлен! "
-        f"Уровень: **{new_level}/{PET_MAX_LEVEL}**.",
-        new_level,
-        pet_id,
-    )
-
-
-async def get_autocollector(user_id: int):
-    """Возвращает (level, last_auto) или None, если автосборщика нет."""
-    async with bot.db.execute(
-        "SELECT level, last_auto FROM autocollectors WHERE user_id = ?", (user_id,)
-    ) as c:
-        return await c.fetchone()
-
 async def get_notifications(user_id: int) -> dict:
     """Возвращает {notif_type: (enabled, last_sent)} для всех типов. Если записи нет — enabled=True по умолчанию."""
     async with bot.db.execute(
@@ -6976,85 +6876,6 @@ async def delete_message_later(message, delay: int):
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         pass
 
-
-async def buy_autocollector(user_id: int) -> tuple[bool, str]:
-    """Покупка автосборщика. Возвращает (успех, сообщение)."""
-    existing = await get_autocollector(user_id)
-    if existing:
-        return False, "❌ У тебя уже есть автосборщик."
-
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT 1 FROM autocollectors WHERE user_id = ?", (user_id,)
-            ) as c:
-                if await c.fetchone():
-                    raise ValueError("У тебя уже есть автосборщик.")
-
-            cur = await bot.db.execute(
-                "UPDATE players SET gems = gems - ? "
-                "WHERE user_id = ? AND gems >= ?",
-                (AUTOCOLLECT_PRICE_GEMS, user_id, AUTOCOLLECT_PRICE_GEMS),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"Нужно 💎 {AUTOCOLLECT_PRICE_GEMS}.")
-
-            await bot.db.execute(
-                "INSERT INTO autocollectors (user_id, level, last_auto) VALUES (?, 1, ?)",
-                (user_id, datetime.datetime.now().isoformat()),
-            )
-    except ValueError as e:
-        return False, f"❌ {e}"
-
-    return True, f"✅ Автосборщик куплен за 💎 {AUTOCOLLECT_PRICE_GEMS}! Теперь доход собирается раз в {AUTOCOLLECT_LEVELS[1][1]} ч."
-
-
-async def upgrade_autocollector(user_id: int) -> tuple[bool, str]:
-    """Улучшение автосборщика на следующий уровень."""
-    existing = await get_autocollector(user_id)
-    if not existing:
-        return False, "❌ У тебя нет автосборщика. Сначала купи его."
-
-    level, _ = existing
-    if level >= AUTOCOLLECT_MAX_LEVEL:
-        return False, f"❌ Автосборщик уже максимального уровня ({AUTOCOLLECT_MAX_LEVEL})."
-
-    next_level = level + 1
-    price, interval = AUTOCOLLECT_LEVELS[next_level]
-
-    try:
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT level FROM autocollectors WHERE user_id = ?", (user_id,)
-            ) as c:
-                row = await c.fetchone()
-            if not row or row[0] != level:
-                raise ValueError("Данные изменились, попробуй снова.")
-
-            cur = await bot.db.execute(
-                "UPDATE players SET gems = gems - ? "
-                "WHERE user_id = ? AND gems >= ?",
-                (price, user_id, price),
-            )
-            if cur.rowcount == 0:
-                raise ValueError(f"Нужно 💎 {price}.")
-
-            await bot.db.execute(
-                "UPDATE autocollectors SET level = ? WHERE user_id = ?",
-                (next_level, user_id),
-            )
-    except ValueError as e:
-        return False, f"❌ {e}"
-
-    return True, f"✅ Автосборщик улучшен до {next_level} ур.! Теперь собирает раз в {interval} ч."
-
-
-async def get_user_pets(user_id: int) -> list:
-    """Список (pet_id, level, last_fed) всех питомцев игрока."""
-    async with bot.db.execute(
-        "SELECT pet_id, level, last_fed FROM user_pets_v2 WHERE user_id = ?", (user_id,)
-    ) as c:
-        return await c.fetchall()
 
 def title_effect_bonus(title_name: str | None, effect_type: str) -> float:
     """Бонус титула по названию без обращения к БД."""
