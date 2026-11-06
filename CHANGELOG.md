@@ -177,6 +177,9 @@
 - Coverage slice 73: added swap/craft branches, clan confirms/invites/menus,
   backup/close/autocollector errors, settings modal, raid guards and misc
   view/open helpers. Coverage reached **91%**.
+- Coverage slice 74: added generic view/button and modal probes across all
+  single- and multi-argument UI classes, covering happy paths and guard
+  branches. Coverage reached **96%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
