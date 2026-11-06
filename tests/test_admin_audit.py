@@ -39,9 +39,45 @@ def test_admin_log_has_guild_and_setting_audit():
                 row = await c.fetchone()
             assert row and row[0] == 77, row
             assert "tax_rate=0.03" in row[2], row
+
+            rows, total, page, total_pages = await m.get_admin_logs_page(
+                77, 0, 10
+            )
+            assert total >= 2
+            assert page == 0 and total_pages >= 1
+            assert rows and rows[0][2] == "setting_change"
         finally:
             m._CURRENT_GUILD_ID.reset(token_guild)
             m._CURRENT_ACTOR_ID.reset(token_actor)
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_admin_logs_pagination_and_global_fallback():
+    async def run():
+        db = await _init()
+        try:
+            for target_id in range(15):
+                await m.log_admin_action(
+                    1, target_id, "bulk_action", "", guild_id=None
+                )
+
+            rows, total, page, total_pages = await m.get_admin_logs_page(
+                None, 99, 10
+            )
+            assert total == 15
+            assert total_pages == 2
+            assert page == 1
+            assert len(rows) == 5
+
+            first_rows, _, first_page, _ = await m.get_admin_logs_page(
+                None, -5, 10
+            )
+            assert first_page == 0
+            assert len(first_rows) == 10
+        finally:
             await db.close()
             m.bot.db = None
 
