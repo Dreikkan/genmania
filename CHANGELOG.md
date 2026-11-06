@@ -64,6 +64,8 @@
   (war declaration, attacks, cooldowns and rewards).
 - Refactor slice 19: extended `gen_mania.repositories.inventory`
   with item placement and mailbox compensation.
+- Refactor slice 20: extracted `gen_mania.services.market_orders`
+  (buy/sell, order matching, limits, cancel and expiry).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
