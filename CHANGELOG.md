@@ -112,6 +112,8 @@
   `gen_mania.services.bank`.
 - Refactor slice 43: moved the prestige overview embed into
   `gen_mania.services.prestige`.
+- Refactor slice 44: moved the clan-war embed into
+  `gen_mania.services.clan_wars`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.

@@ -1,7 +1,9 @@
 import asyncio
+import datetime
 import importlib.util
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import aiosqlite
 
@@ -62,6 +64,54 @@ def test_clan_browser_and_applications():
 
             ok, message = await m.decide_clan_application(app_id, True, 1)
             assert not ok and "обработана" in message.lower(), message
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_clan_war_embed_sides():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute(
+                "INSERT INTO clans (id, name, leader_id, treasury, bonus) "
+                "VALUES (1, 'Alpha', 1, 1000, 0.2), "
+                "(2, 'Beta', 2, 500, 0.1)"
+            )
+            await db.commit()
+            started = (
+                datetime.datetime.now() - datetime.timedelta(hours=1)
+            ).isoformat()
+            war = (
+                7,
+                1,
+                2,
+                started,
+                900,
+                700,
+                1000,
+                1000,
+                50,
+                40,
+            )
+            own = await m.build_clan_war_embed(
+                SimpleNamespace(), war, 1
+            )
+            assert "Клановая война #7" in own.title
+            assert "Alpha" in own.description
+            assert "Beta" in own.description
+            own_text = "\n".join(field.value for field in own.fields)
+            assert "900/1000" in own_text
+
+            enemy_view = await m.build_clan_war_embed(
+                SimpleNamespace(), war, 2
+            )
+            enemy_text = "\n".join(
+                field.value for field in enemy_view.fields
+            )
+            assert "700/1000" in enemy_text
         finally:
             await db.close()
             m.bot.db = None

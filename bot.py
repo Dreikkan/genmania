@@ -4795,13 +4795,20 @@ CLAN_WAR_RUNTIME.configure(
     add_clan_xp_getter=lambda: add_clan_xp,
     clan_quest_getter=lambda: update_clan_quest,
     parse_time_getter=lambda: _parse_market_datetime,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
     declare_cost=CLAN_WAR_DECLARE_COST,
     reward=CLAN_WAR_REWARD,
     attack_cooldown_hours=CLAN_WAR_ATTACK_COOLDOWN_HOURS,
     damage_rate=CLAN_WAR_DAMAGE_RATE,
+    war_duration_hours=CLAN_WAR_DURATION_HOURS,
     logger=log,
 )
-start_clan_war, attack_clan_war = make_clan_war_layer(CLAN_WAR_RUNTIME)
+(
+    start_clan_war,
+    attack_clan_war,
+    build_clan_war_embed,
+) = make_clan_war_layer(CLAN_WAR_RUNTIME)
 
 CLAN_APPLICATION_RUNTIME = ClanApplicationRuntime()
 CLAN_APPLICATION_RUNTIME.configure(
@@ -6663,72 +6670,6 @@ async def build_clan_inventory_embed(clan) -> discord.Embed:
     for start in range(0, 36, width):
         row_items = [items.get(slot, "⬛") for slot in range(start, start + width)]
         embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
-    embed = await fix_embed_emojis(embed)
-    return embed
-
-
-async def build_clan_war_embed(interaction: discord.Interaction, war, clan_id: int) -> discord.Embed:
-    (war_id, c1, c2, start_time, c1_hp, c2_hp,
-     c1_max, c2_max, c1_dmg, c2_dmg) = war
-
-    async with bot.db.execute(
-        "SELECT id, name FROM clans WHERE id IN (?, ?)", (c1, c2)
-    ) as c:
-        names = {r[0]: r[1] for r in await c.fetchall()}
-
-    own_id = clan_id
-    enemy_id = c2 if clan_id == c1 else c1
-    own_name = names.get(own_id, f"Клан {own_id}")
-    enemy_name = names.get(enemy_id, f"Клан {enemy_id}")
-
-    if clan_id == c1:
-        own_hp, own_max = c1_hp or 0, c1_max or 1
-        enemy_hp, enemy_max = c2_hp or 0, c2_max or 1
-        own_dmg, enemy_dmg = c1_dmg or 0, c2_dmg or 0
-    else:
-        own_hp, own_max = c2_hp or 0, c2_max or 1
-        enemy_hp, enemy_max = c1_hp or 0, c1_max or 1
-        own_dmg, enemy_dmg = c2_dmg or 0, c1_dmg or 0
-
-    def hp_bar(current: int, maximum: int) -> str:
-        pct = max(0.0, min(1.0, current / max(1, maximum)))
-        filled = int(pct * 10)
-        return "🟩" * filled + "⬛" * (10 - filled)
-
-    end = datetime.datetime.fromisoformat(start_time) + datetime.timedelta(
-        hours=CLAN_WAR_DURATION_HOURS
-    )
-    left = max(0, int((end - datetime.datetime.now()).total_seconds()))
-    hours = left // 3600
-    minutes = (left % 3600) // 60
-
-    embed = BotEmbed(
-        title=f"⚔️ Клановая война #{war_id}",
-        description=(
-            f"**{own_name}** против **{enemy_name}**\n"
-            f"До конца: **{hours} ч {minutes} мин**"
-        ),
-        color=0xe74c3c,
-    )
-    embed.add_field(
-        name=f"🏰 {own_name}",
-        value=f"HP: **{own_hp}/{own_max}**\n{hp_bar(own_hp, own_max)}\nУрон: **{own_dmg}**",
-        inline=False,
-    )
-    embed.add_field(
-        name=f"🏴 {enemy_name}",
-        value=f"HP: **{enemy_hp}/{enemy_max}**\n{hp_bar(enemy_hp, enemy_max)}\nУрон: **{enemy_dmg}**",
-        inline=False,
-    )
-    embed.add_field(
-        name="Правила",
-        value=(
-            f"• Одна атака раз в **{CLAN_WAR_ATTACK_COOLDOWN_HOURS} ч**\n"
-            f"• Урон — около **{int(CLAN_WAR_DAMAGE_RATE * 100)}%** мощи\n"
-            f"• Победитель забирает 🪙 **{CLAN_WAR_REWARD}** в сундук"
-        ),
-        inline=False,
-    )
     embed = await fix_embed_emojis(embed)
     return embed
 
