@@ -156,6 +156,9 @@
   bank, auction, shop, quest and craft UI branch tests.
 - Coverage slice 66: added background task wrappers, giveaway helpers,
   clan/admin open helpers and status-role removal tests.
+- Coverage slice 67: added clan flows, daily/member helpers, SafeView/AdminView,
+  notifications, pets/lock/autocollector, shop and extra callback tests.
+  Coverage reached **85%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
