@@ -118,6 +118,8 @@
   `gen_mania.services.guild_access`.
 - Refactor slice 46: moved the PvP battle-log embed into
   `gen_mania.services.pvp`.
+- Refactor slice 47: moved the raid-party embed into
+  `gen_mania.services.raid_combat`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.

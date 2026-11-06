@@ -4975,15 +4975,26 @@ RAID_COMBAT_RUNTIME.configure(
     achievements_getter=lambda: check_achievements,
     season_xp_getter=lambda: add_season_xp,
     season_xp_amount_getter=lambda: season_xp_amount,
+    party_getter=lambda: get_raid_party_by_id,
+    party_member_ids_getter=lambda: party_member_ids,
+    raid_cooldown_getter=lambda: get_raid_cooldown_seconds,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
     group_synergy=RAID_GROUP_SYNERGY,
     min_target_power_ratio=RAID_MIN_TARGET_POWER_RATIO,
     target_shield_hours=RAID_TARGET_SHIELD_HOURS,
     daily_loss_cap=RAID_DAILY_LOSS_CAP,
     loot_rate=RAID_LOOT_RATE,
     cooldown_seconds=3600,
+    party_max_members=RAID_PARTY_MAX,
+    party_ttl_minutes=RAID_PARTY_TTL_MINUTES,
     logger=log,
 )
-perform_raid, finalize_raid = make_raid_combat_layer(RAID_COMBAT_RUNTIME)
+(
+    perform_raid,
+    finalize_raid,
+    build_raid_party_embed,
+) = make_raid_combat_layer(RAID_COMBAT_RUNTIME)
 
 TOP_EXCLUSION_RUNTIME = TopExclusionRuntime()
 TOP_EXCLUSION_RUNTIME.configure(
@@ -12190,69 +12201,6 @@ async def send_raid_result(interaction: discord.Interaction, result: dict):
     except discord.HTTPException:
         return
     asyncio.create_task(delete_message_later(message, PUBLIC_MESSAGE_DELETE_SECONDS))
-
-
-async def build_raid_party_embed(party_id: int, viewer_id: int):
-    party = await get_raid_party_by_id(party_id)
-    if not party:
-        return None
-
-    members = party_member_ids(party)
-    powers = {}
-    for uid in members:
-        powers[uid] = await get_combat_power(uid)
-
-    lines = []
-    for uid in members:
-        crown = "👑 " if uid == party[1] else ""
-        cooldown = await get_raid_cooldown_seconds(uid)
-        status = f"⏳ ~{max(1, cooldown // 60 + 1)} мин." if cooldown else "✅ готов"
-        lines.append(f"{crown}<@{uid}> — {powers[uid]} мощи · {status}")
-
-    total_power = sum(powers.values())
-    if len(members) > 1:
-        total_power = int(
-            total_power * (1 + RAID_GROUP_SYNERGY * (len(members) - 1))
-        )
-
-    async with bot.db.execute(
-        "SELECT COUNT(*) FROM raid_party_invites WHERE party_id = ?", (party_id,)
-    ) as c:
-        pending_invites = (await c.fetchone())[0] or 0
-
-    is_leader = party[1] == viewer_id
-    embed = BotEmbed(
-        title=f"{get_emoji('_coop')} Отряд",
-        description=(
-            "Ты лидер отряда. Приглашай игроков и начинай рейд."
-            if is_leader
-            else "Ты участник отряда. Лидер приглашает игроков и начинает рейд."
-        ),
-        color=0xe74c3c,
-    )
-    embed.add_field(name="Состав", value="\n".join(lines), inline=False)
-
-    power_text = f"**{total_power}**"
-    if len(members) > 1:
-        synergy = int(round(RAID_GROUP_SYNERGY * 100 * (len(members) - 1)))
-        power_text += f"\nСинергия: +{synergy}%"
-    embed.add_field(
-        name="Мощь отряда", value=power_text, inline=False
-    )
-    embed.add_field(
-        name="Свободные места",
-        value=f"{RAID_PARTY_MAX - len(members)} из {RAID_PARTY_MAX}",
-        inline=True,
-    )
-    embed.add_field(
-        name="Приглашения",
-        value=str(pending_invites),
-        inline=True,
-    )
-    embed.set_footer(
-        text=f"Отряд распадается после {RAID_PARTY_TTL_MINUTES} минут бездействия."
-    )
-    return embed
 
 
 async def open_raid_menu(interaction: discord.Interaction, author_id: int):
