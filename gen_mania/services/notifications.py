@@ -20,13 +20,16 @@ class NotificationRuntime:
         self._parse_db_time_getter: Callable[[], Callable] = lambda: None
         self._price_formatter: Callable[[int], str] = str
         self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_getter: Callable[[], Callable] = lambda: None
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self._now_getter: Callable[[], Any] = datetime.datetime.now
         self.notification_types: dict = {}
         self.cooldown_hours: dict = {}
         self.pet_max_level = 10
         self.pet_feed_cooldown_hours = 6
+        self.pet_types: dict = {}
         self.autocollect_levels: dict = {}
+        self.max_sent_per_cycle = 5000
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -39,13 +42,16 @@ class NotificationRuntime:
         parse_db_time_getter: Callable[[], Callable],
         price_formatter: Callable[[int], str],
         embed_factory: Callable[..., Any],
+        emoji_getter: Callable[[], Callable],
         emoji_fixer: Callable[[Any], Any],
         now_getter: Callable[[], Any],
         notification_types: dict,
         cooldown_hours: dict,
         pet_max_level: int,
         pet_feed_cooldown_hours: int,
+        pet_types: dict,
         autocollect_levels: dict,
+        max_sent_per_cycle: int,
         logger: logging.Logger,
     ) -> None:
         self._db_getter = db_getter
@@ -55,13 +61,16 @@ class NotificationRuntime:
         self._parse_db_time_getter = parse_db_time_getter
         self._price_formatter = price_formatter
         self._embed_factory = embed_factory
+        self._emoji_getter = emoji_getter
         self._emoji_fixer = emoji_fixer
         self._now_getter = now_getter
         self.notification_types = notification_types
         self.cooldown_hours = cooldown_hours
         self.pet_max_level = pet_max_level
         self.pet_feed_cooldown_hours = pet_feed_cooldown_hours
+        self.pet_types = pet_types
         self.autocollect_levels = autocollect_levels
+        self.max_sent_per_cycle = max_sent_per_cycle
         self.logger = logger
 
     @property
@@ -89,6 +98,9 @@ class NotificationRuntime:
 
     def embed(self, **kwargs):
         return self._embed_factory(**kwargs)
+
+    def emoji(self, key: str):
+        return self._emoji_getter()(key)
 
     async def fix_emojis(self, embed):
         return await self._emoji_fixer(embed)
@@ -337,6 +349,238 @@ def make_notification_layer(runtime: NotificationRuntime):
             embed.description = "✅ Всё спокойно: срочных событий нет."
         return await runtime.fix_emojis(embed)
 
+    async def run_notification_cycle() -> int:
+        """Один проход фоновых уведомлений. Возвращает число отправок."""
+        now = runtime.now()
+        sent_count = 0
+        max_sent = runtime.max_sent_per_cycle
+
+        async with runtime.db.execute(
+            """
+            SELECT up.user_id, up.pet_id, up.last_fed, up.level
+            FROM user_pets_v2 up
+            JOIN players p ON p.user_id = up.user_id
+            WHERE p.active_pet = up.pet_id
+            """
+        ) as c:
+            active_pets = await c.fetchall()
+
+        for uid, pet_id, last_fed, level in active_pets:
+            if sent_count >= max_sent:
+                break
+            if level >= runtime.pet_max_level or not last_fed:
+                continue
+            last = datetime.datetime.fromisoformat(last_fed)
+            if (
+                now - last
+            ).total_seconds() < runtime.pet_feed_cooldown_hours * 3600:
+                continue
+
+            async with runtime.db.execute(
+                "SELECT last_sent FROM user_notifications "
+                "WHERE user_id = ? AND notif_type = 'pet_hungry'",
+                (uid,),
+            ) as c:
+                row = await c.fetchone()
+            if row and row[0]:
+                last_sent = datetime.datetime.fromisoformat(row[0])
+                if last_sent > last:
+                    continue
+
+            if not await can_send_notification(uid, "pet_hungry"):
+                continue
+
+            pet_type = runtime.pet_types.get(pet_id, {})
+            embed = runtime.embed(
+                title="🐾 Питомец голоден",
+                description=(
+                    f"{pet_type.get('emoji', '🐾')} "
+                    f"**{pet_type.get('name', pet_id)}** "
+                    f"(ур. {level}) хочет есть!\n"
+                    "Покорми его в меню «Питомцы»."
+                ),
+                color=0x9B59B6,
+            )
+            if await send_dm_notification(
+                uid, "pet_hungry", "", embed
+            ):
+                sent_count += 1
+
+        async with runtime.db.execute(
+            "SELECT user_id, last_daily, streak_days FROM players"
+        ) as c:
+            players = await c.fetchall()
+
+        for uid, last_daily, streak in players:
+            if sent_count >= max_sent:
+                break
+            if last_daily:
+                last = datetime.datetime.fromisoformat(
+                    last_daily
+                ).date()
+                if (now.date() - last).days < 1:
+                    continue
+            if not await can_send_notification(uid, "daily_ready"):
+                continue
+
+            embed = runtime.embed(
+                title="📅 Ежедневная награда доступна",
+                description=(
+                    f"Забери награду за день! Твой стрик: "
+                    f"**{streak or 0}**."
+                ),
+                color=0x3498DB,
+            )
+            if await send_dm_notification(
+                uid, "daily_ready", "", embed
+            ):
+                sent_count += 1
+
+        async with runtime.db.execute(
+            "SELECT id, seller_id, item_id, current_bidder, "
+            "current_bid, end_time FROM auctions "
+            "WHERE status = 'active'"
+        ) as c:
+            lots = await c.fetchall()
+
+        for (
+            aid,
+            seller_id,
+            item_id,
+            bidder,
+            bid,
+            end_time,
+        ) in lots:
+            if sent_count >= max_sent:
+                break
+            end = datetime.datetime.fromisoformat(end_time)
+            seconds_left = (end - now).total_seconds()
+            if not (0 < seconds_left <= 3600):
+                continue
+
+            async with runtime.db.execute(
+                "SELECT name FROM items WHERE id = ?",
+                (item_id,),
+            ) as c:
+                item_row = await c.fetchone()
+            item_name = item_row[0] if item_row else item_id
+
+            targets = set()
+            if seller_id:
+                targets.add(seller_id)
+            if bidder:
+                targets.add(bidder)
+
+            for uid in targets:
+                if sent_count >= max_sent:
+                    break
+                if not await can_send_notification(
+                    uid, "auction_soon"
+                ):
+                    continue
+                role = (
+                    "продавец"
+                    if uid == seller_id
+                    else "лидер ставки"
+                )
+                embed = runtime.embed(
+                    title="🏛️ Аукцион скоро закончится",
+                    description=(
+                        f"Лот #{aid}: **{item_name}**\n"
+                        f"Текущая ставка: 🪙 {bid}\n"
+                        f"До конца: "
+                        f"**{int(seconds_left // 60)} мин**\n"
+                        f"Ты {role}."
+                    ),
+                    color=0xF1C40F,
+                )
+                if await send_dm_notification(
+                    uid, "auction_soon", "", embed
+                ):
+                    sent_count += 1
+
+        async with runtime.db.execute(
+            "SELECT user_id, level, last_auto FROM autocollectors"
+        ) as c:
+            autocols = await c.fetchall()
+
+        for uid, level, last_auto in autocols:
+            if sent_count >= max_sent:
+                break
+            if not last_auto:
+                continue
+
+            async with runtime.db.execute(
+                "SELECT last_sent FROM user_notifications "
+                "WHERE user_id = ? AND notif_type = 'autocollect'",
+                (uid,),
+            ) as c:
+                row = await c.fetchone()
+            if row and row[0]:
+                last_sent = datetime.datetime.fromisoformat(row[0])
+                last_auto_dt = datetime.datetime.fromisoformat(
+                    last_auto
+                )
+                if last_auto_dt <= last_sent:
+                    continue
+
+            if not await can_send_notification(uid, "autocollect"):
+                continue
+
+            embed = runtime.embed(
+                title="🤖 Автосборщик собрал доход",
+                description=(
+                    f"Твой автосборщик (ур. {level}) собрал доход "
+                    f"раз в "
+                    f"{runtime.autocollect_levels.get(level, (0, 4))[1]}"
+                    f" ч.\nПоследний сбор: `{last_auto}`."
+                ),
+                color=0x2ECC71,
+            )
+            if await send_dm_notification(
+                uid, "autocollect", "", embed
+            ):
+                sent_count += 1
+
+        async with runtime.db.execute(
+            "SELECT id, clan1_id, clan2_id FROM clan_wars "
+            "WHERE status = 'active'"
+        ) as c:
+            wars = await c.fetchall()
+
+        for war_id, c1, c2 in wars:
+            if sent_count >= max_sent:
+                break
+            async with runtime.db.execute(
+                """
+                SELECT cm.user_id, cl.name FROM clan_members cm
+                JOIN clans cl ON cl.id = cm.clan_id
+                WHERE cm.clan_id IN (?, ?)
+                """,
+                (c1, c2),
+            ) as c:
+                members = await c.fetchall()
+
+            for uid, clan_name in members:
+                if sent_count >= max_sent:
+                    break
+                if not await can_send_notification(uid, "clan_war"):
+                    continue
+                embed = runtime.embed(
+                    title=f"{runtime.emoji('_raid')} Клановая война",
+                    description=(
+                        f"Твой клан **{clan_name}** участвует "
+                        f"в войне #{war_id}."
+                    ),
+                    color=0xE74C3C,
+                )
+                if await send_dm_notification(
+                    uid, "clan_war", "", embed
+                ):
+                    sent_count += 1
+
+        return sent_count
+
     return (
         get_notifications,
         set_notification,
@@ -344,4 +588,5 @@ def make_notification_layer(runtime: NotificationRuntime):
         mark_notification_sent,
         send_dm_notification,
         build_notification_center_embed,
+        run_notification_cycle,
     )
