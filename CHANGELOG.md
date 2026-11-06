@@ -76,6 +76,8 @@
   (submission, review and membership acceptance).
 - Refactor slice 25: extracted `gen_mania.services.notifications`
   (preferences, cooldowns and DM fallback).
+- Refactor slice 26: extracted `gen_mania.services.content`
+  (content validation, edits, generators and achievements).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.
