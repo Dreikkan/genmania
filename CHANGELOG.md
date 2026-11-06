@@ -78,6 +78,8 @@
   (preferences, cooldowns and DM fallback).
 - Refactor slice 26: extracted `gen_mania.services.content`
   (content validation, edits, generators and achievements).
+- Refactor slice 27: extracted `gen_mania.services.profile_ui`
+  (synthesis statistics and detailed profile embeds).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

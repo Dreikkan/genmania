@@ -90,6 +90,10 @@ from gen_mania.services.market import (
 )
 from gen_mania.services.market import parse_market_datetime as _parse_market_datetime
 from gen_mania.services.pets import PetRuntime, make_pet_layer
+from gen_mania.services.profile_ui import (
+    ProfileUiRuntime,
+    make_profile_ui_layer,
+)
 from gen_mania.services.prestige import (
     PrestigeRuntime,
     make_prestige_layer,
@@ -4391,6 +4395,30 @@ CONTENT_RUNTIME.configure(
     delete_achievement_content,
 ) = make_content_layer(CONTENT_RUNTIME)
 
+PROFILE_UI_RUNTIME = ProfileUiRuntime()
+PROFILE_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    settings_getter=lambda: get_settings,
+    accessibility_getter=lambda: is_accessibility_mode,
+    status_bonus_getter=lambda: get_status_bonus,
+    titles_getter=lambda: get_unlocked_titles,
+    pet_getter=lambda: get_active_pet,
+    autocollector_getter=lambda: get_autocollector,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    titles=TITLES,
+    title_bonuses=TITLE_BONUSES,
+    btype_names=BTYPE_NAMES,
+    button_emojis=BOT_BTN_EMOJIS,
+    pet_types=PET_TYPES,
+    autocollect_levels=AUTOCOLLECT_LEVELS,
+    castle=CASTLE,
+    logger=log,
+)
+build_stats_embed, build_user_profile_embed = make_profile_ui_layer(
+    PROFILE_UI_RUNTIME
+)
+
 AUCTION_RUNTIME = AuctionRuntime()
 AUCTION_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -8494,140 +8522,6 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     embed = await fix_embed_emojis(embed)
     return embed
 
-
-async def build_stats_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
-    custom = (await get_settings(guild_id))["custom_emojis"]
-    stats_emoji = custom.get("_stats", "📊")
-    gem = custom.get("_gem", "💎")
-
-    async with bot.db.execute("""
-        SELECT COUNT(*), SUM(success), SUM(gems_spent), SUM(catalyst_used)
-        FROM craft_log WHERE user_id = ?
-    """, (user_id,)) as c:
-        total, successes, gems_spent, catalysts_used = await c.fetchone()
-
-    if not total:
-        e = BotEmbed(
-            title=f"{stats_emoji} Статистика синтеза",
-            description="У тебя пока нет ни одного синтеза.",
-            color=0x9b59b6
-        )
-        e = await fix_embed_emojis(e)  # <--- ЗАМЕНА ЭМОДЗИ
-        return e
-
-    successes = successes or 0
-    failures = total - successes
-    gems_spent = gems_spent or 0
-    catalysts_used = catalysts_used or 0
-    winrate = (successes / total) * 100
-
-    embed = BotEmbed(title=f"{stats_emoji} Статистика — {interaction.user.name}", color=0x9b59b6)
-    embed.add_field(name="Попыток", value=str(total), inline=True)
-    embed.add_field(name="✅ Успехов", value=str(successes), inline=True)
-    embed.add_field(name="💥 Провалов", value=str(failures), inline=True)
-    embed.add_field(name="Винрейт", value=f"{winrate:.1f}%", inline=True)
-    embed.add_field(name=f"{gem} Потрачено", value=str(gems_spent), inline=True)
-    embed.add_field(name="🧪 Катализаторов", value=str(catalysts_used), inline=True)
-    
-    embed = await fix_embed_emojis(embed)  # <--- ЗАМЕНА ЭМОДЗИ
-    return embed
-
-async def build_user_profile_embed(interaction: discord.Interaction) -> discord.Embed:
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
-    settings = await get_settings(guild_id)
-    compact = await is_accessibility_mode(user_id)
-    custom = settings["custom_emojis"]
-    
-    # Получаем данные из БД
-    async with bot.db.execute("""
-        SELECT coins, gems, catalysts, total_crafts, total_successes, grid_size
-        FROM players WHERE user_id = ?
-    """, (user_id,)) as c:
-        row = await c.fetchone()
-        
-    if not row:
-        e = BotEmbed(title="❌ Профиль не найден", color=0xe74c3c)
-        e = await fix_embed_emojis(e)
-        return e
-        
-    coins, gems, catalysts, crafts, successes, grid = row
-    bonus = await get_status_bonus(user_id)
-    
-    # Считаем достижения
-    async with bot.db.execute("SELECT COUNT(*) FROM player_achievements WHERE user_id = ?", (user_id,)) as c:
-        ach_count = (await c.fetchone())[0]
-        
-    # Считаем рейды/уровни и прочее (если пока нет — ставим 0)
-    winrate = (successes / crafts * 100) if crafts > 0 else 0.0
-    
-    async with bot.db.execute(
-        "SELECT embed_color, bg_url, castle_icon FROM user_cosmetics WHERE user_id = ?", (user_id,)
-    ) as c:
-        cos = await c.fetchone()
-    cos_color = (cos[0] if cos and cos[0] else 0x3498db)
-    cos_bg = cos[1] if cos else None
-    cos_icon = cos[2] if cos else None
-
-    embed = BotEmbed(
-        title=f"{cos_icon or '👤'} Профиль — {interaction.user.name}",
-        description="Подробная информация о твоих успехах.",
-        color=cos_color
-    )
-    if cos_bg and not compact:
-        embed.set_image(url=cos_bg)
-    if not compact:
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-
-    async with bot.db.execute("SELECT title FROM players WHERE user_id = ?", (user_id,)) as c:
-        title_row = await c.fetchone()
-    title = (title_row[0] if title_row else None) or "Новичок"
-
-    unlocked_titles = await get_unlocked_titles(user_id)
-
-    # бонус активного титула
-    title_id = None
-    for tid, (name, _req) in TITLES.items():
-        if name == title:
-            title_id = tid
-            break
-    bonus_line = ""
-    if title_id:
-        btype, bval = TITLE_BONUSES.get(title_id, (None, 0.0))
-        if btype and bval > 0:
-            bonus_line = f"\n+{int(bval*100)}% {BTYPE_NAMES.get(btype, btype)}"
-
-    embed.add_field(
-        name=f"{BOT_BTN_EMOJIS.get('_title', '🏅')} Титул",
-        value=f"{title}{bonus_line}\nОткрыто: **{len(unlocked_titles)}/{len(TITLES)}**",
-        inline=True
-    )
-
-    pet = await get_active_pet(user_id)
-    if pet:
-        pid, lvl = pet
-        pt = PET_TYPES.get(pid)
-        if pt:
-            embed.add_field(
-                name=f"{pt['emoji']} Питомец",
-                value=f"{pt['name']} (ур. {lvl})",
-                inline=True
-            )
-    autoc = await get_autocollector(user_id)
-    if autoc:
-        lvl, _ = autoc
-        embed.add_field(
-            name="🤖 Автосборщик",
-            value=f"Ур. {lvl} (раз в {AUTOCOLLECT_LEVELS[lvl][1]} ч)",
-            inline=True
-        )
-    embed.add_field(name=f"{CASTLE} Энергостанция", value=f"Сетка: **{grid}** слотов\nБонус дохода: **+{int(bonus * 100)}%**", inline=True)
-    embed.add_field(name="🆔 ID", value=f"`{user_id}`", inline=True)
-
-    embed = await fix_embed_emojis(embed)
-    return embed
 
 async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
