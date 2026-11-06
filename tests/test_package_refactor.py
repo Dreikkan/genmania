@@ -34,6 +34,7 @@ from gen_mania.services.market_orders import MarketOrderRuntime
 from gen_mania.services.notifications import NotificationRuntime
 from gen_mania.services.pets import PetRuntime
 from gen_mania.services.prestige import PrestigeRuntime
+from gen_mania.services.profile_ui import ProfileUiRuntime
 from gen_mania.services.progress import ProgressRuntime
 from gen_mania.services.pvp import PvpRuntime
 from gen_mania.services.raid_combat import RaidCombatRuntime
@@ -83,6 +84,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.STATUS_RUNTIME, StatusRuntime)
     assert isinstance(m.NOTIFICATION_RUNTIME, NotificationRuntime)
     assert isinstance(m.CONTENT_RUNTIME, ContentRuntime)
+    assert isinstance(m.PROFILE_UI_RUNTIME, ProfileUiRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
