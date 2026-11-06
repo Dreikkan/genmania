@@ -98,6 +98,8 @@
   `gen_mania.repositories.players`.
 - Refactor slice 36: moved the notification center embed into
   `gen_mania.services.notifications`.
+- Refactor slice 37: moved guide sections, paging and embeds into
+  `gen_mania.services.guide`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
