@@ -66,6 +66,8 @@
   with item placement and mailbox compensation.
 - Refactor slice 20: extracted `gen_mania.services.market_orders`
   (buy/sell, order matching, limits, cancel and expiry).
+- Refactor slice 21: extracted `gen_mania.services.seasons`
+  (season XP, premium pass and reward claims).
 - Added regression tests for batch power and tax cache/map.
 - Added local dev stand scripts and isolated dev-data workflow.
 - Added GitHub Actions CI: pytest + coverage + critical ruff profile.

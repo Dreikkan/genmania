@@ -33,6 +33,7 @@ from gen_mania.services.prestige import PrestigeRuntime
 from gen_mania.services.progress import ProgressRuntime
 from gen_mania.services.pvp import PvpRuntime
 from gen_mania.services.raid_combat import RaidCombatRuntime
+from gen_mania.services.seasons import SeasonRuntime
 from gen_mania.services.taxes import TaxRuntime
 from gen_mania.services.top_exclusion import TopExclusionRuntime
 
@@ -71,6 +72,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.PRESTIGE_RUNTIME, PrestigeRuntime)
     assert isinstance(m.CLAN_WAR_RUNTIME, ClanWarRuntime)
     assert isinstance(m.MARKET_ORDER_RUNTIME, MarketOrderRuntime)
+    assert isinstance(m.SEASON_RUNTIME, SeasonRuntime)
     assert m.LEADERBOARD_RUNTIME.cache is m._top_cache
     assert isinstance(m.AUCTION_RUNTIME, AuctionRuntime)
     assert isinstance(m.BANK_RUNTIME, BankRuntime)
