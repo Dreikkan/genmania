@@ -34,7 +34,7 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
   (отряды и кулдауны), `services/giveaways.py` (награды и участие),
   `services/guide.py` (разделы путеводителя и пагинация),
   `services/progress.py` (квесты, достижения, дейлики),
-  `services/leaderboards.py` (топы и кэш),
+  `services/leaderboards.py` (топы, кэш и embed),
   `services/raid_combat.py` (бой и завершение рейдов),
   `services/top_exclusion.py` (исключение из топов),
   `services/prestige.py` (престиж), `services/clan_wars.py`
@@ -123,8 +123,8 @@ python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=50
 ruff check --select F821,F811,F401 bot.py tests gen_mania
 ```
 
-Текущий статус: **247 passed**, 67 test files.  
-Coverage `bot.py`: **58.56%**, минимальный порог — **50%**.
+Текущий статус: **248 passed**, 67 test files.  
+Coverage `bot.py`: **58.78%**, минимальный порог — **50%**.
 
 Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
 owner-only команда `/health` показывает метрики и состояние задач.
