@@ -19,6 +19,8 @@ class SeasonRuntime:
         self._emoji_getter: Callable[[], Callable] = lambda: None
         self._today_str_getter: Callable[[], Callable] = lambda: None
         self._weekend_mult_getter: Callable[[], float] = lambda: 1.0
+        self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self.month_names = ()
         self.xp_actions: dict = {}
         self.xp_base = 100
@@ -27,6 +29,8 @@ class SeasonRuntime:
         self.premium_cost_gems = 500
         self.coin = "🪙"
         self.gem = "💎"
+        self.season_total_xp_text = ""
+        self.season_xp_help_lines: tuple = ()
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -40,6 +44,10 @@ class SeasonRuntime:
         emoji_getter: Callable[[], Callable],
         today_str_getter: Callable[[], Callable],
         weekend_mult_getter: Callable[[], float],
+        embed_factory: Callable[..., Any],
+        emoji_fixer: Callable[[Any], Any],
+        season_total_xp_text: str,
+        season_xp_help_lines: tuple,
         month_names,
         xp_actions: dict,
         xp_base: int,
@@ -58,6 +66,8 @@ class SeasonRuntime:
         self._emoji_getter = emoji_getter
         self._today_str_getter = today_str_getter
         self._weekend_mult_getter = weekend_mult_getter
+        self._embed_factory = embed_factory
+        self._emoji_fixer = emoji_fixer
         self.month_names = month_names
         self.xp_actions = xp_actions
         self.xp_base = xp_base
@@ -66,6 +76,8 @@ class SeasonRuntime:
         self.premium_cost_gems = premium_cost_gems
         self.coin = coin
         self.gem = gem
+        self.season_total_xp_text = season_total_xp_text
+        self.season_xp_help_lines = season_xp_help_lines
         self.logger = logger
 
     @property
@@ -89,6 +101,12 @@ class SeasonRuntime:
 
     def emoji(self, key: str):
         return self._emoji_getter()(key)
+
+    def embed(self, **kwargs):
+        return self._embed_factory(**kwargs)
+
+    async def fix_emojis(self, embed):
+        return await self._emoji_fixer(embed)
 
     def today_str(self) -> str:
         return self._today_str_getter()()
@@ -493,6 +511,115 @@ def make_season_layer(runtime: SeasonRuntime):
         )
         return True, message, totals
 
+    async def build_season_embed(user_id: int):
+        data = await get_season_data(user_id)
+        level = data["level"]
+
+        if level >= runtime.levels:
+            progress_text = (
+                f"Уровень **{runtime.levels}/{runtime.levels}** — "
+                f"максимум\nВсего XP: **{data['xp']}**"
+            )
+        else:
+            bar = season_progress_bar(
+                data["remaining"], data["needed"]
+            )
+            progress_text = (
+                f"Уровень **{level}/{runtime.levels}**\n"
+                f"`{bar}` {data['remaining']}/{data['needed']} XP\n"
+                f"Всего XP: **{data['xp']}**"
+            )
+
+        embed = runtime.embed(
+            title=(
+                f"{runtime.emoji('_advent')} Сезон: "
+                f"{data['season_name']}"
+            ),
+            description=(
+                f"До конца сезона: **{data['days_left']} дн.**\n"
+                f"Уровень 1 — {runtime.xp_base} XP, каждый следующий "
+                f"+{runtime.xp_step} XP.\n"
+                f"Всего до {runtime.levels} уровня — "
+                f"**{runtime.season_total_xp_text} XP**."
+            ),
+            color=0x9B59B6,
+        )
+        embed.add_field(
+            name="Прогресс", value=progress_text, inline=False
+        )
+
+        event = season_event_label()
+        if event:
+            embed.add_field(name="Событие", value=event, inline=False)
+
+        embed.add_field(
+            name="XP за действия и лимиты",
+            value="\n".join(runtime.season_xp_help_lines),
+            inline=False,
+        )
+
+        next_levels = list(
+            range(
+                data["level"] + 1,
+                min(data["level"] + 5, runtime.levels) + 1,
+            )
+        )
+        if next_levels:
+            free_text = "\n".join(
+                f"Ур. {lvl}: {season_reward_text(lvl)}"
+                for lvl in next_levels
+            )
+            premium_text = "\n".join(
+                f"Ур. {lvl}: {season_reward_text(lvl, premium=True)}"
+                for lvl in next_levels
+            )
+        else:
+            free_text = "Максимальный уровень достигнут."
+            premium_text = free_text
+
+        embed.add_field(
+            name="Бесплатные награды", value=free_text, inline=True
+        )
+        embed.add_field(
+            name="Премиум-награды",
+            value=premium_text,
+            inline=True,
+        )
+
+        if data["premium"]:
+            pass_text = f"{runtime.emoji('_approve')} Активен"
+        else:
+            pass_text = (
+                f"Не куплен — {runtime.gem} "
+                f"{runtime.premium_cost_gems}"
+            )
+
+        claimable = (
+            len(data["claimable_free"])
+            + len(data["claimable_premium"])
+        )
+        if claimable:
+            pass_text += (
+                f"\nК получению: "
+                f"**{len(data['claimable_free'])}** бесплатных"
+            )
+            if data["premium"]:
+                pass_text += (
+                    f" + **{len(data['claimable_premium'])}** премиум"
+                )
+
+        embed.add_field(
+            name="Премиум-пропуск", value=pass_text, inline=False
+        )
+        embed.set_footer(
+            text=(
+                f"Сезон {data['season_id']} · "
+                f"уровень = {runtime.xp_base} + "
+                f"{runtime.xp_step}×(ур.-1) XP"
+            )
+        )
+        return await runtime.fix_emojis(embed), data
+
     return (
         current_season_id,
         current_season_name,
@@ -509,4 +636,5 @@ def make_season_layer(runtime: SeasonRuntime):
         add_season_xp,
         buy_season_premium,
         claim_season_rewards,
+        build_season_embed,
     )

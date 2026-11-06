@@ -4311,6 +4311,10 @@ SEASON_RUNTIME.configure(
     emoji_getter=lambda: get_emoji,
     today_str_getter=lambda: today_str,
     weekend_mult_getter=lambda: SEASON_WEEKEND_XP_MULT,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    season_total_xp_text=SEASON_TOTAL_XP_TEXT,
+    season_xp_help_lines=SEASON_XP_HELP_LINES,
     month_names=SEASON_MONTH_NAMES,
     xp_actions=SEASON_XP_ACTIONS,
     xp_base=SEASON_XP_BASE,
@@ -4337,6 +4341,7 @@ SEASON_RUNTIME.configure(
     add_season_xp,
     buy_season_premium,
     claim_season_rewards,
+    build_season_embed,
 ) = make_season_layer(SEASON_RUNTIME)
 
 PET_RUNTIME = PetRuntime()
@@ -7782,86 +7787,6 @@ class QuestsHubView(BaseView):
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await go_back(interaction, self.author_id, fallback="main")
-
-async def build_season_embed(user_id: int):
-    data = await get_season_data(user_id)
-    level = data["level"]
-
-    if level >= SEASON_LEVELS:
-        progress_text = (
-            f"Уровень **{SEASON_LEVELS}/{SEASON_LEVELS}** — максимум\n"
-            f"Всего XP: **{data['xp']}**"
-        )
-    else:
-        bar = season_progress_bar(data["remaining"], data["needed"])
-        progress_text = (
-            f"Уровень **{level}/{SEASON_LEVELS}**\n"
-            f"`{bar}` {data['remaining']}/{data['needed']} XP\n"
-            f"Всего XP: **{data['xp']}**"
-        )
-
-    embed = BotEmbed(
-        title=f"{get_emoji('_advent')} Сезон: {data['season_name']}",
-        description=(
-            f"До конца сезона: **{data['days_left']} дн.**\n"
-            f"Уровень 1 — {SEASON_XP_BASE} XP, каждый следующий "
-            f"+{SEASON_XP_STEP} XP.\n"
-            f"Всего до {SEASON_LEVELS} уровня — **{SEASON_TOTAL_XP_TEXT} XP**."
-        ),
-        color=0x9b59b6,
-    )
-    embed.add_field(name="Прогресс", value=progress_text, inline=False)
-
-    event = season_event_label()
-    if event:
-        embed.add_field(name="Событие", value=event, inline=False)
-
-    embed.add_field(
-        name="XP за действия и лимиты",
-        value="\n".join(SEASON_XP_HELP_LINES),
-        inline=False,
-    )
-
-    next_levels = list(
-        range(data["level"] + 1, min(data["level"] + 5, SEASON_LEVELS) + 1)
-    )
-    if next_levels:
-        free_text = "\n".join(
-            f"Ур. {lvl}: {season_reward_text(lvl)}" for lvl in next_levels
-        )
-        premium_text = "\n".join(
-            f"Ур. {lvl}: {season_reward_text(lvl, premium=True)}"
-            for lvl in next_levels
-        )
-    else:
-        free_text = "Максимальный уровень достигнут."
-        premium_text = free_text
-
-    embed.add_field(name="Бесплатные награды", value=free_text, inline=True)
-    embed.add_field(name="Премиум-награды", value=premium_text, inline=True)
-
-    if data["premium"]:
-        pass_text = f"{get_emoji('_approve')} Активен"
-    else:
-        pass_text = f"Не куплен — {GEM} {SEASON_PREMIUM_COST_GEMS}"
-
-    claimable = len(data["claimable_free"]) + len(data["claimable_premium"])
-    if claimable:
-        pass_text += (
-            f"\nК получению: **{len(data['claimable_free'])}** бесплатных"
-        )
-        if data["premium"]:
-            pass_text += f" + **{len(data['claimable_premium'])}** премиум"
-
-    embed.add_field(name="Премиум-пропуск", value=pass_text, inline=False)
-    embed.set_footer(
-        text=(
-            f"Сезон {data['season_id']} · "
-            f"уровень = {SEASON_XP_BASE} + {SEASON_XP_STEP}×(ур.-1) XP"
-        )
-    )
-    return embed, data
-
 
 async def build_season_preview_embed(
     user_id: int, page: int = 0
