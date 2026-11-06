@@ -128,6 +128,8 @@
   `gen_mania.services.sets`; coverage reached 60%.
 - Refactor slice 51: moved the hourly notification sweep into
   `gen_mania.services.notifications` and covered it with tests.
+- Coverage slice 52: added background-task, navigation, screen,
+  embed and economy-modal tests; coverage reached 65%.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
