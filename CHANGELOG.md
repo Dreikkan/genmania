@@ -126,6 +126,8 @@
   `gen_mania.services.clan_ui`.
 - Refactor slice 50: extracted set synergy calculations and embed into
   `gen_mania.services.sets`; coverage reached 60%.
+- Refactor slice 51: moved the hourly notification sweep into
+  `gen_mania.services.notifications` and covered it with tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
