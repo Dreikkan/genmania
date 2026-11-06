@@ -26,6 +26,7 @@ from gen_mania.services.analytics_ui import AnalyticsUiRuntime
 from gen_mania.services.auction import AuctionRuntime
 from gen_mania.services.bank import BankRuntime
 from gen_mania.services.clan_applications import ClanApplicationRuntime
+from gen_mania.services.clan_ui import ClanUiRuntime
 from gen_mania.services.clan_wars import ClanWarRuntime
 from gen_mania.services.content import ContentRuntime
 from gen_mania.services.giveaways import GiveawayRuntime
@@ -79,6 +80,7 @@ def test_services_use_shared_runtime_state():
     assert isinstance(m.INVENTORY_RUNTIME, InventoryRuntime)
     assert isinstance(m.MARKET_RUNTIME, MarketRuntime)
     assert isinstance(m.CLAN_RUNTIME, ClanRuntime)
+    assert isinstance(m.CLAN_UI_RUNTIME, ClanUiRuntime)
     assert isinstance(m.RAID_RUNTIME, RaidRuntime)
     assert isinstance(m.GIVEAWAY_RUNTIME, GiveawayRuntime)
     assert isinstance(m.PROGRESS_RUNTIME, ProgressRuntime)

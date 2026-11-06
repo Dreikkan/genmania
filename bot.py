@@ -65,6 +65,7 @@ from gen_mania.services.clan_applications import (
     ClanApplicationRuntime,
     make_clan_application_layer,
 )
+from gen_mania.services.clan_ui import ClanUiRuntime, make_clan_ui_layer
 from gen_mania.services.clan_wars import ClanWarRuntime, make_clan_war_layer
 from gen_mania.services.content import ContentRuntime, make_content_layer
 from gen_mania.services.giveaways import (
@@ -4815,6 +4816,28 @@ CLAN_RUNTIME.configure(
     get_active_clan_war,
 ) = make_clan_layer(CLAN_RUNTIME)
 
+CLAN_UI_RUNTIME = ClanUiRuntime()
+CLAN_UI_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
+    members_getter=lambda: get_clan_members,
+    capacity_getter=lambda: get_clan_capacity,
+    power_getter=lambda: get_clan_power,
+    level_getter=lambda: get_clan_level_info,
+    xp_per_level=CLAN_XP_PER_LEVEL,
+    max_level=CLAN_MAX_LEVEL,
+    coin=COIN,
+    page_size=10,
+    logger=log,
+)
+(
+    build_clan_embed,
+    build_clan_browser_embed,
+) = make_clan_ui_layer(CLAN_UI_RUNTIME)
+
 CLAN_WAR_RUNTIME = ClanWarRuntime()
 CLAN_WAR_RUNTIME.configure(
     db_getter=lambda: bot.db,
@@ -6308,38 +6331,6 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
         cache.add(user_id)
     embed = await fix_embed_emojis(embed)
     return embed
-
-async def build_clan_embed(interaction: discord.Interaction, clan) -> discord.Embed:
-    # clan = (id, name, leader_id, treasury, bonus, created_at)
-    c_id = clan[0]
-    name = clan[1]
-    leader_id = clan[2]
-    treasury = clan[3]
-    bonus = clan[4] if len(clan) > 4 else 0.0
-
-    members = await get_clan_members(c_id)
-    capacity = await get_clan_capacity(c_id)
-    power = await get_clan_power(c_id)
-    level, xp, bonus = await get_clan_level_info(c_id)
-    xp_need = CLAN_XP_PER_LEVEL * level
-
-    embed = BotEmbed(title=f"{get_emoji('_clan')} Клан «{name}»", color=0x9b59b6)
-    embed.add_field(name="Лидер", value=f"<@{leader_id}>", inline=True)
-    embed.add_field(
-        name="Участников", value=f"{len(members)}/{capacity}", inline=True
-    )
-    embed.add_field(name="Мощь клана", value=str(power), inline=True)
-    embed.add_field(name="Сундук", value=f"{COIN} {treasury}", inline=True)
-    embed.add_field(
-        name="Уровень",
-        value=f"**{level}/{CLAN_MAX_LEVEL}** (XP {xp}/{xp_need})",
-        inline=True,
-    )
-    embed.add_field(name="Бонус к доходу", value=f"+{int(bonus*100)}%", inline=True)
-
-    embed = await fix_embed_emojis(embed)
-    return embed
-
 
 async def build_clan_upgrades_embed(clan_id: int) -> discord.Embed:
     async with bot.db.execute(
@@ -10299,52 +10290,6 @@ class ClanInvitesView(SafeView):
         await interaction.edit_original_response(
             embed=embed, view=NoClanView(self.author_id)
         )
-
-
-async def build_clan_browser_embed(
-    page: int = 0, query: str | None = None
-) -> tuple[discord.Embed, int, list]:
-    where = ""
-    params: list = []
-    if query:
-        where = "WHERE c.name LIKE ?"
-        params.append(f"%{query}%")
-    async with bot.db.execute(
-        f"SELECT c.id, c.name, c.leader_id, c.treasury, c.bonus, "
-        f"COUNT(cm.user_id) FROM clans c "
-        f"LEFT JOIN clan_members cm ON cm.clan_id = c.id "
-        f"{where} GROUP BY c.id ORDER BY COUNT(cm.user_id) DESC, c.name ASC",
-        params,
-    ) as c:
-        rows = await c.fetchall()
-
-    page_size = 10
-    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * page_size:page * page_size + page_size]
-
-    embed = BotEmbed(
-        title="🏰 Браузер кланов",
-        description=(
-            f"Страница {page + 1}/{total_pages}"
-            + (f" · поиск: `{query}`" if query else "")
-            + "\nВыбери клан в списке и подай заявку."
-            if rows
-            else "Кланов пока нет. Создай первый!"
-        ),
-        color=0x3498db,
-    )
-    for clan_id, name, leader_id, treasury, bonus, members in chunk:
-        embed.add_field(
-            name=f"🏰 {name}",
-            value=(
-                f"Лидер: <@{leader_id}> · Участников: **{members}**\n"
-                f"Сундук: 🪙 {format_price(treasury or 0)} · "
-                f"Бонус: **+{int((bonus or 0) * 100)}%**"
-            ),
-            inline=False,
-        )
-    return embed, total_pages, chunk
 
 
 async def open_clan_browser(

@@ -46,6 +46,20 @@ def test_clan_browser_and_applications():
             embed2, _, chunk2 = await m.build_clan_browser_embed(0, "Alpha")
             assert len(chunk2) == 1
 
+            async with db.execute(
+                "SELECT id, name, leader_id, treasury, bonus "
+                "FROM clans WHERE id = 1"
+            ) as c:
+                clan = await c.fetchone()
+            clan_embed = await m.build_clan_embed(
+                SimpleNamespace(), clan
+            )
+            assert "Клан «Alpha»" in clan_embed.title
+            clan_text = "\n".join(
+                field.value for field in clan_embed.fields
+            )
+            assert "1000" in clan_text
+
             ok, message = await m.apply_to_clan(2, 1)
             assert ok, message
             ok, message = await m.apply_to_clan(2, 1)
