@@ -14,10 +14,17 @@ class BankRuntime:
         self._transaction_getter: Callable[[], Callable] = lambda: None
         self._limits_getter: Callable[[], Callable] = lambda: None
         self._compensation_getter: Callable[[], Callable] = lambda: None
+        self._embed_factory: Callable[..., Any] = lambda **kwargs: None
+        self._emoji_getter: Callable[[], Callable] = lambda: None
+        self._price_formatter: Callable[[int], str] = str
         self.ltv = 0.50
         self.loan_min = 100
         self.loan_term_days = 7
         self.loan_interest = 0.10
+        self.daily_rate = 0.02
+        self.deposit_income_hours = 24
+        self.loan_income_hours = 12
+        self.coin = "🪙"
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -27,20 +34,34 @@ class BankRuntime:
         transaction_getter: Callable[[], Callable],
         limits_getter: Callable[[], Callable],
         compensation_getter: Callable[[], Callable],
+        embed_factory: Callable[..., Any],
+        emoji_getter: Callable[[], Callable],
+        price_formatter: Callable[[int], str],
         ltv: float,
         loan_min: int,
         loan_term_days: int,
         loan_interest: float,
+        daily_rate: float,
+        deposit_income_hours: int,
+        loan_income_hours: int,
+        coin: str,
         logger: logging.Logger,
     ) -> None:
         self._db_getter = db_getter
         self._transaction_getter = transaction_getter
         self._limits_getter = limits_getter
         self._compensation_getter = compensation_getter
+        self._embed_factory = embed_factory
+        self._emoji_getter = emoji_getter
+        self._price_formatter = price_formatter
         self.ltv = ltv
         self.loan_min = loan_min
         self.loan_term_days = loan_term_days
         self.loan_interest = loan_interest
+        self.daily_rate = daily_rate
+        self.deposit_income_hours = deposit_income_hours
+        self.loan_income_hours = loan_income_hours
+        self.coin = coin
         self.logger = logger
 
     @property
@@ -56,6 +77,15 @@ class BankRuntime:
 
     async def grant_compensation(self, *args, **kwargs):
         return await self._compensation_getter()(*args, **kwargs)
+
+    def embed(self, **kwargs):
+        return self._embed_factory(**kwargs)
+
+    def emoji(self, key: str):
+        return self._emoji_getter()(key)
+
+    def format_price(self, value: int) -> str:
+        return self._price_formatter(value)
 
 
 def make_bank_layer(runtime: BankRuntime):
@@ -246,6 +276,145 @@ def make_bank_layer(runtime: BankRuntime):
                     (user_id, amount, f"{item_id} {stars}★"),
                 )
 
+    async def build_bank_embed(user_id: int):
+        deposit = await get_deposit(user_id)
+        loan = await get_loan(user_id)
+        max_deposit, max_loan = await runtime.get_bank_limits(user_id)
+        embed = runtime.embed(
+            title=f"{runtime.emoji('_bank')} Банк",
+            description=(
+                f"Вклад: **{int(runtime.daily_rate * 100)}%/день** "
+                "(сложный процент).\n"
+                f"Кредит: до **{int(runtime.ltv * 100)}%** "
+                f"стоимости залога, переплата "
+                f"**{int(runtime.loan_interest * 100)}%** за "
+                f"{runtime.loan_term_days} дней."
+            ),
+            color=0x2ECC71,
+        )
+        embed.add_field(
+            name="Лимиты",
+            value=(
+                f"Вклад: до {runtime.coin} "
+                f"**{runtime.format_price(max_deposit)}** "
+                f"({runtime.deposit_income_hours} ч дохода)\n"
+                f"Кредит: до {runtime.coin} "
+                f"**{runtime.format_price(max_loan)}** "
+                f"({runtime.loan_income_hours} ч дохода, но не больше "
+                f"{int(runtime.ltv * 100)}% залога)"
+            ),
+            inline=False,
+        )
+
+        if deposit:
+            amount, rate, start, end = deposit
+            start_dt = datetime.datetime.fromisoformat(start)
+            end_dt = datetime.datetime.fromisoformat(end)
+            days = max(
+                1, (end_dt - start_dt).total_seconds() / 86400
+            )
+            daily_rate = rate / days if days > 0 else 0
+            total_value = int(amount * ((1 + daily_rate) ** days))
+            if datetime.datetime.now() >= end_dt:
+                value_line = (
+                    f"К получению: {runtime.coin} **{total_value}** "
+                    f"(+{total_value - amount})"
+                )
+            else:
+                value_line = (
+                    f"При завершении: {runtime.coin} "
+                    f"**{total_value}** (+{total_value - amount})\n"
+                    f"Досрочно: {runtime.coin} **{amount}** "
+                    "(без процентов)"
+                )
+            embed.add_field(
+                name="Вклад",
+                value=(
+                    f"Сумма: {runtime.coin} **{amount}**\n"
+                    f"Срок: до `{end_dt.strftime('%d.%m %H:%M')}` "
+                    f"({days:.0f} дн.)\n{value_line}"
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Вклад",
+                value="Нет активного вклада.",
+                inline=False,
+            )
+
+        if loan:
+            amount, _rate, due, item_id, stars, _status = loan
+            total_due = loan_total_due(loan)
+            async with runtime.db.execute(
+                "SELECT name, emoji FROM items WHERE id = ?",
+                (item_id,),
+            ) as c:
+                item_row = await c.fetchone()
+            item_name, item_emoji = item_row or (item_id, "📦")
+            embed.add_field(
+                name="Кредит",
+                value=(
+                    f"Получено: {runtime.coin} **{amount}**\n"
+                    f"К возврату: {runtime.coin} **{total_due}**\n"
+                    f"Срок: до `{str(due)[:16]}`\n"
+                    f"Залог: {item_emoji} **{item_name}** "
+                    f"({stars or 0}★)"
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Кредит",
+                value="Нет активного кредита.",
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=(
+                "Досрочное закрытие вклада возвращает сумму "
+                "без процентов."
+            )
+        )
+        return embed, bool(deposit), bool(loan)
+
+    async def build_bank_history_embed(user_id: int):
+        async with runtime.db.execute(
+            "SELECT amount, kind, details, opened_at "
+            "FROM bank_history WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT 10",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+
+        embed = runtime.embed(
+            title=f"{runtime.emoji('_history')} История банка",
+            color=0x2ECC71,
+        )
+        if not rows:
+            embed.description = "Операций пока нет."
+            return embed
+
+        kind_names = {
+            "deposit": "вклад открыт",
+            "withdraw": "вклад закрыт",
+            "loan": "кредит получен",
+            "loan_repay": "кредит погашен",
+            "loan_default": "кредит просрочен",
+        }
+        lines = []
+        for amount, kind, details, opened_at in rows:
+            label = kind_names.get(
+                kind or "deposit", kind or "операция"
+            )
+            extra = f" · {details}" if details else ""
+            lines.append(
+                f"🪙 **{amount}** — {label}{extra}\n"
+                f"`{str(opened_at)[:16]}`"
+            )
+        embed.description = "\n\n".join(lines)
+        return embed
+
     return (
         get_deposit,
         get_loan,
@@ -254,4 +423,6 @@ def make_bank_layer(runtime: BankRuntime):
         take_bank_loan,
         repay_bank_loan,
         expire_bank_loans,
+        build_bank_embed,
+        build_bank_history_embed,
     )

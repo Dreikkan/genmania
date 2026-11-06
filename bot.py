@@ -4705,10 +4705,17 @@ BANK_RUNTIME.configure(
     transaction_getter=lambda: db_transaction,
     limits_getter=lambda: get_bank_limits,
     compensation_getter=lambda: grant_item_or_compensation,
+    embed_factory=lambda **kwargs: BotEmbed(**kwargs),
+    emoji_getter=lambda: get_emoji,
+    price_formatter=lambda value: format_price(value),
     ltv=BANK_LOAN_LTV,
     loan_min=BANK_LOAN_MIN,
     loan_term_days=BANK_LOAN_TERM_DAYS,
     loan_interest=BANK_LOAN_INTEREST,
+    daily_rate=BANK_DAILY_RATE,
+    deposit_income_hours=BANK_DEPOSIT_INCOME_HOURS,
+    loan_income_hours=BANK_LOAN_INCOME_HOURS,
+    coin=COIN,
     logger=log,
 )
 (
@@ -4719,6 +4726,8 @@ BANK_RUNTIME.configure(
     take_bank_loan,
     repay_bank_loan,
     expire_bank_loans,
+    build_bank_embed,
+    build_bank_history_embed,
 ) = make_bank_layer(BANK_RUNTIME)
 
 PVP_RUNTIME = PvpRuntime()
@@ -18139,122 +18148,6 @@ class BankWithdrawModal(discord.ui.Modal, title="Забрать вклад"):
             )
         except discord.HTTPException:
             pass
-
-async def build_bank_embed(user_id: int) -> tuple[discord.Embed, bool, bool]:
-    deposit = await get_deposit(user_id)
-    loan = await get_loan(user_id)
-    max_deposit, max_loan = await get_bank_limits(user_id)
-    embed = BotEmbed(
-        title=f"{get_emoji('_bank')} Банк",
-        description=(
-            f"Вклад: **{int(BANK_DAILY_RATE * 100)}%/день** "
-            "(сложный процент).\n"
-            f"Кредит: до **{int(BANK_LOAN_LTV * 100)}%** стоимости залога, "
-            f"переплата **{int(BANK_LOAN_INTEREST * 100)}%** за "
-            f"{BANK_LOAN_TERM_DAYS} дней."
-        ),
-        color=0x2ecc71,
-    )
-    embed.add_field(
-        name="Лимиты",
-        value=(
-            f"Вклад: до {COIN} **{format_price(max_deposit)}** "
-            f"({BANK_DEPOSIT_INCOME_HOURS} ч дохода)\n"
-            f"Кредит: до {COIN} **{format_price(max_loan)}** "
-            f"({BANK_LOAN_INCOME_HOURS} ч дохода, но не больше "
-            f"{int(BANK_LOAN_LTV * 100)}% залога)"
-        ),
-        inline=False,
-    )
-
-    if deposit:
-        amount, rate, start, end = deposit
-        start_dt = datetime.datetime.fromisoformat(start)
-        end_dt = datetime.datetime.fromisoformat(end)
-        days = max(1, (end_dt - start_dt).total_seconds() / 86400)
-        daily_rate = rate / days if days > 0 else 0
-        total_value = int(amount * ((1 + daily_rate) ** days))
-        if datetime.datetime.now() >= end_dt:
-            value_line = (
-                f"К получению: {COIN} **{total_value}** "
-                f"(+{total_value - amount})"
-            )
-        else:
-            value_line = (
-                f"При завершении: {COIN} **{total_value}** "
-                f"(+{total_value - amount})\n"
-                f"Досрочно: {COIN} **{amount}** (без процентов)"
-            )
-        embed.add_field(
-            name="Вклад",
-            value=(
-                f"Сумма: {COIN} **{amount}**\n"
-                f"Срок: до `{end_dt.strftime('%d.%m %H:%M')}` "
-                f"({days:.0f} дн.)\n{value_line}"
-            ),
-            inline=False,
-        )
-    else:
-        embed.add_field(name="Вклад", value="Нет активного вклада.", inline=False)
-
-    if loan:
-        amount, _rate, due, item_id, stars, _status = loan
-        total_due = loan_total_due(loan)
-        async with bot.db.execute(
-            "SELECT name, emoji FROM items WHERE id = ?", (item_id,)
-        ) as c:
-            item_row = await c.fetchone()
-        item_name, item_emoji = item_row or (item_id, "📦")
-        embed.add_field(
-            name="Кредит",
-            value=(
-                f"Получено: {COIN} **{amount}**\n"
-                f"К возврату: {COIN} **{total_due}**\n"
-                f"Срок: до `{str(due)[:16]}`\n"
-                f"Залог: {item_emoji} **{item_name}** ({stars or 0}★)"
-            ),
-            inline=False,
-        )
-    else:
-        embed.add_field(name="Кредит", value="Нет активного кредита.", inline=False)
-
-    embed.set_footer(text="Досрочное закрытие вклада возвращает сумму без процентов.")
-    return embed, bool(deposit), bool(loan)
-
-
-async def build_bank_history_embed(user_id: int) -> discord.Embed:
-    async with bot.db.execute(
-        "SELECT amount, kind, details, opened_at FROM bank_history "
-        "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
-        (user_id,),
-    ) as c:
-        rows = await c.fetchall()
-
-    embed = BotEmbed(
-        title=f"{get_emoji('_history')} История банка",
-        color=0x2ecc71,
-    )
-    if not rows:
-        embed.description = "Операций пока нет."
-        return embed
-
-    kind_names = {
-        "deposit": "вклад открыт",
-        "withdraw": "вклад закрыт",
-        "loan": "кредит получен",
-        "loan_repay": "кредит погашен",
-        "loan_default": "кредит просрочен",
-    }
-    lines = []
-    for amount, kind, details, opened_at in rows:
-        label = kind_names.get(kind or "deposit", kind or "операция")
-        extra = f" · {details}" if details else ""
-        lines.append(
-            f"🪙 **{amount}** — {label}{extra}\n`{str(opened_at)[:16]}`"
-        )
-    embed.description = "\n\n".join(lines)
-    return embed
-
 
 async def open_bank_view(interaction: discord.Interaction, author_id: int):
     embed, has_deposit, has_loan = await build_bank_embed(author_id)
