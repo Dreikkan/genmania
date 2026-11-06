@@ -140,6 +140,8 @@
   daily, taxes and misc modal tests; coverage reached 73%.
 - Coverage slice 57: added retention, giveaway rollback, raid invite,
   backup/reset, final admin and UI branch tests; coverage reached 75%.
+- Coverage slice 58: added admin-reset, pet switch/removal, prestige,
+  quantity purchase and remaining admin-modal tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
