@@ -4420,6 +4420,15 @@ PROFILE_UI_RUNTIME.configure(
     pet_bonus_getter=lambda: get_pet_bonus,
     title_bonus_getter=lambda: get_title_bonus,
     collection_count_getter=lambda: get_collection_count,
+    player_stats_getter=lambda: get_player_stats,
+    star_emoji_getter=lambda: get_star_emoji,
+    profile_filter=filter_profile_rows,
+    clan_getter=lambda: get_clan,
+    total_bonus_getter=lambda: get_total_bonus_percent,
+    set_details_getter=lambda: get_set_synergy_details,
+    prestige_bonus_getter=lambda: get_prestige_bonus,
+    collection_bonus_getter=lambda: get_collection_bonus,
+    emoji_getter=lambda: get_emoji,
     embed_factory=lambda **kwargs: BotEmbed(**kwargs),
     emoji_fixer=lambda embed: fix_embed_emojis(embed),
     price_formatter=lambda value: format_price(value),
@@ -4429,6 +4438,13 @@ PROFILE_UI_RUNTIME.configure(
     button_emojis=BOT_BTN_EMOJIS,
     pet_types=PET_TYPES,
     autocollect_levels=AUTOCOLLECT_LEVELS,
+    storage_filters=STORAGE_FILTERS,
+    set_definitions=SET_DEFINITIONS,
+    item_set=ITEM_SET,
+    star_bonus=STAR_BONUS,
+    rarity_names=RARITY_NAMES,
+    income_hint=INCOME_HINT,
+    page_size=PAGE_SIZE,
     castle=CASTLE,
     prestige_bonus_per_point=PRESTIGE_BONUS_PER_POINT,
     prestige_bonus_cap=PRESTIGE_BONUS_CAP,
@@ -4439,6 +4455,8 @@ PROFILE_UI_RUNTIME.configure(
     build_stats_embed,
     build_user_profile_embed,
     build_public_profile_embed,
+    build_profile_embed,
+    build_generator_details_embed,
 ) = make_profile_ui_layer(PROFILE_UI_RUNTIME)
 
 SHOP_UI_RUNTIME = ShopUiRuntime()
@@ -7100,296 +7118,6 @@ async def build_notification_center_embed(user_id: int) -> discord.Embed:
 async def build_guide_section_embed(key: str) -> discord.Embed:
     embed, _ = await build_guide_section_page(key, 0)
     return embed
-
-
-async def build_profile_embed(
-    interaction: discord.Interaction, filter_mode: str = "all"
-) -> discord.Embed:
-    user_id = interaction.user.id
-    guild_id = interaction.guild_id
-    settings = await get_settings(guild_id)
-    compact = await is_accessibility_mode(user_id)
-    filter_mode = filter_mode if filter_mode in STORAGE_FILTERS else "all"
-
-    grid_size, bonus, gems, coins = await get_player_stats(user_id, guild_id)
-
-    async with bot.db.execute("""
-        SELECT inv.slot, i.id, i.name, i.emoji, inv.stars, i.price,
-               i.rarity, COALESCE(inv.is_locked, 0)
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'profile'
-    """, (user_id,)) as c:
-        rows = await c.fetchall()
-
-    custom = settings["custom_emojis"]
-    power_rows = []
-    for slot, item_id, item_name, default_emoji, stars, price, rarity, locked in rows:
-        emoji = custom.get(item_id, default_emoji)
-        emoji = await get_star_emoji(item_id, stars, emoji)
-        power_rows.append((item_name, emoji, stars, price or 0))
-
-    visible_rows = filter_profile_rows(rows, filter_mode)
-    visible_items = {}
-    for slot, item_id, _item_name, default_emoji, stars, _price, _rarity, _locked in visible_rows:
-        emoji = custom.get(item_id, default_emoji)
-        emoji = await get_star_emoji(item_id, stars, emoji)
-        visible_items[slot] = emoji
-
-    coin = custom.get("_coin", "🪙")
-    gem = custom.get("_gem", "💎")
-    castle = custom.get("_castle", "⚡")
-
-    per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
-    parts = []
-    if per_sec_coins > 0:
-        parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
-    if per_sec_gems > 0:
-        parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
-    income_str = (
-        " | ".join(parts)
-        if parts
-        else "нет генераторов · купи первый в «Магазине»"
-    )
-
-    # --- Бонусы ---
-    status_bonus = bonus or 0.0
-
-    clan_bonus = 0.0
-    clan = await get_clan(user_id)
-    if clan:
-        clan_bonus = clan[4] or 0.0
-
-    pet_coins = await get_pet_bonus(user_id, "income_coins")
-    pet_gems = await get_pet_bonus(user_id, "income_gems")
-    pet_bonus = max(pet_coins, pet_gems)
-
-    title_coins = await get_title_bonus(user_id, "income_coins")
-    title_gems = await get_title_bonus(user_id, "income_gems")
-    title_bonus = max(title_coins, title_gems)
-
-    total_pct = await get_total_bonus_percent(user_id)
-    set_details = await get_set_synergy_details(user_id)
-
-    width = max(1, int(grid_size ** 0.5))
-    async with bot.db.execute(
-        "SELECT embed_color, bg_url, castle_icon FROM user_cosmetics WHERE user_id = ?", (user_id,)
-    ) as c:
-        cos = await c.fetchone()
-    cos_color = (cos[0] if cos and cos[0] else 0x00ff00)
-    cos_bg = cos[1] if cos else None
-    cos_icon = cos[2] if cos else None
-
-    embed = BotEmbed(
-        title=f"{cos_icon or castle} Энергостанция {interaction.user.name}",
-        color=cos_color
-    )
-    if cos_bg and not compact:
-        embed.set_image(url=cos_bg)
-    if not rows:
-        embed.description = (
-            "Энергостанция пуста. Купи первый генератор в «Магазине» — "
-            "он начнёт приносить доход."
-        )
-    if not compact:
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.add_field(name="Кошелёк", value=f"{coin} {coins} | {gem} {gems}", inline=False)
-    embed.add_field(
-        name="Доход",
-        value=f"{income_str}" if compact else f"{income_str}\n-# {INCOME_HINT}",
-        inline=False,
-    )
-    embed.add_field(name="Бонус", value=f"+{total_pct}%", inline=True)
-    total_power = await get_combat_power(user_id)
-    combat_pet = await get_pet_bonus(user_id, "combat_power")
-    combat_title = await get_title_bonus(user_id, "combat_power")
-    combat_mult = 1 + combat_pet + combat_title
-    if power_rows:
-        top_power = sorted(
-            power_rows,
-            key=lambda row: int(row[3] * (1 + row[2] * 0.5)),
-            reverse=True,
-        )[:3]
-        power_lines = [
-            f"{emoji} {name} ({stars}★) — **{int(price * (1 + stars * 0.5) * combat_mult)}**"
-            for name, emoji, stars, price in top_power
-        ]
-        power_value = f"Всего: **{total_power}**\n" + "\n".join(power_lines)
-    else:
-        power_value = f"Всего: **{total_power}**\nнет генераторов на энергостанции"
-    embed.add_field(name="⚔️ Мощь", value=power_value, inline=False)
-    autoc = await get_autocollector(user_id)
-    if autoc:
-        lvl, _ = autoc
-        embed.add_field(
-            name="🤖 Автосборщик",
-            value=f"Ур. {lvl} (раз в {AUTOCOLLECT_LEVELS[lvl][1]} ч)",
-            inline=True
-        )
-    embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
-    active_sets = [
-        f"{set_def['name']} {set_details['set_counts'][set_id]}/{len(set_def['items'])}"
-        for set_id, set_def in SET_DEFINITIONS.items()
-        if set_details["set_counts"][set_id] > 0
-    ]
-    embed.add_field(
-        name="Сеты",
-        value=(
-            f"**+{int(set_details['total'] * 100)}%**\n"
-            + (", ".join(active_sets) if active_sets else "нет активных сетов")
-        ),
-        inline=True,
-    )
-
-    # Выводим сетку по рядам (поддерживает неквадратные размеры)
-    for start in range(0, grid_size, width):
-        row_items = [
-            visible_items.get(slot, "⬛")
-            for slot in range(start, min(start + width, grid_size))
-        ]
-        embed.add_field(name="\u200b", value="  ".join(row_items), inline=False)
-    if rows and not visible_rows:
-        embed.description = (
-            "По выбранному фильтру ничего нет. "
-            f"Фильтр: **{STORAGE_FILTERS[filter_mode]}**."
-        )
-    embed.set_footer(
-        text=(
-            f"Фильтр: {STORAGE_FILTERS[filter_mode]} · "
-            f"Показано {len(visible_rows)}/{len(rows)}"
-        )
-    )
-    embed = await fix_embed_emojis(embed)
-    return embed
-
-async def build_generator_details_embed(
-    interaction: discord.Interaction, page: int = 0
-) -> tuple[discord.Embed, int]:
-    user_id = interaction.user.id
-    compact = await is_accessibility_mode(user_id)
-
-    async with bot.db.execute("""
-        SELECT inv.slot, inv.item_id, inv.stars, i.name, i.emoji,
-               i.income_per_hour, i.income_gems_per_hour, i.price, i.rarity
-        FROM inventory inv
-        JOIN items i ON inv.item_id = i.id
-        WHERE inv.user_id = ? AND inv.location = 'profile'
-        ORDER BY inv.slot ASC
-    """, (user_id,)) as c:
-        rows = await c.fetchall()
-
-    embed = BotEmbed(
-        title=f"{get_emoji('_inventory')} Детали генераторов",
-        color=0x3498db,
-    )
-
-    if not rows:
-        embed.description = "У тебя нет генераторов на энергостанции."
-        return embed, 1
-
-    bonus = await get_status_bonus(user_id)
-    clan = await get_clan(user_id)
-    clan_bonus = (clan[4] or 0.0) if clan else 0.0
-    pet_coins = await get_pet_bonus(user_id, "income_coins")
-    pet_gems = await get_pet_bonus(user_id, "income_gems")
-    title_coins = await get_title_bonus(user_id, "income_coins")
-    title_gems = await get_title_bonus(user_id, "income_gems")
-    combat_pet = await get_pet_bonus(user_id, "combat_power")
-    combat_title = await get_title_bonus(user_id, "combat_power")
-    combat_mult = 1 + combat_pet + combat_title
-    prestige_bonus = await get_prestige_bonus(user_id)
-    collection_bonus = await get_collection_bonus(user_id)
-    set_details = await get_set_synergy_details(user_id)
-    set_bonus = set_details["total"]
-
-    mult_coins = (1 + bonus) * (1 + clan_bonus) * (
-        1 + pet_coins + title_coins + prestige_bonus + collection_bonus + set_bonus
-    )
-    mult_gems = (1 + bonus) * (1 + clan_bonus) * (
-        1 + pet_gems + title_gems + prestige_bonus + collection_bonus + set_bonus
-    )
-
-    details = []
-    total_coins = 0.0
-    total_gems = 0.0
-    total_power = 0
-    for slot, item_id, stars, name, default_emoji, inc_coins, inc_gems, price, rarity in rows:
-        star_mult = 1 + STAR_BONUS.get(stars, 0)
-        eff_coins = inc_coins * star_mult * 3600 * mult_coins
-        eff_gems = inc_gems * star_mult * 3600 * mult_gems
-        gen_power = int((price or 0) * (1 + stars * 0.5) * combat_mult)
-        total_coins += eff_coins
-        total_gems += eff_gems
-        total_power += gen_power
-        set_name = SET_DEFINITIONS.get(ITEM_SET.get(item_id), {}).get("name", "—")
-        details.append(
-            (slot, name, default_emoji, stars, rarity, eff_coins, eff_gems, set_name, gen_power)
-        )
-
-    page_size = PAGE_SIZE
-    total_pages = max(1, (len(details) + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    chunk = details[page * page_size:page * page_size + page_size]
-
-    embed.description = (
-        f"Страница {page + 1}/{total_pages}. "
-        "Доход с учётом звёзд и всех бонусов (статус, клан, питомец, титул, престиж, коллекция, сеты)."
-        + ("" if compact else f"\n-# {INCOME_HINT}")
-    )
-
-    for slot, name, default_emoji, stars, rarity, eff_coins, eff_gems, set_name, gen_power in chunk:
-        star_str = f"{stars}★" if stars > 0 else "—"
-        inc_str = f"🪙 {eff_coins:.2f}/час"
-        if eff_gems > 0:
-            inc_str += f" | 💎 {eff_gems:.4f}/час"
-        embed.add_field(
-            name=f"Слот {slot}: {default_emoji} {name} ({star_str})"[:256],
-            value=(
-                f"{RARITY_NAMES.get(rarity, rarity)}\n"
-                f"{inc_str}\n⚔️ Мощь: **{gen_power}**\nСет: {set_name}"
-            ),
-            inline=False,
-        )
-
-    set_lines = []
-    for set_id, set_def in SET_DEFINITIONS.items():
-        count = set_details["set_counts"].get(set_id, 0)
-        if count <= 0:
-            continue
-        _, bonus = set_details["set_tiers"].get(set_id, (0, 0.0))
-        set_lines.append(
-            f"{set_def['emoji']} {set_def['name']}: {count}/{len(set_def['items'])}"
-            f" (+{int(bonus * 100)}%)"
-        )
-    if set_lines:
-        embed.add_field(
-            name="Синергия сетов",
-            value=(
-                "Сеты: +{s}%\nСоседство: {p} пар → +{a}%\n"
-                "Этажи: {r} → +{f}%\n**Итого: +{t}%**"
-            ).format(
-                s=int(set_details["set_bonus"] * 100),
-                p=set_details["adjacency_pairs"],
-                a=int(set_details["adjacency_bonus"] * 100),
-                r=set_details["full_rows"],
-                f=int(set_details["floor_bonus"] * 100),
-                t=int(set_details["total"] * 100),
-            ),
-            inline=False,
-        )
-        embed.add_field(name="Наборы", value="\n".join(set_lines), inline=False)
-
-    embed.add_field(
-        name="💰 Итого по энергостанции",
-        value=(
-            f"🪙 {total_coins:.2f}/час | 💎 {total_gems:.4f}/час\n"
-            f"⚔️ Мощь: **{total_power}**"
-        ),
-        inline=False,
-    )
-    embed.set_footer(text=f"Генераторов: {len(details)} | Доход на слот — в каждой строке")
-    embed = await fix_embed_emojis(embed)
-    return embed, total_pages
 
 
 async def build_storage_embed(

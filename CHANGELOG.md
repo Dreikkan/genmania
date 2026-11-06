@@ -92,6 +92,8 @@
   (admin action log and paginated log reader).
 - Refactor slice 33: extended `gen_mania.services.profile_ui`
   with the public/espionage profile embed.
+- Refactor slice 34: moved station and generator-detail embeds
+  into `gen_mania.services.profile_ui`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
