@@ -122,6 +122,8 @@
   `gen_mania.services.raid_combat`.
 - Refactor slice 48: extracted advent state, day opening and calendar
   embed into `gen_mania.services.advent`.
+- Refactor slice 49: extracted clan overview and browser embeds into
+  `gen_mania.services.clan_ui`.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
