@@ -144,6 +144,7 @@
   quantity purchase and remaining admin-modal tests.
 - Coverage slice 59: added season premium, giveaway join, star upgrade,
   mass ops, clan detail, clan war attack and remaining UI tests.
+- Coverage slice 60: added upgrade/raid/auction/duel/clan error-path tests.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
