@@ -64,9 +64,32 @@ python bot.py
 `DATA_DIR` — постоянная папка для `castle.db`, бэкапов и `bot.log`.
 Не коммить `.env`, базу и бэкапы.
 
-При деплое нужно загружать **и `bot.py`, и пакет `gen_mania/`**.
-Если хостинг принимает только один файл, используйте старую сборку
-до отдельного build-step.
+## Деплой на Bothost
+
+Загружать нужно **и `bot.py`, и пакет `gen_mania/`**.
+В корне лежит `bothost.json`:
+
+```json
+{
+  "main": "bot.py",
+  "language": "python",
+  "python_version": "3.11"
+}
+```
+
+Для Git-деплоя подключите репозиторий к Bothost и выберите ветку `main`.
+Для загрузки архивом положите в `.zip`/`.tar.gz`:
+
+- `bot.py`;
+- `gen_mania/`;
+- `requirements.txt`;
+- `bothost.json`.
+
+Не включайте в архив `.git/`, `tests/`, `dev/data/`, `__pycache__/`,
+`bot_backup_*.py` и `bot_changes_*.diff`.
+В Bothost задайте `DATA_DIR=/app/data` и `DISCORD_BOT_TOKEN`.
+База и бэкапы должны оставаться в `/app/data`, иначе они потеряются
+при перезапуске.
 
 ## Dev-стенд
 
