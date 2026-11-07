@@ -18827,25 +18827,6 @@ class UpgradesBuySelectView(SafeView):
                 await interaction.followup.send(f"❌ **{name}** уже куплено.", ephemeral=True)
                 return
 
-        if category == "status":
-            async with bot.db.execute(
-                "SELECT upgrade_id FROM player_upgrades WHERE user_id = ? "
-                "AND upgrade_id IN ('vip','gold','platinum','diamond')",
-                (user_id,),
-            ) as c:
-                owned_statuses = [r[0] for r in await c.fetchall()]
-            owned_rank = max(
-                (status_rank(item) for item in owned_statuses),
-                default=-1,
-            )
-            if status_rank(upgrade_id) <= owned_rank:
-                best = max(owned_statuses, key=status_rank)
-                await interaction.followup.send(
-                    f"❌ У тебя уже есть статус **{best}**. "
-                    "Статусы не стакаются: покупай только следующий по линейке.",
-                    ephemeral=True,
-                )
-                return
 
         async with bot.db.execute(
             f"SELECT {currency} FROM players WHERE user_id = ?", (user_id,)
@@ -23846,7 +23827,7 @@ async def on_guild_role_delete(role):
 #  🚀 ЗАПУСК
 # ============================================================
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

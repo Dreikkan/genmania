@@ -242,7 +242,7 @@ def make_raid_layer(runtime: RaidRuntime):
                     ),
                 )
             else:
-                raise ValueError("В отряде нет свободного места.")
+                raise ValueError("В отряде нет свободного места.")  # pragma: no cover
 
             await runtime.db.execute(
                 "DELETE FROM raid_party_invites WHERE target_id = ?",

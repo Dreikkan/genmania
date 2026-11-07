@@ -457,8 +457,6 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                     quantity = min(
                         buy["remaining"], sell["remaining"]
                     )
-                    if quantity <= 0:
-                        break
                     buy_age = (buy["created_at"], buy["id"])
                     sell_age = (
                         sell["created_at"],

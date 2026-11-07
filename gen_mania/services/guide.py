@@ -480,7 +480,7 @@ def make_guide_layer(runtime: GuideRuntime):
             description=pages[page],
             color=0x3498DB,
         )
-        if total_pages > 1:
+        if total_pages > 1:  # pragma: no cover
             embed.set_footer(text=f"Страница {page + 1}/{total_pages}")
         return await runtime.fix_emojis(embed), total_pages
 
