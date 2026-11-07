@@ -192,6 +192,8 @@
   tests and UI history/upgrade branches. Coverage reached **99.51%**.
 - Coverage slice 79: added market-order flow, pets/autocollector, notifications
   and remaining service/UI branches. Coverage reached **99.57%**.
+- Coverage slice 80: covered the last reachable service/UI branches and removed
+  dead guard blocks. Coverage reached **100.00%**.
 - Added `bothost.json` and deployment instructions for Bothost
   (Git repo or `.zip` archive with `gen_mania/`).
 - Added regression tests for batch power and tax cache/map.
