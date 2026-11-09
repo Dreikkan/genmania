@@ -175,9 +175,9 @@ def test_guards_confirm_views_and_open_helpers():
             m.build_storage_embed = storage
             try:
                 view = m.StoryQuestsView(1, "main")
-                view.back_to_main = lambda interaction: asyncio.sleep(0)
                 interaction = FakeInteraction(1)
                 await view.back.callback(interaction)
+                assert interaction.edited
 
                 view = m.StorageView(1, "profile")
                 interaction = FakeInteraction(1, ["common"])

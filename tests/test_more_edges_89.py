@@ -376,9 +376,9 @@ def test_cosmetics_clan_menu_applications_and_exchange():
                 assert interaction.edited
 
                 view = m.CosmeticsView(1, "main")
-                view.back_to_main = noop
                 interaction = FakeInteraction(1)
                 await view.back.callback(interaction)
+                assert interaction.edited
 
                 menu = m.ClanMenuView(1, 1)
                 interaction = FakeInteraction(1)

@@ -6824,7 +6824,7 @@ class PrestigeView(BaseView):
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.back_to_main(interaction)
+        await self.back_to_home(interaction)
 
 
 class PrestigeConfirmModal(discord.ui.Modal, title="Подтверждение перерождения"):
@@ -13732,7 +13732,7 @@ class DailyView(BaseView):
             )
             await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
         else:
-            await self.back_to_main(interaction)
+            await self.back_to_home(interaction)
 
 
 class StoryQuestsView(BaseView):
@@ -13764,7 +13764,7 @@ class StoryQuestsView(BaseView):
             )
             await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
         else:
-            await self.back_to_main(interaction)
+            await self.back_to_home(interaction)
 
 
 class CosmeticsView(BaseView):
@@ -13812,7 +13812,7 @@ class CosmeticsView(BaseView):
             )
             await interaction.edit_original_response(embed=embed, view=CustomizationHubView(self.author_id))
         else:
-            await self.back_to_main(interaction)
+            await self.back_to_home(interaction)
 
 
 class CosmeticColorModal(discord.ui.Modal, title="Цвет эмбеда"):
@@ -18189,7 +18189,7 @@ class QuestsView(BaseView):
             )
             await interaction.edit_original_response(embed=embed, view=QuestsHubView(self.author_id))
         else:
-            await self.back_to_main(interaction)
+            await self.back_to_home(interaction)
 
 
 class ClaimQuestSelectView(SafeView):
@@ -18874,9 +18874,9 @@ class UpgradesBuySelectView(SafeView):
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute("""
-            SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
+            SELECT id, name, price_coins as price, emoji, 'coins' as currency, size FROM grid_shop
             UNION ALL
-            SELECT id, name, price_gems as price, emoji, 'gems' as currency FROM gem_shop
+            SELECT id, name, price_gems as price, emoji, 'gems' as currency, 0 as size FROM gem_shop
         """) as c:
             rows = await c.fetchall()
         order = {
@@ -18894,9 +18894,9 @@ class UpgradesBuySelectView(SafeView):
     async def next_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         async with bot.db.execute("""
-            SELECT id, name, price_coins as price, emoji, 'coins' as currency FROM grid_shop
+            SELECT id, name, price_coins as price, emoji, 'coins' as currency, size FROM grid_shop
             UNION ALL
-            SELECT id, name, price_gems as price, emoji, 'gems' as currency FROM gem_shop
+            SELECT id, name, price_gems as price, emoji, 'gems' as currency, 0 as size FROM gem_shop
         """) as c:
             rows = await c.fetchall()
         order = {

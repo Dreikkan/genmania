@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-09
+
+- Fixed UI navigation regressions found in the button/menu audit:
+  upgrades pagination now selects the `size` column expected by the
+  shop view, and back buttons use the existing `back_to_home` helper.
+- Added regression tests for upgrades pagination and back navigation.
+- Added deterministic coverage for the weekend season XP event.
+
 ## 2026-11-05
 
 - P0: battle pass reachability rebalanced — 30 levels now achievable
