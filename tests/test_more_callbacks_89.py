@@ -175,9 +175,9 @@ def test_simple_view_callbacks():
                 assert interaction.edited
 
                 view = m.QuestsView(1, "main")
-                view.back_to_main = noop
                 interaction = FakeInteraction(1)
                 await view.back.callback(interaction)
+                assert interaction.edited
 
                 view = m.ProfileView(1)
                 interaction = FakeInteraction(1)
@@ -221,9 +221,9 @@ def test_simple_view_callbacks():
                 await view.back.callback(interaction)
                 assert interaction.edited
                 view = m.DailyView(1, "main")
-                view.back_to_main = noop
                 interaction = FakeInteraction(1)
                 await view.back.callback(interaction)
+                assert interaction.edited
             finally:
                 m.build_daily_embed = original_daily
                 m.CustomizationHubView = original_hub
