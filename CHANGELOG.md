@@ -2,6 +2,13 @@
 
 ## 2026-11-12
 
+- Large numbers are now shortened in the UI: 1 500 → `1.5K`,
+  320 000 → `320K`, 1 000 000 → `1M`, with suffixes up to `Dc`.
+  `format_price` and the content editor use the same formatter.
+- Top gem generators now produce meaningful gem income:
+  `space_gen` 10/h, `divine_gen` 20/h, `legendary_gen` 40/h.
+- `CONTENT_VERSION` bumped to 9 so existing databases receive the new
+  gem income; the content editor displays income per hour.
 - Bank base limits raised: deposits to 1 000 000 and loans to 500 000.
 - Market high-tier limits raised: order value to 10^18, daily volume
   to 5 × 10^18; item prices are capped at 10^18.
