@@ -15,11 +15,11 @@ def test_start_coins_cover_first_generator():
 
 
 def test_generator_payback_stays_reasonable():
-    # Покупаемые обычные генераторы должны окупаться быстрее 30 дней.
+    # Покупаемые обычные генераторы должны окупаться быстрее 90 дней.
     for tier in range(1, 10):
         price, income = m.generator_price_income(tier)
         payback_hours = m.round_price(price) / income
-        assert payback_hours <= 24 * 30, (tier, payback_hours)
+        assert payback_hours <= 24 * 90, (tier, payback_hours)
 
 
 def test_craft_is_cheaper_than_buying():

@@ -281,10 +281,7 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
 
     async def build_user_profile_embed(interaction):
         user_id = interaction.user.id
-        guild_id = interaction.guild_id
-        settings = await runtime.get_settings(guild_id)
         compact = await runtime.is_accessibility_mode(user_id)
-        custom = settings["custom_emojis"]
 
         async with runtime.db.execute(
             """
@@ -402,6 +399,26 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
                 f"Сетка: **{grid}** слотов\n"
                 f"Бонус дохода: **+{int(bonus * 100)}%**"
             ),
+            inline=True,
+        )
+        embed.add_field(
+            name="💰 Ресурсы",
+            value=(
+                f"{runtime.button_emojis.get('_coin', '🪙')} "
+                f"{runtime.format_price(coins)}\n"
+                f"{runtime.button_emojis.get('_gem', '💎')} {gems}\n"
+                f"🧪 {catalysts}"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🏆 Достижения",
+            value=f"**{ach_count}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="⚗️ Успешность синтеза",
+            value=f"**{winrate:.1f}%**",
             inline=True,
         )
         embed.add_field(

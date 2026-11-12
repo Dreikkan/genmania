@@ -309,9 +309,10 @@ GEN_SYNTHESIS_ONLY = frozenset({"space_gen", "divine_gen", "legendary_gen"})
 # больше дохода на слот. Синтез 2→1 компенсирует потерю слота.
 GENERATOR_BASE_PRICE = 15
 GENERATOR_BASE_INCOME_HOUR = 2.0
-GENERATOR_PRICE_MULT = 3.25
+GENERATOR_PRICE_MULT = 3.8
 GENERATOR_INCOME_MULT = 1.9
 GENERATOR_TIER_COUNT = 30
+MAX_GENERATOR_ITEM_PRICE = 10**18
 
 
 def round_price(p: float) -> int:
@@ -673,8 +674,8 @@ MARKET_ORDER_PAGE_SIZE = 10
 MARKET_ORDER_RARITIES = {"common", "uncommon", "rare", "epic", "legendary", "mythic"}
 MARKET_MAX_ACTIVE_ORDERS = 10         # одновременно активных ордеров на игрока
 MARKET_MAX_ORDER_QTY = 100            # максимум предметов в одном ордере
-MARKET_MAX_ORDER_VALUE = 10_000_000   # максимум стоимости одного ордера
-MARKET_MAX_DAILY_VOLUME = 50_000_000  # максимум суммы ордеров за сутки
+MARKET_MAX_ORDER_VALUE = 10**18   # максимум стоимости одного ордера
+MARKET_MAX_DAILY_VOLUME = 5 * 10**18  # максимум суммы ордеров за сутки
 MARKET_MAX_STEP = 0.10                # максимум изменения цены за цикл
 STARTER_SHOP_DISCOUNT = 0.50          # скидка новичку на первый генератор
 
@@ -803,11 +804,11 @@ def calculate_sell_price(price: int, stars: int = 0) -> int:
 
 def is_synthesis_only(item_id: str) -> bool:
     return item_id in GEN_SYNTHESIS_ONLY
-BANK_MAX_DEPOSIT = 50000       # базовый максимум монет на вклад
+BANK_MAX_DEPOSIT = 1_000_000       # базовый максимум монет на вклад
 BANK_DAILY_RATE = 0.02         # 2% в день (сложный процент)
 BANK_MAX_DAYS = 30
 BANK_LOAN_LTV = 0.50           # кредит до 50% стоимости залога
-BANK_LOAN_MAX = 25000          # базовый максимум кредита
+BANK_LOAN_MAX = 500_000          # базовый максимум кредита
 BANK_LOAN_MIN = 100
 BANK_LOAN_INTEREST = 0.10      # фиксированная переплата за срок
 BANK_LOAN_TERM_DAYS = 7
@@ -2599,7 +2600,7 @@ class CastleBot(commands.Bot):
                 items_data.append((
                     item_id,
                     name,
-                    round_price(price * 10),
+                    min(round_price(price * 10), MAX_GENERATOR_ITEM_PRICE),
                     income_hour / 3600,
                     emoji,
                     rarity,
@@ -2607,7 +2608,16 @@ class CastleBot(commands.Bot):
                     gem_income / 3600,
                 ))
             else:
-                items_data.append((item_id, name, round_price(price), income_hour / 3600, emoji, rarity, buyable, 0))
+                items_data.append((
+                    item_id,
+                    name,
+                    min(round_price(price), MAX_GENERATOR_ITEM_PRICE),
+                    income_hour / 3600,
+                    emoji,
+                    rarity,
+                    buyable,
+                    0,
+                ))
 
         for item in items_data:
             await self.db.execute(
@@ -24838,7 +24848,13 @@ async def on_ready():
 @bot.event
 async def on_guild_join(guild):
     _tax_rate_cache.clear()
-    await sync_guild_access(guild, reason="join")
+    try:
+        await sync_guild_access(guild, reason="join")
+    except Exception:
+        log.exception(
+            "GUILD_ACCESS: ошибка синхронизации при входе на сервер %s",
+            getattr(guild, "id", None),
+        )
 
 
 @bot.event
@@ -24858,12 +24874,56 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_guild_role_update(before, after):
-    await sync_guild_access(after.guild, reason="role_update")
+    try:
+        await sync_guild_access(after.guild, reason="role_update")
+    except Exception:
+        log.exception(
+            "GUILD_ACCESS: ошибка синхронизации роли на сервере %s",
+            getattr(after.guild, "id", None),
+        )
 
 
 @bot.event
 async def on_guild_role_delete(role):
-    await sync_guild_access(role.guild, reason="role_delete")
+    try:
+        await sync_guild_access(role.guild, reason="role_delete")
+    except Exception:
+        log.exception(
+            "GUILD_ACCESS: ошибка синхронизации удаления роли на сервере %s",
+            getattr(role.guild, "id", None),
+        )
+
+
+# ============================================================
+#  🛡️ ADMIN MODAL GUARD
+# ============================================================
+
+def _guard_admin_modal(modal_cls):
+    """Повторно проверяет права администратора при submit модалки."""
+    original = modal_cls.on_submit
+
+    async def guarded(self, interaction):
+        guild = getattr(interaction, "guild", None)
+        if guild is not None and getattr(guild, "owner_id", None) is not None:
+            if not await has_admin_access(interaction):
+                return await interaction.response.send_message(
+                    "❌ У тебя нет доступа к админ-панели.",
+                    ephemeral=True,
+                )
+        return await original(self, interaction)
+
+    guarded.__name__ = getattr(original, "__name__", "on_submit")
+    modal_cls.on_submit = guarded
+    return modal_cls
+
+
+for _modal_name, _modal_value in list(globals().items()):
+    if (
+        _modal_name.startswith("Admin")
+        and isinstance(_modal_value, type)
+        and issubclass(_modal_value, discord.ui.Modal)
+    ):
+        _guard_admin_modal(_modal_value)
 
 
 # ============================================================
