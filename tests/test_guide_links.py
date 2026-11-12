@@ -72,12 +72,13 @@ def test_guide_reflects_latest_economy():
 
             generators = (await m._guide_section_data("generators"))[1]
             assert "×3.8" in generators
-            assert "×1.9" in generators
+            assert "×3" in generators
             assert "10 💎/ч" in generators
             assert "20 💎/ч" in generators
             assert "40 💎/ч" in generators
-            assert "2–21%" in generators
+            assert "дешевле покупки" in generators
             assert "2 копии сгорают" in generators
+            assert "5★ +400%" in generators
 
             orders = (await m._guide_section_data("orders"))[1]
             assert "72 ч" in orders

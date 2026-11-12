@@ -406,7 +406,8 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
             value=(
                 f"{runtime.button_emojis.get('_coin', '🪙')} "
                 f"{runtime.format_price(coins)}\n"
-                f"{runtime.button_emojis.get('_gem', '💎')} {gems}\n"
+                f"{runtime.button_emojis.get('_gem', '💎')} "
+                f"{runtime.format_price(gems)}\n"
                 f"🧪 {catalysts}"
             ),
             inline=True,
@@ -766,7 +767,10 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
             )
         embed.add_field(
             name="Кошелёк",
-            value=f"{coin} {coins} | {gem} {gems}",
+            value=(
+                f"{coin} {runtime.format_price(coins)} | "
+                f"{gem} {runtime.format_price(gems)}"
+            ),
             inline=False,
         )
         embed.add_field(

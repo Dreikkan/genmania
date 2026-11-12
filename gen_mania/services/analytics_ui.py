@@ -28,6 +28,7 @@ class AnalyticsUiRuntime:
         self.castle = "⚡"
         self.season_levels = 30
         self.collection_bonus = 0.005
+        self._price_formatter: Callable[[int], str] = str
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -45,6 +46,7 @@ class AnalyticsUiRuntime:
         prestige_getter: Callable[[], Callable],
         collection_getter: Callable[[], Callable],
         bonus_line_getter: Callable[[], Callable],
+        price_formatter: Callable[[int], str],
         embed_factory: Callable[..., Any],
         emoji_fixer: Callable[[Any], Any],
         pet_types: dict,
@@ -66,6 +68,7 @@ class AnalyticsUiRuntime:
         self._prestige_getter = prestige_getter
         self._collection_getter = collection_getter
         self._bonus_line_getter = bonus_line_getter
+        self._price_formatter = price_formatter
         self._embed_factory = embed_factory
         self._emoji_fixer = emoji_fixer
         self.pet_types = pet_types
@@ -111,6 +114,9 @@ class AnalyticsUiRuntime:
 
     async def get_bonus_line(self, user_id: int):
         return await self._bonus_line_getter()(user_id)
+
+    def format_price(self, value: int) -> str:
+        return self._price_formatter(value)
 
     def embed(self, **kwargs):
         return self._embed_factory(**kwargs)
@@ -249,7 +255,9 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
         deposit_str = "нет"
         if deposit:
             amt, rate, end = deposit
-            deposit_str = f"🪙 {amt} ({int(rate * 100)}%)"
+            deposit_str = (
+                f"🪙 {runtime.format_price(amt)} ({int(rate * 100)}%)"
+            )
 
         async with runtime.db.execute(
             "SELECT COUNT(*) FROM tax_log WHERE user_id = ?",
@@ -292,7 +300,10 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
 
         embed.add_field(
             name="📊 Всего заработано",
-            value=f"🪙 {tce or 0}\n💎 {tge or 0}",
+            value=(
+                f"🪙 {runtime.format_price(tce or 0)}\n"
+                f"💎 {runtime.format_price(tge or 0)}"
+            ),
             inline=True,
         )
 
@@ -300,8 +311,8 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
         embed.add_field(
             name="💰 Доход",
             value=(
-                f"🪙 {income_coins_h:.2f}/час\n"
-                f"💎 {income_gems_h:.4f}/час\n"
+                f"🪙 {runtime.format_price(income_coins_h)}/час\n"
+                f"💎 {runtime.format_price(income_gems_h)}/час\n"
                 f"{total_bonus_line}"
             ),
             inline=True,
@@ -312,9 +323,9 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
             value=(
                 f"Генераторов: **{gens_total}**\n"
                 f"Доходных: **{gens_income}**\n"
-                f"Средний: 🪙 {avg_income:.2f}/час\n"
+                f"Средний: 🪙 {runtime.format_price(avg_income)}/час\n"
                 f"Сетка: **{grid_size}**\n"
-                f"⚔️ Мощь: **{power}**"
+                f"⚔️ Мощь: **{runtime.format_price(power)}**"
             ),
             inline=True,
         )
@@ -396,8 +407,8 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
                 f"Достижений: **{ach_count}**\n"
                 f"Престиж: **{prestige_points}** очк.\n"
                 f"Коллекция: **{collection_count}**\n"
-                f"Гемов: **{gems}**\n"
-                f"Монет: **{coins}**"
+                f"Гемов: **{runtime.format_price(gems)}**\n"
+                f"Монет: **{runtime.format_price(coins)}**"
             ),
             inline=True,
         )

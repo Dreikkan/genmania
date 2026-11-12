@@ -99,6 +99,8 @@ def make_guide_layer(runtime: GuideRuntime):
         EXCHANGE_FEE_RATE = config["EXCHANGE_FEE_RATE"]
         GEM_INCOME = config["GEM_INCOME"]
         GEMS_PER_COIN_RATE = config["GEMS_PER_COIN_RATE"]
+        GENERATOR_INCOME_MULT = config["GENERATOR_INCOME_MULT"]
+        GENERATOR_PRICE_MULT = config["GENERATOR_PRICE_MULT"]
         GENERATOR_TIER_COUNT = config["GENERATOR_TIER_COUNT"]
         MARKET_MAX_ACTIVE_ORDERS = config["MARKET_MAX_ACTIVE_ORDERS"]
         MARKET_MAX_DAILY_VOLUME = config["MARKET_MAX_DAILY_VOLUME"]
@@ -275,9 +277,12 @@ def make_guide_layer(runtime: GuideRuntime):
             "generators": (
                 "🏗️ Генераторы",
                 "**Покупка:** common/uncommon/rare — в «Магазине»; epic–mythic — биржа или аукцион; пространственный/божественный/легендарный — только синтез.\n\n"
-                "**Экономика тиров:** каждый следующий тир стоит ×3.8, а доход даёт ×1.9. "
+                f"**Экономика тиров:** каждый следующий тир стоит "
+                f"×{_format_plain(GENERATOR_PRICE_MULT)}, а доход даёт "
+                f"×{_format_plain(GENERATOR_INCOME_MULT)}. "
                 "Высокие тиры окупаются дольше, зато дают больше дохода на слот. "
-                "Синтез 3 копий экономит 2–21% цены следующего покупаемого тира.\n\n"
+                "Синтез 3 копий обычно дешевле покупки следующего тира, "
+                "но с ростом шанса провала выгода падает почти до нуля.\n\n"
                 f"**Синтез:** {CRAFT_COST} одинаковых 0★ → 1 выше уровнем без звезды. "
                 f"Шанс падает с тиром ({_format_percent(1.0)}% → "
                 f"{_format_percent(craft_chance_min)}%), стоимость в гемах растёт "
