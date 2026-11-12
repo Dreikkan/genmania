@@ -123,6 +123,9 @@ def make_content_layer(runtime: ContentRuntime):
                 len(SHORT_NUMBER_SUFFIXES) - 1,
             )
             scaled = scaled_value / (1000 ** tier)
+            if scaled >= 999.5 and tier < len(SHORT_NUMBER_SUFFIXES) - 1:
+                tier += 1
+                scaled = scaled_value / (1000 ** tier)
             text = (
                 f"{scaled:.0f}" if scaled >= 100 else f"{scaled:.1f}"
             )
