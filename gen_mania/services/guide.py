@@ -5,6 +5,16 @@ import logging
 from typing import Any, Callable
 
 
+def _format_percent(value: float) -> str:
+    text = f"{value * 100:.1f}"
+    return text.rstrip("0").rstrip(".")
+
+
+def _format_plain(value: float) -> str:
+    text = f"{value:.2f}"
+    return text.rstrip("0").rstrip(".")
+
+
 class GuideRuntime:
     """Адаптер между bot.py и сервисом путеводителя."""
 
@@ -64,45 +74,167 @@ def make_guide_layer(runtime: GuideRuntime):
 
     async def _guide_section_data(key: str) -> tuple[str, str]:
         config = runtime.constants
+        AUCTION_ANTI_SNIPE_SECONDS = config["AUCTION_ANTI_SNIPE_SECONDS"]
         BANK_DAILY_RATE = config["BANK_DAILY_RATE"]
+        BANK_DEPOSIT_INCOME_HOURS = config["BANK_DEPOSIT_INCOME_HOURS"]
+        BANK_LOAN_INCOME_HOURS = config["BANK_LOAN_INCOME_HOURS"]
+        BANK_LOAN_INTEREST = config["BANK_LOAN_INTEREST"]
+        BANK_LOAN_LTV = config["BANK_LOAN_LTV"]
+        BANK_LOAN_MAX = config["BANK_LOAN_MAX"]
+        BANK_LOAN_TERM_DAYS = config["BANK_LOAN_TERM_DAYS"]
         BANK_MAX_DEPOSIT = config["BANK_MAX_DEPOSIT"]
         CASTLE = config["CASTLE"]
         CATALYST_BONUS = config["CATALYST_BONUS"]
+        COLLECTION_BONUS_PER_ITEM = config["COLLECTION_BONUS_PER_ITEM"]
         CRAFT_COST = config["CRAFT_COST"]
         CRAFT_HARD_PITY = config["CRAFT_HARD_PITY"]
         CRAFT_PITY_BONUS = config["CRAFT_PITY_BONUS"]
+        CRAFT_PITY_MAX = config["CRAFT_PITY_MAX"]
+        CRAFT_SETTINGS = config["CRAFT_SETTINGS"]
         DEFAULT_TAX_RATE = config["DEFAULT_TAX_RATE"]
         DUEL_COOLDOWN_SECONDS = config["DUEL_COOLDOWN_SECONDS"]
         DUEL_MAX_BET_PCT = config["DUEL_MAX_BET_PCT"]
         DUEL_POWER_TOLERANCE = config["DUEL_POWER_TOLERANCE"]
+        EXCHANGE_DAILY_GEM_CAP = config["EXCHANGE_DAILY_GEM_CAP"]
+        EXCHANGE_FEE_RATE = config["EXCHANGE_FEE_RATE"]
+        GEM_INCOME = config["GEM_INCOME"]
+        GEMS_PER_COIN_RATE = config["GEMS_PER_COIN_RATE"]
+        GENERATOR_TIER_COUNT = config["GENERATOR_TIER_COUNT"]
+        MARKET_MAX_ACTIVE_ORDERS = config["MARKET_MAX_ACTIVE_ORDERS"]
+        MARKET_MAX_DAILY_VOLUME = config["MARKET_MAX_DAILY_VOLUME"]
+        MARKET_MAX_ORDER_QTY = config["MARKET_MAX_ORDER_QTY"]
+        MARKET_MAX_ORDER_VALUE = config["MARKET_MAX_ORDER_VALUE"]
+        MARKET_ORDER_DURATION_HOURS = config["MARKET_ORDER_DURATION_HOURS"]
+        PET_BREAKTHROUGH_EFFECT_BONUS = config[
+            "PET_BREAKTHROUGH_EFFECT_BONUS"
+        ]
+        PET_BREAKTHROUGH_LEVELS = config["PET_BREAKTHROUGH_LEVELS"]
+        PET_EFFECT_NAMES = config["PET_EFFECT_NAMES"]
+        PET_FEED_COOLDOWN_HOURS = config["PET_FEED_COOLDOWN_HOURS"]
+        PET_FEED_COST_COIN_GROWTH = config["PET_FEED_COST_COIN_GROWTH"]
+        PET_FEED_COST_COINS = config["PET_FEED_COST_COINS"]
+        PET_FEED_COST_GEM_GROWTH = config["PET_FEED_COST_GEM_GROWTH"]
+        PET_FEED_COST_GEMS = config["PET_FEED_COST_GEMS"]
+        PET_MAX_LEVEL = config["PET_MAX_LEVEL"]
+        PET_TYPES = config["PET_TYPES"]
+        PRESTIGE_BASE_REQUIREMENT = config["PRESTIGE_BASE_REQUIREMENT"]
+        PRESTIGE_BONUS_CAP = config["PRESTIGE_BONUS_CAP"]
+        PRESTIGE_BONUS_PER_POINT = config["PRESTIGE_BONUS_PER_POINT"]
+        PRESTIGE_STEP_REQUIREMENT = config["PRESTIGE_STEP_REQUIREMENT"]
         RAID_DAILY_LOSS_CAP = config["RAID_DAILY_LOSS_CAP"]
         RAID_LOOT_RATE = config["RAID_LOOT_RATE"]
         RAID_MIN_TARGET_POWER_RATIO = config[
             "RAID_MIN_TARGET_POWER_RATIO"
         ]
+        RAID_TARGET_SHIELD_HOURS = config["RAID_TARGET_SHIELD_HOURS"]
+        SEASON_PREMIUM_COST_GEMS = config["SEASON_PREMIUM_COST_GEMS"]
         SEASON_TOTAL_XP_TEXT = config["SEASON_TOTAL_XP_TEXT"]
         SEASON_XP_BASE = config["SEASON_XP_BASE"]
         SEASON_XP_STEP = config["SEASON_XP_STEP"]
+        SET_ADJACENCY_BONUS = config["SET_ADJACENCY_BONUS"]
+        SET_ADJACENCY_MAX = config["SET_ADJACENCY_MAX"]
         SET_DEFINITIONS = config["SET_DEFINITIONS"]
+        SET_FLOOR_BONUS = config["SET_FLOOR_BONUS"]
+        SET_FLOOR_MAX = config["SET_FLOOR_MAX"]
+        SET_TOTAL_MAX = config["SET_TOTAL_MAX"]
         STAR_BONUS = config["STAR_BONUS"]
+        STAR_HARD_PITY = config["STAR_HARD_PITY"]
+        STAR_PITY_BONUS = config["STAR_PITY_BONUS"]
+        STAR_PITY_MAX = config["STAR_PITY_MAX"]
+        STAR_UPGRADE = config["STAR_UPGRADE"]
+
+        star_chances = " / ".join(
+            f"{star}\u2605 {int(STAR_UPGRADE[star]['chance'] * 100)}%"
+            for star in range(1, 6)
+        )
+        craft_chance_min = min(
+            settings["chance"] for settings in CRAFT_SETTINGS.values()
+        )
+        craft_gem_max = max(
+            settings["gems"] for settings in CRAFT_SETTINGS.values()
+        )
+        max_pet_levels = min(PET_MAX_LEVEL, 10) * (
+            1
+            + PET_BREAKTHROUGH_EFFECT_BONUS
+            * len(PET_BREAKTHROUGH_LEVELS)
+        )
+        pet_lines = []
+        for pet in PET_TYPES.values():
+            effects = [(pet["effect"], pet["per_level"])]
+            effects.extend(pet.get("extra_effects", {}).items())
+            effect_text = ", ".join(
+                f"+{_format_percent(per_level)}% "
+                f"{PET_EFFECT_NAMES.get(effect, effect)}/ур."
+                for effect, per_level in effects
+            )
+            pet_lines.append(
+                f"{pet['emoji']} {pet['name']} ({pet['price_gems']} 💎) "
+                f"\u2014 {effect_text}"
+            )
+        pet_max_lines = []
+        for pet in PET_TYPES.values():
+            effects = [(pet["effect"], pet["per_level"])]
+            effects.extend(pet.get("extra_effects", {}).items())
+            effect_text = ", ".join(
+                f"+{_format_percent(per_level * max_pet_levels)}% "
+                f"{PET_EFFECT_NAMES.get(effect, effect)}"
+                for effect, per_level in effects
+            )
+            pet_max_lines.append(
+                f"{pet['emoji']} {pet['name']} \u2014 {effect_text}"
+            )
+
+        gem_income_lines = ""
+        if key == "generators":
+            gem_ids = tuple(GEM_INCOME)
+            placeholders = ",".join("?" for _ in gem_ids)
+            async with runtime.db.execute(
+                f"SELECT id, name, emoji FROM items WHERE id IN ({placeholders})",
+                gem_ids,
+            ) as c:
+                gem_rows = {
+                    row[0]: (row[1], row[2]) for row in await c.fetchall()
+                }
+            order = {item_id: index for index, item_id in enumerate(gem_ids)}
+            sorted_ids = sorted(gem_rows, key=lambda item_id: order[item_id])
+            gem_income_lines = "\n".join(
+                f"\u2022 {gem_rows[item_id][1]} {gem_rows[item_id][0]}: "
+                f"**{_format_plain(GEM_INCOME[item_id])} 💎/\u0447**"
+                for item_id in sorted_ids
+            )
 
         sections = {
             "economy": (
                 "💰 Экономика",
                 "**Валюты:**\n"
                 "🪙 Монеты — пассивный доход, дейли, квесты, продажа.\n"
-                "💎 Гемы — дейли, квесты, достижения, аукцион.\n\n"
-                "**Обмен:** прогрессивный курс, максимум 500 гемов из монет в день. 1 гем = 800 монет.\n\n"
+                "💎 Гемы — дейли, квесты, достижения, аукцион, премиум-покупки.\n\n"
+                f"**Обмен:** прогрессивный курс: чем больше монет меняешь за сутки, "
+                f"тем дороже гем ({runtime.format_price(1000)} → "
+                f"{runtime.format_price(15000)} монет за гем). "
+                f"Комиссия {int(EXCHANGE_FEE_RATE * 100)}%, "
+                f"дневной лимит {EXCHANGE_DAILY_GEM_CAP} гемов из монет. "
+                f"Обратно: 1 гем → {GEMS_PER_COIN_RATE} монет.\n\n"
                 "**Офлайн-доход:** после 2 часов ручной сбор даёт 70% дохода; "
                 "автосборщик собирает 100%. Потолка накопления больше нет.\n\n"
                 "**Гемы:** накопление не ограничено потолком.\n\n"
-                f"**Банк:** вклад до {runtime.format_price(BANK_MAX_DEPOSIT)} монет (или 24 ч дохода), "
-                f"{int(BANK_DAILY_RATE * 100)}% в день (сложный процент), срок 1–30 дней. "
-                "Кредит под залог генератора до 50% его стоимости.\n\n"
+                f"**Банк:** вклад до {runtime.format_price(BANK_MAX_DEPOSIT)} монет "
+                f"(или {BANK_DEPOSIT_INCOME_HOURS} ч дохода), "
+                f"{int(BANK_DAILY_RATE * 100)}% в день (сложный процент), срок 1–30 дней; "
+                "досрочное закрытие — без процентов.\n"
+                f"Кредит до {runtime.format_price(BANK_LOAN_MAX)} монет "
+                f"(или {BANK_LOAN_INCOME_HOURS} ч дохода) под залог генератора, "
+                f"до {int(BANK_LOAN_LTV * 100)}% его стоимости, "
+                f"переплата {int(BANK_LOAN_INTEREST * 100)}% за "
+                f"{BANK_LOAN_TERM_DAYS} дней. При просрочке залог теряется.\n\n"
                 f"**Налоги:** {int(DEFAULT_TAX_RATE * 100)}% в сутки от баланса монет "
                 "(значение задаётся в настройках гильдии). Вклады не облагаются.\n\n"
                 "**Продажа:** прямая продажа — 10% цены; быстрая продажа 0★ — "
                 "безопасно и пачкой; биржа — 70% текущей цены, исполнение по встречным ордерам.\n\n"
+                f"**Биржа:** ордера — до {MARKET_MAX_ORDER_QTY} шт., "
+                f"{MARKET_MAX_ACTIVE_ORDERS} активных, срок "
+                f"{MARKET_ORDER_DURATION_HOURS} ч; цена для магазинных "
+                "генераторов — 80–100% магазинной, для epic+ — 50–200%.\n\n"
                 "**Где смотреть:** главное меню → «Обмен валют»; «Социум» → «Банк» / «Налоги»."
             ),
             "offline": (
@@ -119,9 +251,14 @@ def make_guide_layer(runtime: GuideRuntime):
             "prestige": (
                 "🔁 Перерождение",
                 "**Что это:** сброс энергостанции ради постоянного бонуса к доходу.\n\n"
-                "**Очки:** стоимость растёт: 1-е — 150 000, 2-е — 200 000, 3-е — 250 000 и т.д. "
-                "Уже полученные очки учитываются: следующее очко всегда дороже.\n\n"
-                "**Бонус:** +5% к доходу за каждое очко. Очки сохраняются навсегда.\n\n"
+                f"**Очки:** 1-е — {runtime.format_price(PRESTIGE_BASE_REQUIREMENT)}, "
+                f"2-е — {runtime.format_price(PRESTIGE_BASE_REQUIREMENT + PRESTIGE_STEP_REQUIREMENT)}, "
+                f"3-е — {runtime.format_price(PRESTIGE_BASE_REQUIREMENT + 2 * PRESTIGE_STEP_REQUIREMENT)} "
+                f"и т.д. (каждое следующее +{runtime.format_price(PRESTIGE_STEP_REQUIREMENT)}). "
+                "Уже полученные очки учитываются.\n\n"
+                f"**Бонус:** +{_format_percent(PRESTIGE_BONUS_PER_POINT)}% к доходу "
+                f"за каждое очко, максимум +{_format_percent(PRESTIGE_BONUS_CAP)}%. "
+                "Очки сохраняются навсегда.\n\n"
                 "**Сбрасывается:** монеты, инвентарь, сетка, катализаторы, улучшения, вклад, ежедневные квесты.\n\n"
                 "**Остаётся:** гемы, питомцы, титулы, активные временные статусы, достижения, клан, косметика, сюжетные квесты, статистика.\n\n"
                 "**Где:** главное меню → «Перерождение»."
@@ -129,18 +266,35 @@ def make_guide_layer(runtime: GuideRuntime):
             "collection": (
                 "📖 Коллекция",
                 "**Что это:** все генераторы, которые ты когда-либо получал.\n\n"
-                "**Бонус:** +0.5% к доходу за каждый открытый генератор.\n\n"
-                "**Как открыть:** купить, скрафтить, получить в дейли, адвенте или на аукционе.\n\n"
+                f"**Бонус:** +{_format_percent(COLLECTION_BONUS_PER_ITEM)}% к доходу "
+                f"за каждый открытый генератор; всего {GENERATOR_TIER_COUNT} "
+                f"генераторов → максимум +{_format_percent(COLLECTION_BONUS_PER_ITEM * GENERATOR_TIER_COUNT)}%.\n\n"
+                "**Как открыть:** купить, получить синтезом, в дейли, адвенте или на аукционе.\n\n"
                 "**Где:** «Мой профиль» → «Коллекция»."
             ),
             "generators": (
                 "🏗️ Генераторы",
                 "**Покупка:** common/uncommon/rare — в «Магазине»; epic–mythic — биржа или аукцион; пространственный/божественный/легендарный — только синтез.\n\n"
-                f"**Синтез:** {CRAFT_COST} одинаковых → 1 выше уровнем без звезды. Шанс зависит от редкости (100% → 12%). "
-                f"Стоимость в гемах растёт. Катализатор +{int(CATALYST_BONUS * 100)}%, "
-                f"за каждый провал шанс растёт на {int(CRAFT_PITY_BONUS * 100)}%, "
+                "**Экономика тиров:** каждый следующий тир стоит ×3.8, а доход даёт ×1.9. "
+                "Высокие тиры окупаются дольше, зато дают больше дохода на слот. "
+                "Синтез 3 копий экономит 2–21% цены следующего покупаемого тира.\n\n"
+                f"**Синтез:** {CRAFT_COST} одинаковых 0★ → 1 выше уровнем без звезды. "
+                f"Шанс падает с тиром ({_format_percent(1.0)}% → "
+                f"{_format_percent(craft_chance_min)}%), стоимость в гемах растёт "
+                f"(0 → {runtime.format_price(craft_gem_max)}). "
+                f"При провале 2 копии сгорают, 1 возвращается. "
+                f"Катализатор +{int(CATALYST_BONUS * 100)}%, "
+                f"за каждый провал шанс растёт на {int(CRAFT_PITY_BONUS * 100)}% "
+                f"(до +{int(CRAFT_PITY_MAX * 100)}%), "
                 f"на {CRAFT_HARD_PITY}-й попытке — гарантия.\n\n"
-                f"**Звёзды:** 0–5★, нужно несколько копий. Бонус к доходу: 1★ +{int(STAR_BONUS[1] * 100)}%, 2★ +{int(STAR_BONUS[2] * 100)}%, 3★ +{int(STAR_BONUS[3] * 100)}%, 4★ +{int(STAR_BONUS[4] * 100)}%, 5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
+                f"**Гем-генераторы:**\n{gem_income_lines}\n\n"
+                f"**Звёзды:** 0–5★. Шанс: {star_chances}. "
+                f"Каждый провал даёт +{int(STAR_PITY_BONUS * 100)}% к шансу "
+                f"(до +{int(STAR_PITY_MAX * 100)}%), на {STAR_HARD_PITY}-й попытке — гарантия. "
+                "При провале сгорает 1 копия, звезда не понижается.\n"
+                f"Бонус к доходу: 1★ +{int(STAR_BONUS[1] * 100)}%, "
+                f"2★ +{int(STAR_BONUS[2] * 100)}%, 3★ +{int(STAR_BONUS[3] * 100)}%, "
+                f"4★ +{int(STAR_BONUS[4] * 100)}%, 5★ +{int(STAR_BONUS[5] * 100)}%.\n\n"
                 "**Продажа:** прямая — только `common`/`uncommon`/`rare`, 10% от цены. "
                 "Быстрая продажа 0★ — обычные/необычные/редкие и дубликаты, "
                 "звёздные и `epic`+ защищены. `epic`+ — биржа, аукцион или синтез.\n\n"
@@ -151,29 +305,42 @@ def make_guide_layer(runtime: GuideRuntime):
                 "🧩 Сеты",
                 "**Что это:** генераторы объединяются в сеты по теме.\n\n"
                 "**Бонусы:**\n"
-                "• за количество предметов сета — пороговый бонус;\n"
-                "• за соседние пары одного сета — дополнительный бонус;\n"
-                "• за заполненные ряды — бонус этажа.\n\n"
+                "• за количество предметов сета — до +6% за сет;\n"
+                f"• за соседние пары одного сета — +{_format_percent(SET_ADJACENCY_BONUS)}% "
+                f"за пару (до +{_format_percent(SET_ADJACENCY_MAX)}%);\n"
+                f"• за заполненные ряды — +{_format_percent(SET_FLOOR_BONUS)}% "
+                f"за ряд (до +{_format_percent(SET_FLOOR_MAX)}%).\n\n"
+                f"**Потолок синергии:** +{_format_percent(SET_TOTAL_MAX)}% к доходу.\n\n"
                 "**Где смотреть:** «Энергостанция» → поле «Сеты»; подробности — в профиле.\n\n"
                 "**Совет:** ставь генераторы одного сета рядом, чтобы получать больше."
             ),
             "pets": (
                 "🐾 Питомцы",
-                "**5 видов:**\n"
-                "🐱 Кот (50 💎) — +15% доход монет (база до прорыва)\n"
-                "🐶 Пёс (60 💎) — +20% шанс синтеза и +10% доход монет\n"
-                "🐲 Дракончик (120 💎) — +40% мощь\n"
-                "🔥 Феникс (150 💎) — +25% доход гемов и +10% доход монет\n"
-                "🐺 Волк (90 💎) — +20% добыча в рейдах\n\n"
-                "**Кормление:** раз в 6 ч, базовая цена 100 🪙 + 1 💎, +1 уровень. Максимум 200 ур.\n\n"
-                "**Прорывы:** 10, 25, 50, 75, 100, 125, 150, 175, 200 ур. Каждый прорыв повышает цену кормления.\n\n"
-                "**Бонус прорыва:** +10% к базовому эффекту питомца за каждый прорыв.\n\n"
+                "**5 видов (эффект за уровень):**\n"
+                + "\n".join(pet_lines)
+                + "\n\n"
+                f"**Soft cap:** после 10 ур. прямой рост останавливается. "
+                f"Каждый прорыв даёт +{_format_percent(PET_BREAKTHROUGH_EFFECT_BONUS)}% "
+                f"к эффективному уровню; максимум — "
+                f"{_format_plain(max_pet_levels)} эффективных уровней.\n\n"
+                "**Максимум эффекта на "
+                f"{PET_MAX_LEVEL} ур.:**\n"
+                + "\n".join(pet_max_lines)
+                + "\n\n"
+                f"**Кормление:** раз в {PET_FEED_COOLDOWN_HOURS} ч, "
+                f"базовая цена {PET_FEED_COST_COINS} 🪙 + "
+                f"{PET_FEED_COST_GEMS} 💎, +1 уровень. Максимум "
+                f"{PET_MAX_LEVEL} ур. За каждый прорыв цена растёт "
+                f"×{PET_FEED_COST_COIN_GROWTH} (монеты) и "
+                f"×{PET_FEED_COST_GEM_GROWTH} (гемы).\n\n"
+                "**Прорывы:** 10, 25, 50, 75, 100, 125, 150, 175, 200 ур.\n\n"
                 "**Активный:** только один, но купить можно всех.\n\n"
                 "**Где:** «Магазин» → «Питомцы» или «Мой профиль» → «Питомцы»."
             ),
             "titles": (
                 "🏅 Титулы",
-                "**21 титул**, каждый даёт **+1–3%** к доходу/синтезу/мощи/рейдам.\n\n"
+                "**21 титул**, почти каждый даёт **+1–3%** к доходу/синтезу/мощи/рейдам. "
+                "Активен только один титул.\n\n"
                 "**Примеры:**\n"
                 "«Новичок» — всем.\n"
                 "«Богач» — 10 000 монет → +2% доход.\n"
@@ -199,7 +366,8 @@ def make_guide_layer(runtime: GuideRuntime):
             "pvp": (
                 "⚔️ PvP",
                 "**Рейды:**\n"
-                "• 1–3 чел, кулдаун 1 ч; щит цели 6 ч.\n"
+                f"• 1–3 чел, кулдаун 1 ч; щит цели "
+                f"{RAID_TARGET_SHIELD_HOURS} ч.\n"
                 f"• Кража {int(RAID_LOOT_RATE * 100)}% кошелька (+бонус волка).\n"
                 f"• Дневной лимит потерь цели: {int(RAID_DAILY_LOSS_CAP * 100)}% баланса.\n"
                 f"• Нельзя атаковать цель слабее {int(RAID_MIN_TARGET_POWER_RATIO * 100)}% мощи отряда.\n"
@@ -224,7 +392,9 @@ def make_guide_layer(runtime: GuideRuntime):
                 "**Что не считается:** генераторы в хранилище, временном "
                 "хранилище и клановой сетке. Звёзды учитываются только у "
                 "генераторов на личной энергостанции.\n\n"
-                "**Бонусы:** Дракончик даёт +4% мощи за уровень, титулы "
+                f"**Бонусы:** Дракончик даёт +4% мощи за уровень "
+                f"(с soft cap, максимум +"
+                f"{_format_percent(0.04 * max_pet_levels)}%), титулы "
                 "«Звёздный лорд», «Дуэлянт», «Клановый воин» и «Охотник за "
                 "достижениями» — свои проценты.\n\n"
                 "**Где используется:** рейды, дуэли в режиме `power`, "
@@ -233,7 +403,8 @@ def make_guide_layer(runtime: GuideRuntime):
             "auction": (
                 "🏛️ Аукцион",
                 "**Лоты:** любой генератор, кроме synthesis-only, 1–72 ч.\n\n"
-                "**Ставка:** должна быть выше текущей; при ставке в последнюю минуту лот продлевается.\n\n"
+                f"**Ставка:** должна быть выше текущей; ставка в последние "
+                f"{AUCTION_ANTI_SNIPE_SECONDS // 60} мин продлевает лот.\n\n"
                 "**Buyout:** если у лота задан buyout, его можно выкупить мгновенно. "
                 "Buyout должен быть больше стартовой цены и текущей ставки.\n\n"
                 "**Комиссия:** 5% с продавца.\n\n"
@@ -256,6 +427,13 @@ def make_guide_layer(runtime: GuideRuntime):
                 "**Продажа:** предмет уходит в эскроу, при исполнении продавец получает деньги.\n\n"
                 "**Покупка:** монеты резервируются, при исполнении покупатель получает предмет.\n\n"
                 "**Отмена:** активный ордер можно отменить; эскроу/резерв возвращается.\n\n"
+                f"**Срок:** {MARKET_ORDER_DURATION_HOURS} ч.\n\n"
+                f"**Лимиты:** до {MARKET_MAX_ACTIVE_ORDERS} активных ордеров, "
+                f"до {MARKET_MAX_ORDER_QTY} предметов в одном ордере, "
+                f"стоимость ордера до {runtime.format_price(MARKET_MAX_ORDER_VALUE)}, "
+                f"дневной оборот до {runtime.format_price(MARKET_MAX_DAILY_VOLUME)}.\n\n"
+                "**Цена:** для магазинных генераторов — 80–100% магазинной, "
+                "для epic+ — 50–200% базовой цены.\n\n"
                 "**Ограничения:** торгуемые редкости, 0★, кроме synthesis-only; "
                 "исполнение частичное, приоритет цены и времени.\n\n"
                 "**Где:** «Социум» → «Биржа» → «Мои ордера»."
@@ -307,7 +485,8 @@ def make_guide_layer(runtime: GuideRuntime):
                 "**Выходные:** +50% к XP, но дневные лимиты не обходятся.\n\n"
                 "**Награды:** бесплатная линейка — монеты, гемы и предметы; "
                 "премиум — дополнительные гемы и катализаторы.\n\n"
-                "**Премиум:** покупается за гемы; награды выдаются только один раз.\n\n"
+                f"**Премиум:** {SEASON_PREMIUM_COST_GEMS} 💎; "
+                "награды выдаются только один раз.\n\n"
                 "**Сброс:** в начале нового месяца прогресс начинается заново.\n\n"
                 "**Где:** главное меню → «Сезон» или «Квесты» → «Сезон»."
             ),

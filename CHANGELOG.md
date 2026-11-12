@@ -2,6 +2,10 @@
 
 ## 2026-11-12
 
+- In-game guide actualized: bank loan limits, exchange fee and daily cap,
+  generator price/income curve, top-tier gem income, star pity, market
+  order limits, pet soft cap and max effects, prestige cap, set caps and
+  season premium price.
 - Large numbers are now shortened in the UI: 1 500 → `1.5K`,
   320 000 → `320K`, 1 000 000 → `1M`, with suffixes up to `Dc`.
   `format_price` and the content editor use the same formatter.
