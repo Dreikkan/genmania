@@ -2580,9 +2580,9 @@ class CastleBot(commands.Bot):
         }
 
         GEM_INCOME = {
-            "space_gen":     0.02,
-            "divine_gen":    0.05,
-            "legendary_gen": 0.10,
+            "space_gen":     10.0,
+            "divine_gen":    20.0,
+            "legendary_gen": 40.0,
         }
         
         # --- ЦЕНЫ И ДОХОД ГЕНЕРАТОРОВ ---
@@ -5147,9 +5147,44 @@ async def is_global_owner(interaction: discord.Interaction) -> bool:
     except Exception:
         return False
 
+SHORT_NUMBER_SUFFIXES = (
+    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc"
+)
+
+
+def format_short_number(value: int | float) -> str:
+    """Короткий формат: 1 500 -> 1.5K, 2 000 000 -> 2M."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return str(value)
+    sign = "-" if number < 0 else ""
+    number = abs(number)
+    if number < 1000:
+        if number.is_integer():
+            return sign + str(int(number))
+        return sign + f"{number:.2f}".rstrip("0").rstrip(".")
+    tier = min(
+        int(math.log10(number) // 3),
+        len(SHORT_NUMBER_SUFFIXES) - 1,
+    )
+    scaled = number / (1000 ** tier)
+    if scaled >= 100:
+        text = f"{scaled:.0f}"
+    elif scaled >= 10:
+        text = f"{scaled:.1f}"
+    else:
+        text = f"{scaled:.1f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return f"{sign}{text}{SHORT_NUMBER_SUFFIXES[tier]}"
+
+
 def format_price(price: int) -> str:
-    """Форматирует цену: 1500 -> '1 500', 100000 -> '100 000'."""
-    return f"{price:,}".replace(",", " ")
+    """Форматирует цену: 1500 -> '1.5K', 100000 -> '100K'."""
+    return format_short_number(price)
 
 # Юникод -> ключ кастомного эмодзи. Используется и в embed'ах, и в тексте.
 EMOJI_TEXT_KEYS = {

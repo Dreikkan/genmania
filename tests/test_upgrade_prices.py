@@ -94,13 +94,13 @@ def test_clan_upgrade_embed_shows_next_quadratic_cost():
             await db.commit()
             embed = await m.build_clan_upgrades_embed(1)
             text = "\n".join(field.value for field in embed.fields)
-            assert "1 000" in text
+            assert "1K" in text
 
             await db.execute("UPDATE clans SET capacity = 15 WHERE id = 1")
             await db.commit()
             embed = await m.build_clan_upgrades_embed(1)
             text = "\n".join(field.value for field in embed.fields)
-            assert "4 000" in text
+            assert "4K" in text
         finally:
             await db.close()
             m.bot.db = None
@@ -109,5 +109,5 @@ def test_clan_upgrade_embed_shows_next_quadratic_cost():
 
 
 def test_upgrade_prices_use_targeted_migration():
-    assert m.CONTENT_VERSION == 8
+    assert m.CONTENT_VERSION == 9
     assert m.SCHEMA_VERSION == 18

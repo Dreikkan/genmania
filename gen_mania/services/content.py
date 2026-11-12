@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Callable
+
+
+SHORT_NUMBER_SUFFIXES = (
+    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc"
+)
 
 
 class ContentRuntime:
@@ -104,6 +110,25 @@ def make_content_layer(runtime: ContentRuntime):
         return number
 
     def format_content_number(value) -> str:
+        number = value if value is not None else 0
+        try:
+            numeric = float(number)
+        except (TypeError, ValueError):
+            return str(number)
+        if math.isfinite(numeric) and abs(numeric) >= 1000:
+            sign = "-" if numeric < 0 else ""
+            scaled_value = abs(numeric)
+            tier = min(
+                int(math.log10(scaled_value) // 3),
+                len(SHORT_NUMBER_SUFFIXES) - 1,
+            )
+            scaled = scaled_value / (1000 ** tier)
+            text = (
+                f"{scaled:.0f}" if scaled >= 100 else f"{scaled:.1f}"
+            )
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return f"{sign}{text}{SHORT_NUMBER_SUFFIXES[tier]}"
         if isinstance(value, float):
             text = f"{value:.8f}".rstrip("0").rstrip(".")
             return text or "0"
