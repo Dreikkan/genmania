@@ -7,6 +7,8 @@
   to 5 × 10^18; item prices are capped at 10^18.
 - Generator price multiplier increased to 3.8 so crafting three copies
   is clearly cheaper than buying the next tier.
+- `CONTENT_VERSION` bumped to 8 so existing databases receive the new
+  generator prices and market anchors.
 - P2 reliability: admin modals re-check admin access on submit, guild
   access sync errors are handled, and the profile shows achievements
   and synthesis success rate.
