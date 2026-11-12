@@ -31,6 +31,18 @@ class UpgradesUiRuntime:
         self.start_grid = 9
         self.pet_types: dict = {}
         self.pet_max_level = 10
+        self.pet_breakthrough_levels: tuple[int, ...] = (
+            10, 25, 50, 75, 100, 125, 150, 175, 200
+        )
+        self._pet_feed_cost: Callable[[int], tuple[int, int]] = (
+            lambda level: (0, 0)
+        )
+        self._pet_breakthrough_count: Callable[[int], int] = (
+            lambda level: 0
+        )
+        self._pet_next_breakthrough: Callable[[int], int | None] = (
+            lambda level: None
+        )
         self.autocollect_levels: dict = {}
         self.autocollect_price = 0
         self.autocollect_max_level = 0
@@ -58,6 +70,10 @@ class UpgradesUiRuntime:
         start_grid: int,
         pet_types: dict,
         pet_max_level: int,
+        pet_breakthrough_levels: tuple[int, ...],
+        pet_feed_cost: Callable[[int], tuple[int, int]],
+        pet_breakthrough_count: Callable[[int], int],
+        pet_next_breakthrough: Callable[[int], int | None],
         autocollect_levels: dict,
         autocollect_price: int,
         autocollect_max_level: int,
@@ -82,6 +98,10 @@ class UpgradesUiRuntime:
         self.start_grid = start_grid
         self.pet_types = pet_types
         self.pet_max_level = pet_max_level
+        self.pet_breakthrough_levels = tuple(pet_breakthrough_levels)
+        self._pet_feed_cost = pet_feed_cost
+        self._pet_breakthrough_count = pet_breakthrough_count
+        self._pet_next_breakthrough = pet_next_breakthrough
         self.autocollect_levels = autocollect_levels
         self.autocollect_price = autocollect_price
         self.autocollect_max_level = autocollect_max_level
@@ -103,6 +123,15 @@ class UpgradesUiRuntime:
 
     async def get_autocollector(self, user_id: int):
         return await self._autocollector_getter()(user_id)
+
+    def pet_feed_cost(self, level: int) -> tuple[int, int]:
+        return self._pet_feed_cost(level)
+
+    def pet_breakthrough_count(self, level: int) -> int:
+        return self._pet_breakthrough_count(level)
+
+    def pet_next_breakthrough(self, level: int) -> int | None:
+        return self._pet_next_breakthrough(level)
 
     def embed(self, **kwargs):
         return self._embed_factory(**kwargs)
@@ -324,17 +353,36 @@ def make_upgrades_ui_layer(runtime: UpgradesUiRuntime):
                     if active and active[0] == pet_id
                     else ""
                 )
+                value = runtime.effect_summary(ptype, level)
+                if level >= runtime.pet_max_level:
+                    value += "\nМаксимальный уровень."
+                else:
+                    feed_coins, feed_gems = runtime.pet_feed_cost(level)
+                    value += (
+                        f"\nКормление: 🪙 {feed_coins} + 💎 {feed_gems}."
+                    )
+                    next_level = runtime.pet_next_breakthrough(level)
+                    if next_level is not None:
+                        value += (
+                            f"\nДо прорыва: "
+                            f"**{next_level - level} ур.**"
+                        )
+                value += (
+                    f"\nПрорывов: "
+                    f"**{runtime.pet_breakthrough_count(level)}/"
+                    f"{len(runtime.pet_breakthrough_levels)}**."
+                )
                 embed.add_field(
                     name=(
                         f"{is_active}{ptype['emoji']} "
                         f"{ptype['name']} "
                         f"(ур. {level}/{runtime.pet_max_level})"
                     ),
-                    value=runtime.effect_summary(ptype, level),
+                    value=value,
                     inline=False,
                 )
 
-        embed.set_footer(text="Купить питомца — кнопка ниже.")
+        embed.set_footer(text="Кормление — кнопка ниже.")
         return await runtime.fix_emojis(embed)
 
     async def build_autocollector_embed(interaction):

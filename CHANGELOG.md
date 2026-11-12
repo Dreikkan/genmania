@@ -2,6 +2,11 @@
 
 ## 2026-11-12
 
+- Pets now have a 200-level progression with breakthroughs at
+  10, 25, 50, 75, 100, 125, 150, 175 and 200. Every breakthrough
+  increases the feeding cost in coins and gems.
+- Rebalanced currency exchange: 1 000 coins → 1 gem before fees and
+  1 gem → 800 coins before fees.
 - Added mass synthesis to the craft screen with success/failure counts
   and an optional catalyst mode.
 - Added mass star upgrades to the stars screen with success/failure

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 from typing import Any, Callable
 
 from .market import parse_market_datetime
@@ -16,8 +17,13 @@ class PetRuntime:
         self._transaction_getter: Callable[[], Callable] = lambda: None
         self.pet_types: dict = {}
         self.pet_max_level = 10
+        self.breakthrough_levels: tuple[int, ...] = (
+            10, 25, 50, 75, 100, 125, 150, 175, 200
+        )
         self.feed_cost_coins = 1000
         self.feed_cost_gems = 5
+        self.feed_cost_coin_growth = 2.2
+        self.feed_cost_gem_growth = 1.5
         self.feed_xp = 1
         self.feed_cooldown_hours = 4
         self.autocollect_price_gems = 100
@@ -40,19 +46,57 @@ class PetRuntime:
         autocollect_max_level: int,
         autocollect_levels: dict,
         logger: logging.Logger,
+        breakthrough_levels: tuple[int, ...] | None = None,
+        feed_cost_coin_growth: float = 2.2,
+        feed_cost_gem_growth: float = 1.5,
     ) -> None:
         self._db_getter = db_getter
         self._transaction_getter = transaction_getter
         self.pet_types = pet_types
         self.pet_max_level = pet_max_level
+        if breakthrough_levels:
+            self.breakthrough_levels = tuple(breakthrough_levels)
         self.feed_cost_coins = feed_cost_coins
         self.feed_cost_gems = feed_cost_gems
+        self.feed_cost_coin_growth = feed_cost_coin_growth
+        self.feed_cost_gem_growth = feed_cost_gem_growth
         self.feed_xp = feed_xp
         self.feed_cooldown_hours = feed_cooldown_hours
         self.autocollect_price_gems = autocollect_price_gems
         self.autocollect_max_level = autocollect_max_level
         self.autocollect_levels = autocollect_levels
         self.logger = logger
+
+    def breakthrough_count(self, level: int) -> int:
+        return sum(
+            1 for threshold in self.breakthrough_levels if level >= threshold
+        )
+
+    def next_breakthrough(self, level: int) -> int | None:
+        for threshold in self.breakthrough_levels:
+            if level < threshold:
+                return threshold
+        return None
+
+    def feed_cost(self, level: int) -> tuple[int, int]:
+        steps = self.breakthrough_count(level)
+        coins = max(
+            1,
+            int(
+                round(
+                    self.feed_cost_coins
+                    * (self.feed_cost_coin_growth ** steps)
+                )
+            ),
+        )
+        gems = max(
+            1,
+            math.ceil(
+                self.feed_cost_gems
+                * (self.feed_cost_gem_growth ** steps)
+            ),
+        )
+        return coins, gems
 
     @property
     def db(self):
@@ -129,6 +173,7 @@ def make_pet_layer(runtime: PetRuntime):
                         f"❌ {ptype['emoji']} {ptype['name']} "
                         "уже максимального уровня."
                     )
+                feed_coins, feed_gems = runtime.feed_cost(level)
 
                 async with runtime.db.execute(
                     "SELECT last_fed FROM user_pets_v2 "
@@ -157,17 +202,17 @@ def make_pet_layer(runtime: PetRuntime):
                     "gems = gems - ? WHERE user_id = ? "
                     "AND coins >= ? AND gems >= ?",
                     (
-                        runtime.feed_cost_coins,
-                        runtime.feed_cost_gems,
+                        feed_coins,
+                        feed_gems,
                         user_id,
-                        runtime.feed_cost_coins,
-                        runtime.feed_cost_gems,
+                        feed_coins,
+                        feed_gems,
                     ),
                 )
                 if cur.rowcount == 0:
                     raise ValueError(
-                        f"❌ Нужно 🪙 {runtime.feed_cost_coins} и "
-                        f"💎 {runtime.feed_cost_gems}."
+                        f"❌ Нужно 🪙 {feed_coins} и "
+                        f"💎 {feed_gems}."
                     )
                 cur = await runtime.db.execute(
                     "UPDATE user_pets_v2 SET level = level + ?, "
@@ -190,10 +235,31 @@ def make_pet_layer(runtime: PetRuntime):
                 )
         except ValueError as exc:
             return False, str(exc), 0, ""
+        breakthroughs = runtime.breakthrough_count(new_level)
+        message = (
+            f"🍖 {ptype['emoji']} {ptype['name']} покормлен! "
+            f"Уровень: **{new_level}/{runtime.pet_max_level}**.\n"
+            f"Прорывов: **{breakthroughs}/"
+            f"{len(runtime.breakthrough_levels)}**."
+        )
+        if breakthroughs > runtime.breakthrough_count(level):
+            message += "\n🔓 Прорыв! Стоимость кормления выросла."
+        if new_level >= runtime.pet_max_level:
+            message += "\nДостигнут максимальный уровень."
+        else:
+            next_coins, next_gems = runtime.feed_cost(new_level)
+            message += (
+                f"\nСледующее кормление: "
+                f"🪙 {next_coins} + 💎 {next_gems}."
+            )
+            next_threshold = runtime.next_breakthrough(new_level)
+            if next_threshold:
+                message += (
+                    f"\nДо прорыва: **{next_threshold - new_level} ур.**"
+                )
         return (
             True,
-            f"🍖 {ptype['emoji']} {ptype['name']} покормлен! "
-            f"Уровень: **{new_level}/{runtime.pet_max_level}**.",
+            message,
             new_level,
             pet_id,
         )

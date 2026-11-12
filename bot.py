@@ -821,10 +821,10 @@ UPGRADES_PAGE_SIZE = 5
 SHOP_SELECT_PAGE_SIZE = 10
 SLOT_WIDTH = 8
 
-COINS_PER_GEM = 12
-GEMS_PER_COIN_RATE = 9
+COINS_PER_GEM = 1000
+GEMS_PER_COIN_RATE = 800
 GEM_EXCHANGE_MIN = 1
-COIN_EXCHANGE_MIN = 12
+COIN_EXCHANGE_MIN = COINS_PER_GEM
 EXCHANGE_FEE_BASE = 0.03
 EXCHANGE_FEE_STEP = 0.01
 EXCHANGE_FEE_MAX = 0.15
@@ -1334,10 +1334,13 @@ def format_pet_effect_summary(ptype: dict, level: int | None = None) -> str:
     return "\n".join(lines)
 
 
-PET_MAX_LEVEL = 10
+PET_BREAKTHROUGH_LEVELS = (10, 25, 50, 75, 100, 125, 150, 175, 200)
+PET_MAX_LEVEL = PET_BREAKTHROUGH_LEVELS[-1]
 PET_FEED_COOLDOWN_HOURS = 6
 PET_FEED_COST_COINS = 100          # кормление стоит монет
 PET_FEED_COST_GEMS = 1             # и немного гемов
+PET_FEED_COST_COIN_GROWTH = 2.2    # рост цены монет за каждый прорыв
+PET_FEED_COST_GEM_GROWTH = 1.5     # рост цены гемов за каждый прорыв
 PET_FEED_XP = 1                    # +1 уровень за кормление (упрощённо)
 
 # ============================================================
@@ -4198,8 +4201,11 @@ PET_RUNTIME.configure(
     transaction_getter=lambda: db_transaction,
     pet_types=PET_TYPES,
     pet_max_level=PET_MAX_LEVEL,
+    breakthrough_levels=PET_BREAKTHROUGH_LEVELS,
     feed_cost_coins=PET_FEED_COST_COINS,
     feed_cost_gems=PET_FEED_COST_GEMS,
+    feed_cost_coin_growth=PET_FEED_COST_COIN_GROWTH,
+    feed_cost_gem_growth=PET_FEED_COST_GEM_GROWTH,
     feed_xp=PET_FEED_XP,
     feed_cooldown_hours=PET_FEED_COOLDOWN_HOURS,
     autocollect_price_gems=AUTOCOLLECT_PRICE_GEMS,
@@ -4217,6 +4223,10 @@ PET_RUNTIME.configure(
     upgrade_autocollector,
     get_user_pets,
 ) = make_pet_layer(PET_RUNTIME)
+
+pet_breakthrough_count = PET_RUNTIME.breakthrough_count
+pet_next_breakthrough = PET_RUNTIME.next_breakthrough
+pet_feed_cost = PET_RUNTIME.feed_cost
 
 STATUS_RUNTIME = StatusRuntime()
 STATUS_RUNTIME.configure(
@@ -4464,6 +4474,10 @@ UPGRADES_UI_RUNTIME.configure(
     start_grid=START_GRID,
     pet_types=PET_TYPES,
     pet_max_level=PET_MAX_LEVEL,
+    pet_breakthrough_levels=PET_BREAKTHROUGH_LEVELS,
+    pet_feed_cost=lambda level: pet_feed_cost(level),
+    pet_breakthrough_count=lambda level: pet_breakthrough_count(level),
+    pet_next_breakthrough=lambda level: pet_next_breakthrough(level),
     autocollect_levels=AUTOCOLLECT_LEVELS,
     autocollect_price=AUTOCOLLECT_PRICE_GEMS,
     autocollect_max_level=AUTOCOLLECT_MAX_LEVEL,
@@ -21923,7 +21937,7 @@ class AdminGivePetModal(discord.ui.Modal, title="Выдать питомца"):
 class AdminSetPetLevelModal(discord.ui.Modal, title="Установить уровень питомца"):
     user_id = discord.ui.TextInput(label="ID игрока", required=True)
     pet_id = discord.ui.TextInput(label="ID питомца", required=True)
-    level = discord.ui.TextInput(label="Уровень (1–10)", required=True)
+    level = discord.ui.TextInput(label=f"Уровень (1–{PET_MAX_LEVEL})", required=True)
 
     def __init__(self, author_id: int):
         super().__init__()
@@ -21938,7 +21952,7 @@ class AdminSetPetLevelModal(discord.ui.Modal, title="Установить уро
                 raise ValueError
         except ValueError:
             await interaction.followup.send(
-                "❌ ID — число, уровень 1–10.", ephemeral=True
+                f"❌ ID — число, уровень 1–{PET_MAX_LEVEL}.", ephemeral=True
             )
             return
 
