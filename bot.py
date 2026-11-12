@@ -17213,7 +17213,7 @@ async def craft_attempt(
             ) as c:
                 all_copies = await c.fetchall()
 
-            target_star = 0
+            source_star = 0
             if use_starred:
                 by_star: dict[int, list] = {}
                 for row in all_copies:
@@ -17221,7 +17221,7 @@ async def craft_attempt(
                 for star in sorted(by_star):
                     if len(by_star[star]) >= CRAFT_COST:
                         owned = by_star[star][:CRAFT_COST]
-                        target_star = star
+                        source_star = star
                         break
                 else:
                     owned = []
@@ -17294,7 +17294,7 @@ async def craft_attempt(
                 try:
                     await place_items(
                         user_id, next_id, 1, commit=False,
-                        stars=target_star,
+                        stars=CRAFT_RESULT_STARS,
                     )
                 except ValueError:
                     loc, slot, _star = owned[0]
@@ -17302,13 +17302,13 @@ async def craft_attempt(
                         "INSERT INTO inventory "
                         "(user_id, slot, item_id, location, stars) "
                         "VALUES (?, ?, ?, ?, ?)",
-                        (user_id, slot, next_id, loc, target_star),
+                        (user_id, slot, next_id, loc, CRAFT_RESULT_STARS),
                     )
             else:
                 try:
                     await place_items(
                         user_id, item_id, 1, commit=False,
-                        stars=target_star,
+                        stars=source_star,
                     )
                 except ValueError:
                     log.exception(
@@ -17353,8 +17353,8 @@ async def craft_attempt(
         "dst_id": next_id,
         "dst_name": dst_name,
         "dst_emoji": dst_emoji,
-        "result_stars": target_star,
-        "source_stars": target_star,
+        "result_stars": CRAFT_RESULT_STARS,
+        "source_stars": source_star,
     }
 
 
@@ -17397,7 +17397,7 @@ class CraftConfirmView(SafeView):
         await interaction.edit_original_response(view=self)
         if self.use_starred:
             await interaction.followup.send(
-                "⚠️ Будут использованы звёздные копии генераторов.",
+                "⚠️ Будут использованы звёздные копии, результат синтеза будет 0★.",
                 ephemeral=True,
             )
 
@@ -17658,7 +17658,7 @@ async def show_mass_craft_confirm(
         starred_line = (
             f"\n⚠️ Звёздных копий: **{starred_count}**. "
             "По умолчанию они не используются; включи «Звёздные», "
-            "чтобы синтезировать и их."
+            "чтобы синтезировать и их (результат будет 0★)."
         )
     embed = BotEmbed(
         title="⚗️ Массовый синтез",
@@ -17820,7 +17820,7 @@ class MassCraftConfirmView(BaseView):
         await interaction.edit_original_response(view=self)
         if self.use_starred:
             await interaction.followup.send(
-                "⚠️ Будут использованы звёздные копии генераторов.",
+                "⚠️ Будут использованы звёздные копии, результат синтеза будет 0★.",
                 ephemeral=True,
             )
 

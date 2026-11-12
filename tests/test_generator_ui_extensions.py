@@ -117,12 +117,12 @@ def test_starred_craft_and_target_selection():
             )
             assert result["ok"], result
             assert result["success"]
-            assert result["result_stars"] == 2
+            assert result["result_stars"] == 0
             async with db.execute(
                 "SELECT item_id, stars FROM inventory WHERE user_id = 1"
             ) as c:
                 rows = await c.fetchall()
-            assert ("bronze_gen", 2) in rows
+            assert ("bronze_gen", 0) in rows
 
             await _delete_inventory(db)
             await _add_inventory(
@@ -191,7 +191,7 @@ def test_starred_craft_and_target_selection():
             await view._run(result_interaction, False)
             result_embed = result_interaction.edited[-1][1]["embed"]
             assert "Сделано" in result_embed.description
-            assert "2★" in result_embed.description
+            assert "0★" in result_embed.description
         finally:
             m.random.random = original_random
             await _close(db)
@@ -223,7 +223,7 @@ def test_single_craft_starred_toggle():
                 "SELECT item_id, stars FROM inventory WHERE user_id = 1"
             ) as c:
                 rows = await c.fetchall()
-            assert ("bronze_gen", 2) in rows
+            assert ("bronze_gen", 0) in rows
         finally:
             m.random.random = original_random
             await _close(db)
