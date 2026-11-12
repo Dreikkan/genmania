@@ -5171,6 +5171,9 @@ def format_short_number(value: int | float) -> str:
         len(SHORT_NUMBER_SUFFIXES) - 1,
     )
     scaled = number / (1000 ** tier)
+    if scaled >= 999.5 and tier < len(SHORT_NUMBER_SUFFIXES) - 1:
+        tier += 1
+        scaled = number / (1000 ** tier)
     if scaled >= 100:
         text = f"{scaled:.0f}"
     elif scaled >= 10:
