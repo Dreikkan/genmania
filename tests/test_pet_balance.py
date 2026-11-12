@@ -114,6 +114,8 @@ def test_pet_embed_shows_both_effects():
             assert "доход монет" in dog_field.value
             assert "+6%" in dog_field.value
             assert "+3%" in dog_field.value
+            assert "До прорыва" in dog_field.value
+            assert "▰" in dog_field.value
         finally:
             await db.close()
             m.bot.db = None

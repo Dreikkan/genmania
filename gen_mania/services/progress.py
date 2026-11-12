@@ -27,6 +27,9 @@ class ProgressRuntime:
         self._add_clan_xp_getter: Callable[[], Callable] = lambda: None
         self._today_str_getter: Callable[[], Callable] = lambda: None
         self._clan_quests_getter: Callable[[], Any] = lambda: ()
+        self._reward_scale_getter: Callable[[], Callable] = (
+            lambda: lambda points: 1.0
+        )
         self.story_quests: dict = {}
         self.quest_pool: dict = {}
         self.daily_rewards: dict = {}
@@ -49,6 +52,7 @@ class ProgressRuntime:
         log_clan_getter: Callable[[], Callable],
         add_clan_xp_getter: Callable[[], Callable],
         today_str_getter: Callable[[], Callable],
+        reward_scale_getter: Callable[[], Callable],
         story_quests: dict,
         quest_pool: dict,
         daily_rewards: dict,
@@ -70,6 +74,7 @@ class ProgressRuntime:
         self._add_clan_xp_getter = add_clan_xp_getter
         self._today_str_getter = today_str_getter
         self._clan_quests_getter = clan_quests_getter
+        self._reward_scale_getter = reward_scale_getter
         self.story_quests = story_quests
         self.quest_pool = quest_pool
         self.daily_rewards = daily_rewards
@@ -124,6 +129,9 @@ class ProgressRuntime:
 
     def today_str(self) -> str:
         return self._today_str_getter()()
+
+    def reward_scale(self, prestige_points: int) -> float:
+        return self._reward_scale_getter()(prestige_points)
 
 
 def make_progress_layer(runtime: ProgressRuntime):
@@ -252,15 +260,15 @@ def make_progress_layer(runtime: ProgressRuntime):
     async def claim_daily(user_id: int) -> dict:
         async with runtime.transaction():
             async with runtime.db.execute(
-                "SELECT last_daily, streak_days FROM players "
-                "WHERE user_id = ?",
+                "SELECT last_daily, streak_days, prestige_points "
+                "FROM players WHERE user_id = ?",
                 (user_id,),
             ) as c:
                 row = await c.fetchone()
             if not row:
                 return {"ok": False, "reason": "Профиль не найден."}
 
-            last_daily, streak = row
+            last_daily, streak, prestige_points = row
             now = datetime.datetime.now()
             today = now.date()
 
@@ -284,6 +292,9 @@ def make_progress_layer(runtime: ProgressRuntime):
                 new_streak = 1
 
             coins, gems, item_id = runtime.daily_rewards[new_streak]
+            scale = runtime.reward_scale(prestige_points or 0)
+            coins = int(coins * scale)
+            gems = int(gems * scale)
 
             await runtime.db.execute(
                 "UPDATE players SET coins = coins + ?, gems = gems + ?, "
@@ -338,7 +349,8 @@ def make_progress_layer(runtime: ProgressRuntime):
             SELECT total_crafts, total_successes, gems, coins, catalysts,
                    (SELECT COUNT(*) FROM inventory inv
                     JOIN items i ON inv.item_id = i.id
-                    WHERE inv.user_id = ? AND i.income_gems_per_hour > 0)
+                    WHERE inv.user_id = ? AND i.income_gems_per_hour > 0),
+                   prestige_points
             FROM players WHERE user_id = ?
             """,
             (user_id, user_id),
@@ -354,6 +366,7 @@ def make_progress_layer(runtime: ProgressRuntime):
             coins,
             catalysts,
             gem_gens,
+            prestige_points,
         ) = row
 
         # Считаем звёздные достижения
@@ -418,6 +431,13 @@ def make_progress_layer(runtime: ProgressRuntime):
                     if not ach_row:
                         continue
                     reward_gems, name, emoji = ach_row
+                    reward_gems = max(
+                        1,
+                        int(
+                            reward_gems
+                            * runtime.reward_scale(prestige_points or 0)
+                        ),
+                    )
 
                     cur = await runtime.db.execute(
                         "INSERT OR IGNORE INTO player_achievements "
@@ -510,7 +530,7 @@ def make_progress_layer(runtime: ProgressRuntime):
 
             chosen = random.sample(pool, 3)
             progress = {q: 0 for q in chosen}
-            claimed = []
+            claimed: list[str] = []
 
             await runtime.db.execute(
                 "UPDATE players SET daily_quest_date = ?, "

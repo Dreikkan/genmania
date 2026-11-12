@@ -312,7 +312,7 @@ def make_leaderboard_layer(runtime: LeaderboardRuntime):
             embed.description = "Пока нет данных."
             return embed
 
-        user_cache: dict[int, object] = {}
+        user_cache: dict[int, Any] = {}
         if top_type != "clans":
             missing = []
             for uid, _value in rows:

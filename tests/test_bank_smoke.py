@@ -121,7 +121,9 @@ async def run_checks(db):
     ) as c:
         assert (await c.fetchone())[0] == 0
     loan = await m.get_loan(1)
-    assert loan and m.loan_total_due(loan) == 440
+    assert loan and m.loan_total_due(loan) == int(
+        400 * (1 + m.BANK_LOAN_INTEREST)
+    )
 
     # Не хватает на погашение.
     ok, msg = await m.repay_bank_loan(1)
@@ -133,7 +135,9 @@ async def run_checks(db):
     ok, msg = await m.repay_bank_loan(1)
     assert ok, msg
     async with db.execute("SELECT coins FROM players WHERE user_id = 1") as c:
-        assert (await c.fetchone())[0] == 560
+        assert (await c.fetchone())[0] == 1000 - int(
+            400 * (1 + m.BANK_LOAN_INTEREST)
+        )
     async with db.execute(
         "SELECT COUNT(*) FROM inventory WHERE user_id = 1 AND item_id = 'basic_gen'"
     ) as c:

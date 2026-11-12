@@ -415,10 +415,10 @@ def make_notification_layer(runtime: NotificationRuntime):
             if sent_count >= max_sent:
                 break
             if last_daily:
-                last = datetime.datetime.fromisoformat(
+                last_date = datetime.datetime.fromisoformat(
                     last_daily
                 ).date()
-                if (now.date() - last).days < 1:
+                if (now.date() - last_date).days < 1:
                     continue
             if not await can_send_notification(uid, "daily_ready"):
                 continue

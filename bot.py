@@ -397,6 +397,16 @@ PRESTIGE_STEP_REQUIREMENT = 50_000   # каждое следующее доро�
 PRESTIGE_COIN_REQUIREMENT = PRESTIGE_BASE_REQUIREMENT  # совместимость
 PRESTIGE_BONUS_PER_POINT = 0.05       # +5% к доходу за очко
 PRESTIGE_BONUS_CAP = 5.0              # максимум +500%
+
+# Масштабирование наград дейли/квестов/достижений от престижа.
+REWARD_SCALE_PER_PRESTIGE = 0.10
+REWARD_SCALE_MAX_PRESTIGE = 20
+
+
+def reward_scale(prestige_points: int) -> float:
+    """Множитель наград: 1.0 без престижа, до 3.0 на 20 очках."""
+    points = max(0, min(int(prestige_points or 0), REWARD_SCALE_MAX_PRESTIGE))
+    return 1.0 + points * REWARD_SCALE_PER_PRESTIGE
 CLAN_MAX_LEVEL = 21                   # максимум уровня клана
 CLAN_XP_PER_LEVEL = 100               # XP для следующего уровня (база)
 CLAN_BASE_CAPACITY = 10               # базовый размер клана
@@ -468,7 +478,7 @@ GIVEAWAY_REWARDS = {
 
 # --- СЕЗОНЫ / BATTLE PASS ---
 SEASON_LEVELS = 30
-SEASON_PREMIUM_COST_GEMS = 250
+SEASON_PREMIUM_COST_GEMS = 150
 SEASON_XP_BASE = 100                  # XP с 0 на 1 уровень
 SEASON_XP_STEP = 100                  # +100 XP к стоимости каждого следующего уровня
 SEASON_TOTAL_XP = (
@@ -702,7 +712,8 @@ ITEM_SET = {
 }
 
 # --- КЛАНОВЫЕ ВОЙНЫ ---
-CLAN_WAR_REWARD = 1000                # монеты в сундук победителя
+CLAN_WAR_REWARD = 1000                # базовые монеты в сундук победителя
+CLAN_WAR_REWARD_PER_LEVEL = 500       # надбавка за каждый уровень клана
 CLAN_WAR_ATTACK_COOLDOWN_HOURS = 1    # кулдаун атаки
 CLAN_WAR_DURATION_HOURS = 24          # длительность войны
 CLAN_WAR_DAMAGE_RATE = 0.15           # 15% мощи в урон
@@ -734,8 +745,8 @@ RAID_INVITE_DELETE_SECONDS = 30       # автоудаление сообщен�
 RAID_MAX_PENDING_INVITES = 5          # максимум активных приглашений у отряда
 RAID_GROUP_SYNERGY = 0.10             # +10% к сумме мощи за каждого доп. участника
 RAID_LOOT_RATE = 0.08                 # базовая доля монет цели
-RAID_TARGET_SHIELD_HOURS = 6          # щит цели после атаки
-RAID_DAILY_LOSS_CAP = 0.25            # максимум потерь цели в сутки
+RAID_TARGET_SHIELD_HOURS = 8          # щит цели после атаки
+RAID_DAILY_LOSS_CAP = 0.15            # максимум потерь цели в сутки
 RAID_MIN_TARGET_POWER_RATIO = 0.25    # не даём фармить слишком слабых
 
 CRAFT_SETTINGS = {
@@ -857,7 +868,7 @@ BANK_MAX_DAYS = 30
 BANK_LOAN_LTV = 0.50           # кредит до 50% стоимости залога
 BANK_LOAN_MAX = 500_000          # базовый максимум кредита
 BANK_LOAN_MIN = 100
-BANK_LOAN_INTEREST = 0.10      # фиксированная переплата за срок
+BANK_LOAN_INTEREST = 0.15      # переплата выше доходности вклада за 7 дней
 BANK_LOAN_TERM_DAYS = 7
 BANK_DEPOSIT_INCOME_HOURS = 24  # лимит вклада = 24 часа дохода
 BANK_LOAN_INCOME_HOURS = 12     # лимит кредита = 12 часов дохода
@@ -4569,6 +4580,7 @@ SHOP_UI_RUNTIME.configure(
     embed_factory=lambda **kwargs: BotEmbed(**kwargs),
     emoji_fixer=lambda embed: fix_embed_emojis(embed),
     price_formatter=lambda value: format_price(value),
+    reward_scale_getter=lambda: reward_scale,
     emoji_getter=lambda: get_emoji,
     button_emojis=BOT_BTN_EMOJIS,
     page_size=PAGE_SIZE,
@@ -4847,6 +4859,7 @@ CLAN_WAR_RUNTIME.configure(
     emoji_fixer=lambda embed: fix_embed_emojis(embed),
     declare_cost=CLAN_WAR_DECLARE_COST,
     reward=CLAN_WAR_REWARD,
+    reward_per_level=CLAN_WAR_REWARD_PER_LEVEL,
     attack_cooldown_hours=CLAN_WAR_ATTACK_COOLDOWN_HOURS,
     damage_rate=CLAN_WAR_DAMAGE_RATE,
     war_duration_hours=CLAN_WAR_DURATION_HOURS,
@@ -4960,6 +4973,7 @@ PROGRESS_RUNTIME.configure(
     log_clan_getter=lambda: log_clan,
     add_clan_xp_getter=lambda: add_clan_xp,
     today_str_getter=lambda: today_str,
+    reward_scale_getter=lambda: reward_scale,
     story_quests=STORY_QUESTS,
     quest_pool=QUEST_POOL,
     daily_rewards=DAILY_REWARDS,
@@ -6384,6 +6398,8 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
     coin = custom.get("_coin", "🪙")
 
     quests, progress, claimed = await get_or_create_daily_quests(user_id)
+    prestige = await get_prestige_points(user_id)
+    scale = reward_scale(prestige)
 
     embed = BotEmbed(title=f"{quest_emoji} Ежедневные задания", color=0x3498db)
     if not quests:
@@ -6404,11 +6420,13 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
             name=desc,
             value=(
                 f"Прогресс: {progress[qid]}/{target}\n"
-                f"Награда: {gem} {reward_gems} | {coin} {reward_coins}\n"
+                f"Награда: {gem} {int(reward_gems * scale)} | "
+                f"{coin} {int(reward_coins * scale)}\n"
                 f"{status}"
             ),
             inline=False
         )
+    embed.set_footer(text=f"Множитель престижа: ×{scale:g}")
     embed = await fix_embed_emojis(embed)
     return embed
 
@@ -6416,10 +6434,12 @@ async def build_quests_embed(interaction: discord.Interaction) -> discord.Embed:
 async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
     user_id = interaction.user.id
     async with bot.db.execute(
-        "SELECT last_daily, streak_days FROM players WHERE user_id = ?", (user_id,)
+        "SELECT last_daily, streak_days, prestige_points "
+        "FROM players WHERE user_id = ?", (user_id,)
     ) as c:
         row = await c.fetchone()
-    last_daily, streak = row if row else (None, 0)
+    last_daily, streak, prestige = row if row else (None, 0, 0)
+    scale = reward_scale(prestige or 0)
 
     today = datetime.date.today()
     can_claim = True
@@ -6437,12 +6457,16 @@ async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
         next_day = 1
 
     coins, gems, item_id = DAILY_REWARDS[next_day]
+    display_coins = int(coins * scale)
+    display_gems = int(gems * scale)
     embed = BotEmbed(
         title="📅 Ежедневный вход",
         description=(
             f"🔥 Стрик: **{streak}** / 30 дней\n"
             f"Награда за день **{next_day}**:\n"
-            f"🪙 {coins} | 💎 {gems}" + (f" | 🎁 {item_id}" if item_id else "")
+            f"🪙 {display_coins} | 💎 {display_gems}"
+            + (f" | 🎁 {item_id}" if item_id else "")
+            + f"\n-# Множитель престижа: ×{scale:g}"
         ),
         color=0x3498db
     )
@@ -6450,7 +6474,10 @@ async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
     for d in range(next_day, min(next_day + 7, 31)):
         c_, g_, it = DAILY_REWARDS[d]
         mark = "🎁" if it else "·"
-        days_str += f"**{d}.** 🪙{c_} 💎{g_} {mark}\n"
+        days_str += (
+            f"**{d}.** 🪙{int(c_ * scale)} "
+            f"💎{int(g_ * scale)} {mark}\n"
+        )
     embed.add_field(name="Ближайшие дни", value=days_str, inline=False)
     embed.set_footer(text="Нажми «Забрать», чтобы получить награду!" if can_claim
                      else "Возвращайся завтра за следующей наградой.")
@@ -6883,11 +6910,39 @@ class WelcomeView(SafeView):
 class MainMenuView(BaseView):
     def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(author_id, timeout)
-        if author_id in getattr(bot, "_onboarding_complete_cache", set()):
-            try:
-                self.remove_item(self.tab_onboarding)
-            except ValueError:
-                pass
+        options = [
+            ("exchange", "Обмен валют", "_echange"),
+            ("season", "Сезон", "_advent"),
+            ("prestige", "Перерождение", "_rebirth"),
+            ("guide", "Путеводитель", "_guide"),
+            ("notifications", "Уведомления", "_notifications"),
+            ("onboarding", "Первые шаги", "_info"),
+        ]
+        completed = author_id in getattr(
+            bot, "_onboarding_complete_cache", set()
+        )
+        if completed:
+            options = [opt for opt in options if opt[0] != "onboarding"]
+        select = discord.ui.Select(
+            placeholder="Ещё: обмен, сезон, перерождение…",
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    emoji=parse_emoji_safe(get_emoji(emoji_key)),
+                )
+                for value, label, emoji_key in options
+            ],
+            row=2,
+        )
+        select.callback = self.select_more
+        self.add_item(select)
+
+    async def select_more(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        handler = getattr(self, f"tab_{value}", None)
+        if handler is not None:
+            await handler(interaction, None)
 
     @discord.ui.button(label="Энергостанция", emoji=get_emoji("_castle"), style=discord.ButtonStyle.primary, row=0)
     async def tab_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -6943,8 +6998,6 @@ class MainMenuView(BaseView):
         embed = await build_daily_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=DailyView(self.author_id, return_to="main"))
 
-    # --- НОВАЯ КНОПКА ОБМЕНА ---
-    @discord.ui.button(label="Обмен валют", emoji=get_emoji("_echange"), style=discord.ButtonStyle.success, row=2)
     async def tab_exchange(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await deny_if_disabled(interaction, "exchange"):
             return
@@ -6968,13 +7021,11 @@ class MainMenuView(BaseView):
         )
         await interaction.edit_original_response(embed=embed, view=ExchangeView(self.author_id))
 
-    @discord.ui.button(label="Путеводитель", emoji=get_emoji("_guide"), style=discord.ButtonStyle.secondary, row=2)
     async def tab_guide(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="📖 Путеводитель", description="Выбери раздел:", color=0x3498db)
         await interaction.edit_original_response(embed=embed, view=GuideView(self.author_id))
 
-    @discord.ui.button(label="Уведомления", emoji=get_emoji("_notifications"), style=discord.ButtonStyle.secondary, row=2)
     async def tab_notifications(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_notification_center_embed(self.author_id)
@@ -6982,7 +7033,6 @@ class MainMenuView(BaseView):
             embed=embed, view=NotificationCenterView(self.author_id)
         )
 
-    @discord.ui.button(label="Перерождение", emoji=get_emoji("_rebirth"), style=discord.ButtonStyle.danger, row=3)
     async def tab_prestige(self, interaction: discord.Interaction, button: discord.ui.Button):
         if await deny_if_disabled(interaction, "prestige"):
             return
@@ -6991,13 +7041,11 @@ class MainMenuView(BaseView):
         embed = await build_prestige_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=PrestigeView(self.author_id))
 
-    @discord.ui.button(label="Сезон", emoji=get_emoji("_advent"), style=discord.ButtonStyle.primary, row=3)
     async def tab_season(self, interaction: discord.Interaction, button: discord.ui.Button):
         push_nav(self.author_id, "main")
         await interaction.response.defer()
         await open_season_view(interaction, self.author_id)
 
-    @discord.ui.button(label="Первые шаги", emoji=get_emoji("_info"), style=discord.ButtonStyle.secondary, row=4)
     async def tab_onboarding(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_onboarding_embed(interaction)
@@ -7106,32 +7154,59 @@ class GuideView(BaseView):
         page = max(0, min(page, total_pages - 1))
         chunk = items[page*per_page:(page+1)*per_page]
 
+        self.add_item(
+            make_select(
+                "Быстрый переход к разделу",
+                [
+                    discord.SelectOption(
+                        label=label[:100],
+                        value=key,
+                        description=desc[:100],
+                        emoji=parse_emoji_safe(
+                            get_emoji(
+                                GUIDE_SECTION_EMOJIS.get(
+                                    key, "_guide"
+                                )
+                            )
+                        ),
+                    )
+                    for key, (label, desc) in items
+                ],
+                self.select_section,
+                row=0,
+            )
+        )
+
         for idx, (key, (label, _desc)) in enumerate(chunk):
             btn = discord.ui.Button(
                 label=label[:80],
                 emoji=get_emoji(GUIDE_SECTION_EMOJIS.get(key, "_guide")),
                 style=discord.ButtonStyle.primary,
-                row=0,
+                row=1,
             )
             btn.callback = self._make_section_callback(key)
             self.add_item(btn)
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=2)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
         back = discord.ui.Button(
-            label="Назад", 
-            emoji=get_emoji("_back"), 
-            style=discord.ButtonStyle.danger, 
-            row=1
+            label="В меню",
+            emoji=get_emoji("_back"),
+            style=discord.ButtonStyle.danger,
+            row=2
         )
         back.callback = self.btn_back
         self.add_item(back)
+
+    async def select_section(self, interaction: discord.Interaction):
+        key = interaction.data["values"][0]
+        await self._make_section_callback(key)(interaction)
 
     def _make_section_callback(self, key: str):
         async def callback(interaction: discord.Interaction):
@@ -12795,7 +12870,9 @@ async def build_pvp_targets_embed(
     else:
         subtitle = (
             f"Рейды: цель не слабее {int(RAID_MIN_TARGET_POWER_RATIO * 100)}% "
-            f"твоей мощи **{viewer_power}**."
+            f"твоей мощи **{viewer_power}**. "
+            f"Лимит потерь цели: {int(RAID_DAILY_LOSS_CAP * 100)}%/сутки, "
+            f"щит {RAID_TARGET_SHIELD_HOURS} ч."
         )
     embed = BotEmbed(
         title="🎯 PvP-цели",
@@ -19349,6 +19426,10 @@ class ClaimQuestSelectView(SafeView):
         if progress[qid] < target:
             await self.fail(interaction, f"❌ Не выполнено: {progress[qid]}/{target}.")
             return
+        prestige = await get_prestige_points(user_id)
+        scale = reward_scale(prestige)
+        reward_gems = max(1, int(reward_gems * scale))
+        reward_coins = max(1, int(reward_coins * scale))
         claimed.append(qid)
         await bot.db.execute(
             "UPDATE players SET daily_quest_claimed = ?, gems = gems + ?, coins = coins + ?, "

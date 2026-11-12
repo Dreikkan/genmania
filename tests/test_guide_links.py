@@ -97,7 +97,7 @@ def test_guide_reflects_latest_economy():
             assert "максимум +15%" in collection
 
             season = (await m._guide_section_data("season"))[1]
-            assert "250 💎" in season
+            assert "150 💎" in season
         finally:
             await db.close()
             m.bot.db = None

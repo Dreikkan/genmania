@@ -363,9 +363,21 @@ def make_upgrades_ui_layer(runtime: UpgradesUiRuntime):
                     )
                     next_level = runtime.pet_next_breakthrough(level)
                     if next_level is not None:
+                        previous = 0
+                        for threshold in runtime.pet_breakthrough_levels:
+                            if threshold == next_level:
+                                break
+                            previous = threshold
+                        span = max(1, next_level - previous)
+                        done = max(0, min(span, level - previous))
+                        filled = max(
+                            0, min(10, int(10 * done / span))
+                        )
+                        bar = "▰" * filled + "▱" * (10 - filled)
                         value += (
                             f"\nДо прорыва: "
-                            f"**{next_level - level} ур.**"
+                            f"**{next_level - level} ур.**\n"
+                            f"{bar} {done}/{span}"
                         )
                 value += (
                     f"\nПрорывов: "

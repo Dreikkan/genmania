@@ -85,7 +85,7 @@ def make_set_layer(runtime: SetRuntime):
 
     def compute_set_synergy(rows, grid_size: int) -> dict:
         """Считает бонусы сетов по раскладке энергостанции."""
-        set_items = {
+        set_items: dict[str, set] = {
             set_id: set() for set_id in runtime.set_definitions
         }
         slot_sets = {}

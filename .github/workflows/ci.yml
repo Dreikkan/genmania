@@ -27,7 +27,16 @@ jobs:
         run: python -m py_compile bot.py
 
       - name: Tests
-        run: python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=95
+        run: python -m pytest -q --cov=. --cov-branch --cov-report=term:skip-covered --cov-fail-under=95
 
       - name: Ruff critical
         run: ruff check --select F821,F811,F401 bot.py tests gen_mania
+
+      - name: Type check
+        run: python -m mypy gen_mania
+
+      - name: Security scan
+        run: python -m bandit -q -c bandit.yaml -r gen_mania bot.py -ll
+
+      - name: Dependency audit
+        run: python -m pip_audit -r requirements.txt --progress-spinner off

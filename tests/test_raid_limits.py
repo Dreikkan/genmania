@@ -34,7 +34,7 @@ def test_target_daily_loss_cap():
                 )
             await db.execute(
                 "INSERT INTO raid_loot_log (user_id, target_id, amount, date) "
-                "VALUES (99, 2, 2400, ?)",
+                "VALUES (99, 2, 1000, ?)",
                 (m.today_str(),),
             )
             await db.commit()
@@ -49,7 +49,7 @@ def test_target_daily_loss_cap():
 
             assert error is None, error
             assert result["success"] is True
-            assert result["loot"] == {1: 100}, result["loot"]
+            assert result["loot"] == {1: 500}, result["loot"]
             assert result["target_capped"] is True, result
         finally:
             await db.close()

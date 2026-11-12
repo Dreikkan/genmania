@@ -124,12 +124,15 @@ Dev-стенд использует отдельный токен и `DATA_DIR=d
 ```powershell
 pip install -r requirements-dev.txt
 python -m pytest -q
-python -m pytest -q --cov=. --cov-report=term:skip-covered --cov-fail-under=95
+python -m pytest -q --cov=. --cov-branch --cov-report=term:skip-covered --cov-fail-under=95
 ruff check --select F821,F811,F401 bot.py tests gen_mania
+python -m mypy gen_mania
+python -m bandit -q -c bandit.yaml -r gen_mania bot.py -ll
+python -m pip_audit -r requirements.txt --progress-spinner off
 ```
 
-Текущий статус: **464 passed**, 136 test files.
-Coverage `bot.py`: **100.00%**, минимальный порог — **50%**.
+Текущий статус: **472 passed**, 137 test files.
+Coverage: **100.00% line, 99.40% branch**, минимальный порог — **95%**.
 
 Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
 owner-only команда `/health` показывает метрики и состояние задач.

@@ -130,9 +130,13 @@ def test_main_menu_clan_and_back_callbacks():
             m.build_prestige_embed = prestige
             try:
                 view = m.MainMenuView(1)
-                for name in ("tab_shop", "tab_daily", "tab_exchange", "tab_prestige"):
+                for name in ("tab_shop", "tab_daily"):
                     interaction = FakeInteraction(1)
                     await getattr(view, name).callback(interaction)
+                    assert interaction.edited
+                for name in ("tab_exchange", "tab_prestige"):
+                    interaction = FakeInteraction(1)
+                    await getattr(view, name)(interaction, None)
                     assert interaction.edited
             finally:
                 m.deny_if_disabled = original_deny
