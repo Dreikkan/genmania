@@ -332,7 +332,7 @@ def test_content_market_and_menu_helpers():
 
             m.get_active_statuses = statuses
             try:
-                rows = [("grid_4x4", "Grid", 100, "⚙️", "coins", 16)]
+                rows = [("grid_5x5", "Grid", 125, "⚙️", "coins", 25)]
                 interaction = FakeInteraction(1)
                 await m.open_upgrades_buy_select(interaction, 1, rows, set(), 0)
                 assert interaction.edited

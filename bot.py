@@ -16064,6 +16064,14 @@ class StarSelectView(SafeView):
             )
             nxt.callback = self.next_page
             self.add_item(nxt)
+        mass = discord.ui.Button(
+            label="Массовое улучшение",
+            emoji=get_emoji("_stars"),
+            style=discord.ButtonStyle.success,
+            row=1,
+        )
+        mass.callback = self.mass_upgrade
+        self.add_item(mass)
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
@@ -16111,6 +16119,10 @@ class StarSelectView(SafeView):
             self.author_id,
             location=location,
         )
+
+    async def mass_upgrade(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await show_mass_star_confirm(interaction, self.author_id)
 
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -16183,6 +16195,124 @@ async def show_star_confirm(
     )
 
 
+async def star_upgrade_attempt(
+    user_id: int,
+    item_id: str,
+    current_stars: int,
+    location: str | None = None,
+    slot: int | None = None,
+) -> dict:
+    """Одна попытка повышения звёздности."""
+    next_star = current_stars + 1
+    if next_star > 5:
+        return {"ok": False, "message": "Уже 5★."}
+    settings_star = STAR_UPGRADE[next_star]
+    cost = settings_star["gems"]
+    need = settings_star["copies"]
+
+    try:
+        async with db_transaction():
+            if location is not None and slot is not None:
+                async with bot.db.execute(
+                    "SELECT item_id, stars FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (user_id, location, slot),
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("Генератор не найден.")
+                real_item_id, real_stars = row
+                if real_item_id != item_id or real_stars != current_stars:
+                    raise ValueError("Данные изменились, попробуй снова.")
+
+            async with bot.db.execute(
+                "SELECT location, slot FROM inventory "
+                "WHERE user_id = ? AND item_id = ? AND stars = ? "
+                "AND location IN ('profile', 'storage') "
+                "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
+                "slot ASC",
+                (user_id, item_id, current_stars),
+            ) as c:
+                copies = [(r[0], r[1]) for r in await c.fetchall()]
+
+            if len(copies) < need:
+                raise ValueError(
+                    f"Нужно {need} копий, у тебя {len(copies)}."
+                )
+
+            if cost > 0:
+                cur = await bot.db.execute(
+                    "UPDATE players SET gems = gems - ? "
+                    "WHERE user_id = ? AND gems >= ?",
+                    (cost, user_id, cost),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"Нужно 💎 {cost}.")
+
+            selected = (
+                (location, slot)
+                if location is not None and slot is not None
+                else None
+            )
+            keep = selected if selected in copies else copies[0]
+            to_delete = [
+                copy for copy in copies if copy != keep
+            ][: need - 1]
+
+            for copy_location, copy_slot in to_delete:
+                await bot.db.execute(
+                    "DELETE FROM inventory WHERE user_id = ? "
+                    "AND location = ? AND slot = ?",
+                    (user_id, copy_location, copy_slot),
+                )
+
+            final_chance, pity, guaranteed = await get_star_chance(
+                user_id, item_id, next_star
+            )
+            success = guaranteed or random.random() < final_chance
+            if success:
+                await bot.db.execute(
+                    "UPDATE inventory SET stars = ? "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (next_star, user_id, keep[0], keep[1]),
+                )
+                await bot.db.execute(
+                    "INSERT OR IGNORE INTO player_star_collection "
+                    "(user_id, item_id, stars) VALUES (?, ?, ?)",
+                    (user_id, item_id, next_star),
+                )
+                await bot.db.execute(
+                    "DELETE FROM star_pity "
+                    "WHERE user_id = ? AND item_id = ? AND target_star = ?",
+                    (user_id, item_id, next_star),
+                )
+            else:
+                await bot.db.execute(
+                    """
+                    INSERT INTO star_pity
+                    (user_id, item_id, target_star, failures)
+                    VALUES (?, ?, ?, 1)
+                    ON CONFLICT(user_id, item_id, target_star)
+                    DO UPDATE SET failures = failures + 1
+                    """,
+                    (user_id, item_id, next_star),
+                )
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+
+    return {
+        "ok": True,
+        "success": success,
+        "next_star": next_star,
+        "gem_cost": cost,
+        "keep": keep,
+        "to_delete": to_delete,
+        "final_chance": final_chance,
+        "pity": pity,
+        "guaranteed": guaranteed,
+    }
+
+
 class StarConfirmView(SafeView):
     feature_key = "stars"
     def __init__(
@@ -16211,88 +16341,19 @@ class StarConfirmView(SafeView):
     @discord.ui.button(label="Улучшить", emoji=get_emoji("_stars"), style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        user_id = interaction.user.id
-        settings_star = STAR_UPGRADE[self.next_star]
-        cost = settings_star["gems"]
-        need = settings_star["copies"]
-        final_chance, pity, guaranteed = await get_star_chance(
-            user_id, self.item_id, self.next_star
+        result = await star_upgrade_attempt(
+            self.author_id,
+            self.item_id,
+            self.current_stars,
+            location=self.location,
+            slot=self.slot,
         )
-
-        try:
-            async with db_transaction():
-                async with bot.db.execute(
-                    "SELECT item_id, stars FROM inventory "
-                    "WHERE user_id = ? AND location = ? AND slot = ?",
-                    (user_id, self.location, self.slot),
-                ) as c:
-                    row = await c.fetchone()
-                if not row:
-                    raise ValueError("Генератор не найден.")
-                real_item_id, real_stars = row
-                if real_item_id != self.item_id or real_stars != self.current_stars:
-                    raise ValueError("Данные изменились, попробуй снова.")
-
-                async with bot.db.execute(
-                    "SELECT location, slot FROM inventory "
-                    "WHERE user_id = ? AND item_id = ? AND stars = ? "
-                    "AND location IN ('profile', 'storage') "
-                    "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
-                    "slot ASC",
-                    (user_id, self.item_id, self.current_stars),
-                ) as c:
-                    copies = [(r[0], r[1]) for r in await c.fetchall()]
-
-                if len(copies) < need:
-                    raise ValueError(f"Нужно {need} копий, у тебя {len(copies)}.")
-
-                if cost > 0:
-                    cur = await bot.db.execute(
-                        "UPDATE players SET gems = gems - ? "
-                        "WHERE user_id = ? AND gems >= ?",
-                        (cost, user_id, cost),
-                    )
-                    if cur.rowcount == 0:
-                        raise ValueError(f"Нужно 💎 {cost}.")
-
-                selected = (self.location, self.slot)
-                keep = selected if selected in copies else copies[0]
-                to_delete = [copy for copy in copies if copy != keep][:need - 1]
-
-                for copy_location, copy_slot in to_delete:
-                    await bot.db.execute(
-                        "DELETE FROM inventory WHERE user_id = ? "
-                        "AND location = ? AND slot = ?",
-                        (user_id, copy_location, copy_slot),
-                    )
-
-                success = guaranteed or random.random() < final_chance
-                if success:
-                    await bot.db.execute(
-                        "UPDATE inventory SET stars = ? "
-                        "WHERE user_id = ? AND location = ? AND slot = ?",
-                        (self.next_star, user_id, keep[0], keep[1]),
-                    )
-                    await bot.db.execute(
-                        "INSERT OR IGNORE INTO player_star_collection "
-                        "(user_id, item_id, stars) VALUES (?, ?, ?)",
-                        (user_id, self.item_id, self.next_star),
-                    )
-                    await bot.db.execute(
-                        "DELETE FROM star_pity "
-                        "WHERE user_id = ? AND item_id = ? AND target_star = ?",
-                        (user_id, self.item_id, self.next_star),
-                    )
-                else:
-                    await bot.db.execute("""
-                        INSERT INTO star_pity
-                        (user_id, item_id, target_star, failures)
-                        VALUES (?, ?, ?, 1)
-                        ON CONFLICT(user_id, item_id, target_star)
-                        DO UPDATE SET failures = failures + 1
-                    """, (user_id, self.item_id, self.next_star))
-        except ValueError as e:
-            return await self.fail(interaction, f"❌ {e}")
+        if not result["ok"]:
+            return await self.fail(interaction, f"❌ {result['message']}")
+        user_id = self.author_id
+        success = result["success"]
+        keep = result["keep"]
+        to_delete = result["to_delete"]
 
         if success:
             await update_story_quests(self.author_id, "stars", 1)
@@ -16330,6 +16391,167 @@ class StarConfirmView(SafeView):
     async def fail(self, interaction: discord.Interaction, msg: str):
         embed = BotEmbed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
+
+
+async def mass_star_upgrade_all(user_id: int) -> dict:
+    """Повышает звёздность всем генераторам, где хватает копий и гемов."""
+    successes = failures = attempts = gems_spent = 0
+    async with bot.db.execute(
+        "SELECT gems FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    gems = (row[0] if row else 0) or 0
+
+    while True:
+        async with bot.db.execute(
+            "SELECT item_id, stars, COUNT(*) FROM inventory "
+            "WHERE user_id = ? AND location IN ('profile', 'storage') "
+            "AND stars < 5 GROUP BY item_id, stars "
+            "ORDER BY stars ASC, item_id ASC",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+
+        chosen = None
+        for item_id, stars, count in rows:
+            settings = STAR_UPGRADE[stars + 1]
+            if count < settings["copies"]:
+                continue
+            if settings["gems"] > gems:
+                continue
+            chosen = (item_id, stars)
+            break
+        if chosen is None:
+            break
+
+        result = await star_upgrade_attempt(user_id, *chosen)
+        if not result["ok"]:
+            break
+        attempts += 1
+        gems -= result["gem_cost"]
+        gems_spent += result["gem_cost"]
+        if result["success"]:
+            successes += 1
+        else:
+            failures += 1
+
+    unlocked = []
+    if attempts:
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
+        if successes:
+            await update_story_quests(user_id, "stars", successes)
+            await update_quest_progress(user_id, "star_up_1", successes)
+        if failures:
+            await update_quest_progress(user_id, "star_fail_1", failures)
+        unlocked = await check_achievements(user_id)
+
+    return {
+        "attempts": attempts,
+        "successes": successes,
+        "failures": failures,
+        "gems_spent": gems_spent,
+        "unlocked": unlocked,
+    }
+
+
+async def show_mass_star_confirm(
+    interaction: discord.Interaction, author_id: int
+):
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT gems FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    gems = (row[0] if row else 0) or 0
+
+    possible = 0
+    async with bot.db.execute(
+        "SELECT item_id, stars, COUNT(*) FROM inventory "
+        "WHERE user_id = ? AND location IN ('profile', 'storage') "
+        "AND stars < 5 GROUP BY item_id, stars",
+        (user_id,),
+    ) as c:
+        rows = await c.fetchall()
+    for item_id, stars, count in rows:
+        settings = STAR_UPGRADE[stars + 1]
+        possible += count // settings["copies"]
+
+    if possible <= 0:
+        await interaction.followup.send(
+            "❌ Нет генераторов с достаточным числом копий.", ephemeral=True
+        )
+        return
+
+    embed = BotEmbed(
+        title="⭐ Массовое повышение звёздности",
+        description=(
+            f"Доступно попыток (минимум): **{possible}**\n"
+            f"Гемов: **💎 {gems}**\n\n"
+            "Будут улучшены все генераторы, где хватает копий и гемов. "
+            "После завершения бот покажет число успешных и неудачных попыток."
+        ),
+        color=0xf1c40f,
+    )
+    await interaction.edit_original_response(
+        embed=embed, view=MassStarConfirmView(author_id)
+    )
+
+
+class MassStarConfirmView(BaseView):
+    feature_key = "stars"
+
+    async def _run(self, interaction: discord.Interaction):
+        result = await mass_star_upgrade_all(self.author_id)
+        if result["attempts"] == 0:
+            description = (
+                "❌ Не удалось выполнить ни одной попытки.\n"
+                "Проверь копии генераторов и гемы."
+            )
+            color = 0xe74c3c
+        else:
+            description = (
+                f"Успешно: **{result['successes']}**\n"
+                f"Неудачно: **{result['failures']}**\n"
+                f"Всего попыток: **{result['attempts']}**\n"
+                f"Потрачено гемов: **💎 {result['gems_spent']}**"
+            )
+            if result["unlocked"]:
+                description += "\n\n🏆 " + ", ".join(
+                    f"{emoji} {name}"
+                    for emoji, name, _ in result["unlocked"]
+                )
+            color = 0x2ecc71 if result["successes"] else 0xf1c40f
+        embed = BotEmbed(
+            title="⭐ Массовое улучшение завершено",
+            description=description,
+            color=color,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=ProfileView(self.author_id)
+        )
+
+    @discord.ui.button(
+        label="Улучшить всё",
+        emoji=get_emoji("_stars"),
+        style=discord.ButtonStyle.success,
+    )
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await self._run(interaction)
+
+    @discord.ui.button(
+        label="Отмена",
+        emoji=get_emoji("_cancel"),
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await open_star_view(interaction, self.author_id)
 
 
 # ============================================================
@@ -16697,6 +16919,15 @@ class CraftSelectView(SafeView):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
+        mass = discord.ui.Button(
+            label="Массовый синтез",
+            emoji=get_emoji("_synthesis"),
+            style=discord.ButtonStyle.success,
+            row=1,
+        )
+        mass.callback = self.mass_craft
+        self.add_item(mass)
+
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
         back.callback = self.back
         self.add_item(back)
@@ -16740,6 +16971,10 @@ class CraftSelectView(SafeView):
         )
         await interaction.edit_original_response(embed=embed, view=CraftConfirmView(self.author_id, item_id))
 
+    async def mass_craft(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await show_mass_craft_confirm(interaction, self.author_id, self.page)
+
     async def prev_page(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await open_craft_view(interaction, self.author_id, self.page - 1)
@@ -16751,6 +16986,158 @@ class CraftSelectView(SafeView):
     async def back(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await go_back(interaction, self.author_id, fallback="profile")
+
+
+async def craft_attempt(user_id: int, item_id: str, use_cat: bool) -> dict:
+    """Одна попытка синтеза. Возвращает результат и данные для embed."""
+    next_id = CRAFT_CHAIN.get(item_id)
+    if not next_id:
+        return {"ok": False, "message": "Этот генератор нельзя синтезировать."}
+    settings = CRAFT_SETTINGS.get(item_id, {"chance": 1.0, "gems": 0})
+    base_chance, gem_cost = settings["chance"], settings["gems"]
+
+    async with bot.db.execute(
+        "SELECT name, emoji FROM items WHERE id = ?", (item_id,)
+    ) as c:
+        src = await c.fetchone()
+    async with bot.db.execute(
+        "SELECT name, emoji FROM items WHERE id = ?", (next_id,)
+    ) as c:
+        dst = await c.fetchone()
+    if not src or not dst:
+        return {"ok": False, "message": "Генератор не найден в базе."}
+    src_name, src_emoji = src
+    dst_name, dst_emoji = dst
+
+    try:
+        async with db_transaction():
+            async with bot.db.execute(
+                "SELECT location, slot FROM inventory "
+                "WHERE user_id = ? AND item_id = ? AND stars = 0 "
+                "AND location IN ('profile', 'storage') "
+                "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
+                "slot LIMIT ?",
+                (user_id, item_id, CRAFT_COST),
+            ) as c:
+                owned = await c.fetchall()
+
+            if len(owned) < CRAFT_COST:
+                raise ValueError(
+                    f"Нужно {CRAFT_COST} × {src_name} без звёзд, "
+                    f"у тебя {len(owned)}."
+                )
+
+            async with bot.db.execute(
+                "SELECT gems, catalysts FROM players WHERE user_id = ?",
+                (user_id,),
+            ) as c:
+                gems, cats = await c.fetchone()
+            if gems < gem_cost:
+                raise ValueError(f"Нужно 💎 {gem_cost}, у тебя {gems}.")
+            if use_cat and cats < 1:
+                raise ValueError("Нет катализаторов.")
+
+            for location, slot in owned:
+                await bot.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = ? AND slot = ?",
+                    (user_id, location, slot),
+                )
+
+            if gem_cost > 0:
+                cur = await bot.db.execute(
+                    "UPDATE players SET gems = gems - ? "
+                    "WHERE user_id = ? AND gems >= ?",
+                    (gem_cost, user_id, gem_cost),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Не хватает гемов.")
+
+            catalyst_used = 0
+            if use_cat:
+                cur = await bot.db.execute(
+                    "UPDATE players SET catalysts = catalysts - 1 "
+                    "WHERE user_id = ? AND catalysts >= 1",
+                    (user_id,),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError("Нет катализаторов.")
+                catalyst_used = 1
+
+            final_chance, pity, guaranteed = await get_craft_chance(
+                user_id, item_id, use_cat
+            )
+            success = guaranteed or random.random() < final_chance
+
+            await bot.db.execute(
+                "INSERT INTO craft_log "
+                "(user_id, item_id, success, gems_spent, catalyst_used) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, item_id, int(success), gem_cost, catalyst_used),
+            )
+
+            if success:
+                try:
+                    await place_items(
+                        user_id, next_id, 1, commit=False,
+                        stars=CRAFT_RESULT_STARS,
+                    )
+                except ValueError:
+                    loc, slot = owned[0]
+                    await bot.db.execute(
+                        "INSERT INTO inventory "
+                        "(user_id, slot, item_id, location, stars) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (user_id, slot, next_id, loc, CRAFT_RESULT_STARS),
+                    )
+            else:
+                try:
+                    await place_items(
+                        user_id, item_id, 1, commit=False, stars=0
+                    )
+                except ValueError:
+                    log.exception(
+                        "Не удалось вернуть копию после провала синтеза %s",
+                        user_id,
+                    )
+
+            await bot.db.execute(
+                "UPDATE players SET total_crafts = total_crafts + 1, "
+                "total_successes = total_successes + ? WHERE user_id = ?",
+                (int(success), user_id),
+            )
+            if success:
+                await bot.db.execute(
+                    "DELETE FROM craft_pity WHERE user_id = ? AND item_id = ?",
+                    (user_id, item_id),
+                )
+            else:
+                await bot.db.execute(
+                    """
+                    INSERT INTO craft_pity (user_id, item_id, failures)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(user_id, item_id)
+                    DO UPDATE SET failures = failures + 1
+                    """,
+                    (user_id, item_id),
+                )
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+
+    return {
+        "ok": True,
+        "success": success,
+        "gem_cost": gem_cost,
+        "catalyst_used": catalyst_used,
+        "base_chance": base_chance,
+        "final_chance": final_chance,
+        "pity": pity,
+        "guaranteed": guaranteed,
+        "src_name": src_name,
+        "src_emoji": src_emoji,
+        "dst_name": dst_name,
+        "dst_emoji": dst_emoji,
+    }
 
 
 class CraftConfirmView(SafeView):
@@ -16783,133 +17170,22 @@ class CraftConfirmView(SafeView):
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
     async def do_craft(self, interaction: discord.Interaction, use_cat: bool):
-        user_id = interaction.user.id
-        item_id = self.item_id
-        next_id = CRAFT_CHAIN[item_id]
-        settings = CRAFT_SETTINGS.get(item_id, {"chance": 1.0, "gems": 0})
-        base_chance, gem_cost = settings["chance"], settings["gems"]
+        result = await craft_attempt(self.author_id, self.item_id, use_cat)
+        if not result["ok"]:
+            return await self.fail(interaction, f"❌ {result['message']}")
 
-        async with bot.db.execute("SELECT name, emoji FROM items WHERE id = ?", (item_id,)) as c:
-            src = await c.fetchone()
-        async with bot.db.execute("SELECT name, emoji FROM items WHERE id = ?", (next_id,)) as c:
-            dst = await c.fetchone()
-        if not src or not dst:
-            return await self.fail(interaction, "❌ Генератор не найден в базе.")
-        src_name, src_emoji = src
-        dst_name, dst_emoji = dst
-
-        try:
-            async with db_transaction():
-                async with bot.db.execute(
-                    "SELECT location, slot FROM inventory "
-                    "WHERE user_id = ? AND item_id = ? AND stars = 0 "
-                    "AND location IN ('profile', 'storage') "
-                    "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
-                    "slot LIMIT ?",
-                    (user_id, item_id, CRAFT_COST),
-                ) as c:
-                    owned = await c.fetchall()
-
-                if len(owned) < CRAFT_COST:
-                    raise ValueError(
-                        f"Нужно {CRAFT_COST} × {src_name} без звёзд, у тебя {len(owned)}."
-                    )
-
-                async with bot.db.execute(
-                    "SELECT gems, catalysts FROM players WHERE user_id = ?", (user_id,)
-                ) as c:
-                    gems, cats = await c.fetchone()
-                if gems < gem_cost:
-                    raise ValueError(f"Нужно 💎 {gem_cost}, у тебя {gems}.")
-                if use_cat and cats < 1:
-                    raise ValueError("Нет катализаторов.")
-
-                for location, slot in owned:
-                    await bot.db.execute(
-                        "DELETE FROM inventory WHERE user_id = ? AND location = ? AND slot = ?",
-                        (user_id, location, slot),
-                    )
-
-                if gem_cost > 0:
-                    cur = await bot.db.execute(
-                        "UPDATE players SET gems = gems - ? "
-                        "WHERE user_id = ? AND gems >= ?",
-                        (gem_cost, user_id, gem_cost),
-                    )
-                    if cur.rowcount == 0:
-                        raise ValueError("Не хватает гемов.")
-
-                catalyst_used = 0
-                if use_cat:
-                    cur = await bot.db.execute(
-                        "UPDATE players SET catalysts = catalysts - 1 "
-                        "WHERE user_id = ? AND catalysts >= 1",
-                        (user_id,),
-                    )
-                    if cur.rowcount == 0:
-                        raise ValueError("Нет катализаторов.")
-                    catalyst_used = 1
-
-                final_chance, pity, guaranteed = await get_craft_chance(
-                    user_id, item_id, use_cat
-                )
-                success = guaranteed or random.random() < final_chance
-
-                await bot.db.execute(
-                    "INSERT INTO craft_log "
-                    "(user_id, item_id, success, gems_spent, catalyst_used) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, item_id, int(success), gem_cost, catalyst_used),
-                )
-
-                if success:
-                    try:
-                        await place_items(
-                            user_id, next_id, 1, commit=False,
-                            stars=CRAFT_RESULT_STARS
-                        )
-                    except ValueError:
-                        # Мы только что освободили слоты — кладём результат
-                        # в первый освободившийся слот, чтобы не потерять его.
-                        loc, slot = owned[0]
-                        await bot.db.execute(
-                            "INSERT INTO inventory "
-                            "(user_id, slot, item_id, location, stars) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (user_id, slot, next_id, loc, CRAFT_RESULT_STARS),
-                        )
-                else:
-                    # При провале возвращаем одну исходную копию, чтобы
-                    # синтез не был слишком суровым.
-                    try:
-                        await place_items(
-                            user_id, item_id, 1, commit=False, stars=0
-                        )
-                    except ValueError:
-                        log.exception(
-                            "Не удалось вернуть копию после провала синтеза %s",
-                            user_id,
-                        )
-
-                await bot.db.execute(
-                    "UPDATE players SET total_crafts = total_crafts + 1, "
-                    "total_successes = total_successes + ? WHERE user_id = ?",
-                    (int(success), user_id),
-                )
-                if success:
-                    await bot.db.execute(
-                        "DELETE FROM craft_pity WHERE user_id = ? AND item_id = ?",
-                        (user_id, item_id),
-                    )
-                else:
-                    await bot.db.execute("""
-                        INSERT INTO craft_pity (user_id, item_id, failures)
-                        VALUES (?, ?, 1)
-                        ON CONFLICT(user_id, item_id)
-                        DO UPDATE SET failures = failures + 1
-                    """, (user_id, item_id))
-        except ValueError as e:
-            return await self.fail(interaction, f"❌ {e}")
+        user_id = self.author_id
+        success = result["success"]
+        use_cat = bool(result["catalyst_used"])
+        base_chance = result["base_chance"]
+        final_chance = result["final_chance"]
+        pity = result["pity"]
+        guaranteed = result["guaranteed"]
+        gem_cost = result["gem_cost"]
+        src_name = result["src_name"]
+        src_emoji = result["src_emoji"]
+        dst_name = result["dst_name"]
+        dst_emoji = result["dst_emoji"]
 
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
@@ -16972,6 +17248,198 @@ class CraftConfirmView(SafeView):
     async def fail(self, interaction: discord.Interaction, msg: str):
         embed = BotEmbed(title="❌ Ошибка", description=msg, color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
+
+
+async def mass_craft_all(
+    user_id: int, guild_id: int | None, use_cat: bool = False
+) -> dict:
+    """Выполняет все доступные синтезы и возвращает статистику попыток."""
+    successes = failures = attempts = 0
+    gems_spent = catalysts_used = 0
+    while True:
+        progressed = False
+        for item_id in CRAFT_CHAIN:
+            result = await craft_attempt(user_id, item_id, use_cat)
+            if not result["ok"]:
+                continue
+            progressed = True
+            attempts += 1
+            gems_spent += result["gem_cost"]
+            catalysts_used += result["catalyst_used"]
+            if result["success"]:
+                successes += 1
+            else:
+                failures += 1
+        if not progressed:
+            break
+
+    unlocked = []
+    if attempts:
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
+        await update_story_quests(user_id, "synthesize", attempts)
+        await update_quest_progress(user_id, "craft_1", attempts)
+        await update_quest_progress(user_id, "craft_3", attempts)
+        await update_quest_progress(user_id, "craft_5", attempts)
+        if successes:
+            await update_quest_progress(user_id, "success_2", successes)
+        if catalysts_used:
+            await update_quest_progress(
+                user_id, "use_catalyst", catalysts_used
+            )
+        clan = await get_clan(user_id)
+        if clan:
+            await update_clan_quest(clan[0], "synthesize", attempts)
+        unlocked = await check_achievements(user_id)
+        if successes:
+            await add_season_xp(
+                user_id,
+                season_xp_amount("craft_success", successes),
+                guild_id,
+                action="craft_success",
+            )
+        if failures:
+            await add_season_xp(
+                user_id,
+                season_xp_amount("craft_fail", failures),
+                guild_id,
+                action="craft_fail",
+            )
+        await complete_onboarding_step(user_id, "craft")
+
+    return {
+        "attempts": attempts,
+        "successes": successes,
+        "failures": failures,
+        "gems_spent": gems_spent,
+        "catalysts_used": catalysts_used,
+        "unlocked": unlocked,
+    }
+
+
+async def show_mass_craft_confirm(
+    interaction: discord.Interaction, author_id: int, page: int = 0
+):
+    user_id = interaction.user.id
+    async with bot.db.execute(
+        "SELECT gems, catalysts FROM players WHERE user_id = ?", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    gems, catalysts = row if row else (0, 0)
+
+    possible = 0
+    for item_id in CRAFT_CHAIN:
+        async with bot.db.execute(
+            "SELECT COUNT(*) FROM inventory "
+            "WHERE user_id = ? AND item_id = ? AND stars = 0 "
+            "AND location IN ('profile', 'storage')",
+            (user_id, item_id),
+        ) as c:
+            count = (await c.fetchone())[0]
+        possible += count // CRAFT_COST
+
+    if possible <= 0:
+        await interaction.followup.send(
+            "❌ Нет копий 0★ для массового синтеза.", ephemeral=True
+        )
+        return
+
+    embed = BotEmbed(
+        title="⚗️ Массовый синтез",
+        description=(
+            f"Доступно синтезов (минимум): **{possible}**\n"
+            f"Копии берутся из энергостанции и хранилища.\n"
+            f"Гемов: **💎 {gems}** · катализаторов: **{catalysts}**\n\n"
+            "Будут выполнены все возможные синтезы. "
+            "После завершения бот покажет число успешных и неудачных попыток."
+        ),
+        color=0x3498db,
+    )
+    await interaction.edit_original_response(
+        embed=embed,
+        view=MassCraftConfirmView(author_id, page, catalysts),
+    )
+
+
+class MassCraftConfirmView(BaseView):
+    feature_key = "craft"
+
+    def __init__(self, author_id: int, page: int = 0, catalysts: int = 0):
+        super().__init__(author_id, timeout=120)
+        self.page = page
+        self.catalysts = catalysts
+        if catalysts < 1:
+            self.with_catalyst.disabled = True
+
+    async def _run(self, interaction: discord.Interaction, use_cat: bool):
+        result = await mass_craft_all(
+            self.author_id, interaction.guild_id, use_cat
+        )
+        if result["attempts"] == 0:
+            description = (
+                "❌ Не удалось выполнить ни одной попытки.\n"
+                "Проверь копии генераторов, гемы и катализаторы."
+            )
+            color = 0xe74c3c
+        else:
+            description = (
+                f"Успешно: **{result['successes']}**\n"
+                f"Неудачно: **{result['failures']}**\n"
+                f"Всего попыток: **{result['attempts']}**\n"
+                f"Потрачено гемов: **💎 {result['gems_spent']}**"
+            )
+            if result["catalysts_used"]:
+                description += (
+                    f"\nИспользовано катализаторов: "
+                    f"**{result['catalysts_used']}**"
+                )
+            if result["unlocked"]:
+                description += "\n\n🏆 " + ", ".join(
+                    f"{emoji} {name}"
+                    for emoji, name, _ in result["unlocked"]
+                )
+            color = 0x2ecc71 if result["successes"] else 0xf1c40f
+        embed = BotEmbed(
+            title="⚗️ Массовый синтез завершён",
+            description=description,
+            color=color,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=ProfileView(self.author_id)
+        )
+
+    @discord.ui.button(
+        label="Без катализатора",
+        emoji=get_emoji("_synthesis"),
+        style=discord.ButtonStyle.primary,
+    )
+    async def no_catalyst(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await self._run(interaction, False)
+
+    @discord.ui.button(
+        label="С катализатором",
+        emoji=get_emoji("_catalyst"),
+        style=discord.ButtonStyle.success,
+    )
+    async def with_catalyst(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await self._run(interaction, True)
+
+    @discord.ui.button(
+        label="Отмена",
+        emoji=get_emoji("_cancel"),
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await open_craft_view(interaction, self.author_id, self.page)
 
 
 # ============================================================
@@ -18678,19 +19146,39 @@ class UpgradesView(BaseView):
         self.page = min(total - 1, self.page + 1)
         await interaction.edit_original_response(embed=embed, view=self)
 
+
+def grid_size_from_upgrade_id(upgrade_id: str) -> int:
+    """Возвращает размер сетки из id вида grid_7x7."""
+    if not isinstance(upgrade_id, str) or not upgrade_id.startswith("grid_"):
+        return 0
+    try:
+        side = int(upgrade_id.split("_", 1)[1].split("x", 1)[0])
+    except (IndexError, ValueError):
+        return 0
+    return side * side
+
+
 async def open_upgrades_buy_select(
     interaction: discord.Interaction, author_id: int, rows: list, owned: set,
     page: int, source_page: int = 0,
 ):
-    total = len(rows)
-    total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
-
     # Получаем текущий размер сетки для проверки
     async with bot.db.execute("SELECT grid_size FROM players WHERE user_id = ?", (author_id,)) as c:
         row = await c.fetchone()
         current_grid_size = (row[0] if row else START_GRID) or START_GRID
+
+    available_rows = []
+    for gid, name, price, emoji, currency, size in rows:
+        size = size or grid_size_from_upgrade_id(gid)
+        if size > 0 and size <= current_grid_size:
+            continue
+        available_rows.append((gid, name, price, emoji, currency, size))
+    rows = available_rows
+
+    total = len(rows)
+    total_pages = max(1, (total + SHOP_SELECT_PAGE_SIZE - 1) // SHOP_SELECT_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    chunk = rows[page * SHOP_SELECT_PAGE_SIZE: page * SHOP_SELECT_PAGE_SIZE + SHOP_SELECT_PAGE_SIZE]
 
     options = []
     active_statuses = await get_active_statuses(author_id)
@@ -18700,31 +19188,29 @@ async def open_upgrades_buy_select(
     )
     for gid, name, price, emoji, currency, size in chunk:
         cur = "🪙" if currency == "coins" else "💎"
-        
-        # Если это сетка, и она уже меньше или равна текущей — блокируем
-        disabled = False
         label_suffix = ""
-        if size > 0 and size <= current_grid_size:
-            disabled = True
-            label_suffix = f" (у вас {current_grid_size})"
-        elif gid in STATUS_BONUSES:
+        if gid in STATUS_BONUSES:
             rank = status_rank(gid)
             if rank < owned_status_rank:
-                disabled = True
                 label_suffix = " (уже есть выше)"
             elif rank == owned_status_rank:
                 label_suffix = " (продлить)"
             price = status_price(gid, 1) or price
         elif gid in owned:
-            disabled = True
             label_suffix = " ✅"
-            
+
         options.append(discord.SelectOption(
             label=f"{name} — {cur} {price}{label_suffix}",
             value=gid,
             emoji=emoji,
-            default=False
+            default=False,
         ))
+
+    if not options:
+        await interaction.followup.send(
+            "❌ Нет доступных улучшений.", ephemeral=True
+        )
+        return
 
     embed = BotEmbed(
         title="💎 Выбери улучшение",
@@ -18804,8 +19290,7 @@ class UpgradesBuySelectView(SafeView):
         if category == "grid":
             new_grid_size = size
         elif upgrade_id.startswith("grid_"):
-            side = int(upgrade_id.split("_")[1].split("x")[0])
-            new_grid_size = side * side
+            new_grid_size = grid_size_from_upgrade_id(upgrade_id)
 
         if new_grid_size is not None:
             async with bot.db.execute(
