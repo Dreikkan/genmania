@@ -27,9 +27,9 @@ def test_status_ladder_values():
     assert m.status_rank("diamond") > m.status_rank("vip")
 
 
-def test_cat_does_not_dominate_vip():
-    cat_max = m.PET_TYPES["cat"]["per_level"] * m.PET_MAX_LEVEL
-    assert abs(cat_max - m.STATUS_BONUSES["vip"]) < 1e-9, cat_max
+def test_cat_matches_vip_at_first_breakthrough():
+    cat_at_10 = m.PET_TYPES["cat"]["per_level"] * 10
+    assert abs(cat_at_10 - m.STATUS_BONUSES["vip"]) < 1e-9, cat_at_10
 
 
 def test_prestige_preserves_purchased_status():

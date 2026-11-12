@@ -134,7 +134,8 @@ def test_feed_active_pet_rejects_bad_state():
                 "UPDATE players SET coins = 1000 WHERE user_id = 1"
             )
             await db.execute(
-                "UPDATE user_pets_v2 SET level = 10 WHERE user_id = 1"
+                "UPDATE user_pets_v2 SET level = ? WHERE user_id = 1",
+                (m.PET_MAX_LEVEL,),
             )
             await db.commit()
             ok, message, _, _ = await m.feed_active_pet(1)

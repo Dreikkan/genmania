@@ -980,7 +980,7 @@ def test_misc_view_and_open_helpers():
             m.exchange_fee_rate = lambda amount, direction: 1.0
             try:
                 modal = m.CoinsToGemsModal(70)
-                modal.amount._value = "12"
+                modal.amount._value = str(m.COINS_PER_GEM)
                 interaction = FakeInteraction(70)
                 await modal.on_submit(interaction)
                 assert interaction.followup.sent

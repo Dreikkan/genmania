@@ -41,15 +41,17 @@ def test_pet_effect_entries_include_secondary_effect():
 
 
 def test_pet_balance_values():
-    max_level = m.PET_MAX_LEVEL
-    cat_coin = m.PET_TYPES["cat"]["per_level"] * max_level
-    dog_craft = m.PET_TYPES["dog"]["per_level"] * max_level
-    dog_coin = m.PET_TYPES["dog"]["extra_effects"]["income_coins"] * max_level
-    phoenix_gem = m.PET_TYPES["phoenix"]["per_level"] * max_level
+    level_10 = 10
+    cat_coin = m.PET_TYPES["cat"]["per_level"] * level_10
+    dog_craft = m.PET_TYPES["dog"]["per_level"] * level_10
+    dog_coin = m.PET_TYPES["dog"]["extra_effects"]["income_coins"] * level_10
+    phoenix_gem = m.PET_TYPES["phoenix"]["per_level"] * level_10
     phoenix_coin = (
-        m.PET_TYPES["phoenix"]["extra_effects"]["income_coins"] * max_level
+        m.PET_TYPES["phoenix"]["extra_effects"]["income_coins"] * level_10
     )
 
+    assert m.PET_MAX_LEVEL == 200
+    assert m.PET_BREAKTHROUGH_LEVELS[-1] == 200
     assert cat_coin == 0.15
     assert dog_craft == 0.20
     assert dog_coin == 0.10
@@ -57,8 +59,13 @@ def test_pet_balance_values():
     assert phoenix_coin == 0.10
     assert dog_coin < cat_coin
     assert phoenix_coin < cat_coin
-    assert m.PET_TYPES["dragon"]["per_level"] * max_level == 0.40
-    assert m.PET_TYPES["wolf"]["per_level"] * max_level == 0.20
+    assert m.PET_TYPES["dragon"]["per_level"] * level_10 == 0.40
+    assert m.PET_TYPES["wolf"]["per_level"] * level_10 == 0.20
+    costs = [m.pet_feed_cost(level) for level in m.PET_BREAKTHROUGH_LEVELS]
+    assert costs[0] == (220, 2)
+    for previous, current in zip(costs, costs[1:]):
+        assert current[0] > previous[0]
+        assert current[1] > previous[1]
 
 
 def test_get_pet_bonus_sums_primary_and_secondary():
@@ -125,6 +132,8 @@ def test_pet_guide_values_match_rework():
             assert "+15% доход монет" in pets_text
             assert "+20% шанс синтеза" in pets_text
             assert "+25% доход гемов" in pets_text
+            assert "200 ур." in pets_text
+            assert "Прорывы" in pets_text
         finally:
             await db.close()
             m.bot.db = None
