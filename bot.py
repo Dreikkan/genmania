@@ -298,7 +298,6 @@ CRAFT_CHAIN = {
     "divine_gen":     "legendary_gen",
 }
 
-CRAFT_COST = 3
 CRAFT_RESULT_STARS = 0  # синтез создаёт обычную копию без звезды
 
 # Генераторы, которые нельзя купить даже на бирже/аукционе.
@@ -314,13 +313,27 @@ GEM_INCOME = {
 # --- БАЛАНС ГЕНЕРАТОРОВ ---
 # Цена растёт быстрее дохода: высокие тиры хуже окупаются, но дают
 # больше дохода на слот. Синтез 2→1 компенсирует потерю слота.
-GENERATOR_BASE_PRICE = 15
+GENERATOR_BASE_PRICE = 8
 GENERATOR_BASE_INCOME_HOUR = 2.0
-GENERATOR_PRICE_MULT = 3.8
-GENERATOR_INCOME_MULT = 3.0
+GENERATOR_EARLY_PRICE_MULT = 2.8
+GENERATOR_EARLY_INCOME_MULT = 2.2
+GENERATOR_LATE_PRICE_MULT = 3.8
+GENERATOR_LATE_INCOME_MULT = 3.0
+GENERATOR_LATE_START_TIER = 20
 GENERATOR_TIER_COUNT = 30
+CRAFT_COST_EARLY = 2
+CRAFT_COST_LATE = 3
+CRAFT_COST = CRAFT_COST_LATE  # совместимость: стоимость позднего синтеза
+# Совместимость со старым API: множители позднего участка.
+GENERATOR_PRICE_MULT = GENERATOR_LATE_PRICE_MULT
+GENERATOR_INCOME_MULT = GENERATOR_LATE_INCOME_MULT
 GEM_GENERATOR_PRICE_MULT = 1.0  # ценность гем-генераторов в доходе, не в цене
 MAX_GENERATOR_ITEM_PRICE = 10**18
+
+GENERATOR_ORDER = ("basic_gen",) + tuple(CRAFT_CHAIN.values())
+GENERATOR_TIER_BY_ID = {
+    item_id: index + 1 for index, item_id in enumerate(GENERATOR_ORDER)
+}
 
 
 def round_price(p: float) -> int:
@@ -336,12 +349,38 @@ def round_price(p: float) -> int:
         return int(p / 10000) * 10000
 
 
+def craft_cost_for_tier(tier: int) -> int:
+    """Сколько копий нужно для синтеза в указанный тир."""
+    return (
+        CRAFT_COST_EARLY
+        if tier < GENERATOR_LATE_START_TIER
+        else CRAFT_COST_LATE
+    )
+
+
+def craft_cost_for_item(source_item_id: str) -> int:
+    """Стоимость синтеза из указанного генератора (по тиру результата)."""
+    target_id = CRAFT_CHAIN.get(source_item_id)
+    if not target_id:
+        return CRAFT_COST_LATE
+    target_tier = GENERATOR_TIER_BY_ID.get(
+        target_id, GENERATOR_TIER_COUNT
+    )
+    return craft_cost_for_tier(target_tier)
+
+
 def generator_price_income(index: int) -> tuple[float, float]:
     """Цена и доход/час для генератора по номеру (1-based)."""
-    return (
-        GENERATOR_BASE_PRICE * (GENERATOR_PRICE_MULT ** (index - 1)),
-        GENERATOR_BASE_INCOME_HOUR * (GENERATOR_INCOME_MULT ** (index - 1)),
-    )
+    price = GENERATOR_BASE_PRICE
+    income = GENERATOR_BASE_INCOME_HOUR
+    for tier in range(2, index + 1):
+        if tier < GENERATOR_LATE_START_TIER:
+            price *= GENERATOR_EARLY_PRICE_MULT
+            income *= GENERATOR_EARLY_INCOME_MULT
+        else:
+            price *= GENERATOR_LATE_PRICE_MULT
+            income *= GENERATOR_LATE_INCOME_MULT
+    return price, income
 
 
 def cap_passive_income(raw: float, seconds: float, limit: int) -> int:
@@ -4367,7 +4406,8 @@ GUIDE_RUNTIME.configure(
         "CASTLE": CASTLE,
         "CATALYST_BONUS": CATALYST_BONUS,
         "COLLECTION_BONUS_PER_ITEM": COLLECTION_BONUS_PER_ITEM,
-        "CRAFT_COST": CRAFT_COST,
+        "CRAFT_COST_EARLY": CRAFT_COST_EARLY,
+        "CRAFT_COST_LATE": CRAFT_COST_LATE,
         "CRAFT_HARD_PITY": CRAFT_HARD_PITY,
         "CRAFT_PITY_BONUS": CRAFT_PITY_BONUS,
         "CRAFT_PITY_MAX": CRAFT_PITY_MAX,
@@ -4380,8 +4420,11 @@ GUIDE_RUNTIME.configure(
         "EXCHANGE_FEE_RATE": EXCHANGE_FEE_RATE,
         "GEM_INCOME": GEM_INCOME,
         "GEMS_PER_COIN_RATE": GEMS_PER_COIN_RATE,
-        "GENERATOR_INCOME_MULT": GENERATOR_INCOME_MULT,
-        "GENERATOR_PRICE_MULT": GENERATOR_PRICE_MULT,
+        "GENERATOR_EARLY_INCOME_MULT": GENERATOR_EARLY_INCOME_MULT,
+        "GENERATOR_EARLY_PRICE_MULT": GENERATOR_EARLY_PRICE_MULT,
+        "GENERATOR_LATE_INCOME_MULT": GENERATOR_LATE_INCOME_MULT,
+        "GENERATOR_LATE_PRICE_MULT": GENERATOR_LATE_PRICE_MULT,
+        "GENERATOR_LATE_START_TIER": GENERATOR_LATE_START_TIER,
         "GENERATOR_TIER_COUNT": GENERATOR_TIER_COUNT,
         "MARKET_MAX_ACTIVE_ORDERS": MARKET_MAX_ACTIVE_ORDERS,
         "MARKET_MAX_DAILY_VOLUME": MARKET_MAX_DAILY_VOLUME,
@@ -17271,8 +17314,9 @@ async def open_craft_view(interaction: discord.Interaction, author_id: int, page
         emoji_str = custom.get(item_id, src[1])
         emoji_obj = parse_emoji_safe(emoji_str)  # Используем безопасную функцию
         
+        craft_cost = craft_cost_for_item(item_id)
         options_all.append(discord.SelectOption(
-            label=f"{src[0]} ({count}/{CRAFT_COST}) → {dst[0]}",
+            label=f"{src[0]} ({count}/{craft_cost}) → {dst[0]}",
             value=item_id,
             emoji=emoji_obj
         ))
@@ -17411,6 +17455,7 @@ async def craft_attempt(
         return {"ok": False, "message": "Генератор не найден в базе."}
     src_name, src_emoji = src
     dst_name, dst_emoji = dst
+    craft_cost = craft_cost_for_item(item_id)
 
     try:
         async with db_transaction():
@@ -17431,8 +17476,8 @@ async def craft_attempt(
                 for row in all_copies:
                     by_star.setdefault(row[2], []).append(row)
                 for star in sorted(by_star):
-                    if len(by_star[star]) >= CRAFT_COST:
-                        owned = by_star[star][:CRAFT_COST]
+                    if len(by_star[star]) >= craft_cost:
+                        owned = by_star[star][:craft_cost]
                         source_star = star
                         break
                 else:
@@ -17440,16 +17485,16 @@ async def craft_attempt(
             else:
                 owned = [
                     row for row in all_copies if row[2] == 0
-                ][:CRAFT_COST]
+                ][:craft_cost]
 
-            if len(owned) < CRAFT_COST:
+            if len(owned) < craft_cost:
                 suffix = (
                     "одинаковой звёздности"
                     if use_starred
                     else "без звёзд"
                 )
                 raise ValueError(
-                    f"Нужно {CRAFT_COST} × {src_name} {suffix}, "
+                    f"Нужно {craft_cost} × {src_name} {suffix}, "
                     f"у тебя {len(owned)}."
                 )
 
@@ -17555,6 +17600,7 @@ async def craft_attempt(
         "ok": True,
         "success": success,
         "gem_cost": gem_cost,
+        "craft_cost": craft_cost,
         "catalyst_used": catalyst_used,
         "base_chance": base_chance,
         "final_chance": final_chance,
@@ -17634,6 +17680,7 @@ class CraftConfirmView(SafeView):
         pity = result["pity"]
         guaranteed = result["guaranteed"]
         gem_cost = result["gem_cost"]
+        craft_cost = result["craft_cost"]
         src_name = result["src_name"]
         src_emoji = result["src_emoji"]
         dst_name = result["dst_name"]
@@ -17678,13 +17725,13 @@ class CraftConfirmView(SafeView):
         gem_str = f" | 💎 {gem_cost}" if gem_cost else ""
         if success:
             msg = (
-                f"⚗️ Успех! {CRAFT_COST}×{src_emoji} {src_name} → "
+                f"⚗️ Успех! {craft_cost}×{src_emoji} {src_name} → "
                 f"1×{dst_emoji} {dst_name} "
                 f"{result_stars}★\n{chance_str}{gem_str}"
             )
         else:
             msg = (
-                f"💥 Провал! Сгорело {CRAFT_COST - 1}×{src_emoji} "
+                f"💥 Провал! Сгорело {craft_cost - 1}×{src_emoji} "
                 f"{src_name}, 1 копия возвращена.\n{chance_str}{gem_str}"
             )
         if unlocked:
@@ -17844,7 +17891,7 @@ async def show_mass_craft_confirm(
             (user_id, item_id),
         ) as c:
             count = (await c.fetchone())[0]
-        possible += count // CRAFT_COST
+        possible += count // craft_cost_for_item(item_id)
 
     async with bot.db.execute(
         "SELECT item_id, stars, COUNT(*) FROM inventory "
@@ -17855,7 +17902,8 @@ async def show_mass_craft_confirm(
         star_rows = await c.fetchall()
     starred_count = sum(row[2] for row in star_rows)
     starred_possible = any(
-        count >= CRAFT_COST for _item_id, _stars, count in star_rows
+        count >= craft_cost_for_item(item_id)
+        for item_id, _stars, count in star_rows
     )
 
     if possible <= 0 and not starred_possible:
@@ -17927,7 +17975,7 @@ class MassCraftConfirmView(BaseView):
             )
         self.starred_toggle.label = "Звёздные: выкл"
         self.starred_toggle.style = discord.ButtonStyle.secondary
-        if starred_count < CRAFT_COST:
+        if starred_count < CRAFT_COST_EARLY:
             self.starred_toggle.disabled = True
 
     async def select_target(self, interaction: discord.Interaction):
@@ -23591,7 +23639,11 @@ class EditItemIncomeModal(discord.ui.Modal, title="Доход в час (нач�
 
 
 class EditStartCoinsModal(discord.ui.Modal, title="Стартовые монеты"):
-    value = discord.ui.TextInput(label="Монет новым игрокам", default="20", required=True)
+    value = discord.ui.TextInput(
+        label="Монет новым игрокам",
+        default=str(DEFAULT_START_COINS),
+        required=True,
+    )
 
     def __init__(self, author_id: int):
         super().__init__()

@@ -24,7 +24,7 @@ class PlayerRuntime:
         self._collection_count_getter: Callable[[], Callable] = lambda: None
         self.start_grid = 9
         self.storage_size = 36
-        self.default_start_coins = 20
+        self.default_start_coins = 8
         self.logger = logging.getLogger("gen_mania")
 
     def configure(

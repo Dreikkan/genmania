@@ -23,12 +23,13 @@ def test_generator_payback_stays_reasonable():
 
 
 def test_craft_is_cheaper_than_buying():
-    # 3 копии предыдущего тира должны стоить меньше готового генератора.
+    # Копии предыдущего тира должны стоить меньше готового генератора.
     for tier in range(1, 10):
         source_price, _ = m.generator_price_income(tier)
         result_price, _ = m.generator_price_income(tier + 1)
+        craft_cost = m.craft_cost_for_tier(tier + 1)
         assert m.round_price(result_price) > (
-            m.CRAFT_COST * m.round_price(source_price)
+            craft_cost * m.round_price(source_price)
         ), tier
 
 
@@ -42,11 +43,12 @@ def test_craft_is_slot_positive():
 
 
 def test_synthesis_keeps_total_income():
-    # 3 копии должны давать не меньше суммарного дохода, чем 1 результат.
+    # Копии должны давать не меньше суммарного дохода, чем 1 результат.
     for tier in range(1, 30):
         _, source_income = m.generator_price_income(tier)
         _, result_income = m.generator_price_income(tier + 1)
-        assert result_income >= m.CRAFT_COST * source_income - 1e-9, tier
+        craft_cost = m.craft_cost_for_tier(tier + 1)
+        assert result_income >= craft_cost * source_income - 1e-9, tier
 
 
 def test_star_stacking_does_not_beat_tier_progression():

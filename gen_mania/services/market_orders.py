@@ -700,7 +700,7 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
 
         match_failed = False
         try:
-            await match_market_orders(item_id)
+            await runtime.match_market_orders(item_id)
         except Exception:
             runtime.logger.exception(
                 "MARKET_MATCH: не удалось сопоставить ордера"
@@ -1011,6 +1011,7 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                     (order_id,),
                 )
 
+    runtime.match_market_orders = match_market_orders
     return (
         buy_market_item,
         sell_market_item,

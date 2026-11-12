@@ -86,7 +86,8 @@ def make_guide_layer(runtime: GuideRuntime):
         CASTLE = config["CASTLE"]
         CATALYST_BONUS = config["CATALYST_BONUS"]
         COLLECTION_BONUS_PER_ITEM = config["COLLECTION_BONUS_PER_ITEM"]
-        CRAFT_COST = config["CRAFT_COST"]
+        CRAFT_COST_EARLY = config["CRAFT_COST_EARLY"]
+        CRAFT_COST_LATE = config["CRAFT_COST_LATE"]
         CRAFT_HARD_PITY = config["CRAFT_HARD_PITY"]
         CRAFT_PITY_BONUS = config["CRAFT_PITY_BONUS"]
         CRAFT_PITY_MAX = config["CRAFT_PITY_MAX"]
@@ -99,8 +100,15 @@ def make_guide_layer(runtime: GuideRuntime):
         EXCHANGE_FEE_RATE = config["EXCHANGE_FEE_RATE"]
         GEM_INCOME = config["GEM_INCOME"]
         GEMS_PER_COIN_RATE = config["GEMS_PER_COIN_RATE"]
-        GENERATOR_INCOME_MULT = config["GENERATOR_INCOME_MULT"]
-        GENERATOR_PRICE_MULT = config["GENERATOR_PRICE_MULT"]
+        GENERATOR_EARLY_INCOME_MULT = config[
+            "GENERATOR_EARLY_INCOME_MULT"
+        ]
+        GENERATOR_EARLY_PRICE_MULT = config["GENERATOR_EARLY_PRICE_MULT"]
+        GENERATOR_LATE_INCOME_MULT = config[
+            "GENERATOR_LATE_INCOME_MULT"
+        ]
+        GENERATOR_LATE_PRICE_MULT = config["GENERATOR_LATE_PRICE_MULT"]
+        GENERATOR_LATE_START_TIER = config["GENERATOR_LATE_START_TIER"]
         GENERATOR_TIER_COUNT = config["GENERATOR_TIER_COUNT"]
         MARKET_MAX_ACTIVE_ORDERS = config["MARKET_MAX_ACTIVE_ORDERS"]
         MARKET_MAX_DAILY_VOLUME = config["MARKET_MAX_DAILY_VOLUME"]
@@ -277,17 +285,23 @@ def make_guide_layer(runtime: GuideRuntime):
             "generators": (
                 "🏗️ Генераторы",
                 "**Покупка:** common/uncommon/rare — в «Магазине»; epic–mythic — биржа или аукцион; пространственный/божественный/легендарный — только синтез.\n\n"
-                f"**Экономика тиров:** каждый следующий тир стоит "
-                f"×{_format_plain(GENERATOR_PRICE_MULT)}, а доход даёт "
-                f"×{_format_plain(GENERATOR_INCOME_MULT)}. "
-                "Высокие тиры окупаются дольше, зато дают больше дохода на слот. "
-                "Синтез 3 копий обычно дешевле покупки следующего тира, "
-                "но с ростом шанса провала выгода падает почти до нуля.\n\n"
-                f"**Синтез:** {CRAFT_COST} одинаковых 0★ → 1 выше уровнем без звезды. "
-                f"Шанс падает с тиром ({_format_percent(1.0)}% → "
+                f"**Экономика тиров:** до {GENERATOR_LATE_START_TIER - 1} тира "
+                f"цена ×{_format_plain(GENERATOR_EARLY_PRICE_MULT)}, "
+                f"доход ×{_format_plain(GENERATOR_EARLY_INCOME_MULT)}; "
+                f"с {GENERATOR_LATE_START_TIER} тира — "
+                f"×{_format_plain(GENERATOR_LATE_PRICE_MULT)} и "
+                f"×{_format_plain(GENERATOR_LATE_INCOME_MULT)}. "
+                "Высокие тиры окупаются дольше, зато дают больше дохода на слот.\n\n"
+                f"**Синтез:** до {GENERATOR_LATE_START_TIER - 1} тира — "
+                f"{CRAFT_COST_EARLY} одинаковых 0★ → 1 выше уровнем; "
+                f"с {GENERATOR_LATE_START_TIER} тира — "
+                f"{CRAFT_COST_LATE} копии. Шанс падает с тиром "
+                f"({_format_percent(1.0)}% → "
                 f"{_format_percent(craft_chance_min)}%), стоимость в гемах растёт "
                 f"(0 → {runtime.format_price(craft_gem_max)}). "
-                f"При провале 2 копии сгорают, 1 возвращается. "
+                f"При провале сгорает {CRAFT_COST_EARLY - 1} копия "
+                f"(на раннем участке) или {CRAFT_COST_LATE - 1} "
+                f"(на позднем), одна возвращается. "
                 f"Катализатор +{int(CATALYST_BONUS * 100)}%, "
                 f"за каждый провал шанс растёт на {int(CRAFT_PITY_BONUS * 100)}% "
                 f"(до +{int(CRAFT_PITY_MAX * 100)}%), "

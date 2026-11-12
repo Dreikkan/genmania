@@ -17,6 +17,13 @@ async def _init():
     db = await aiosqlite.connect(":memory:")
     m.bot.db = db
     await m.bot.init_db()
+    await db.execute(
+        "UPDATE items SET price = 15 WHERE id = 'basic_gen'"
+    )
+    await db.execute(
+        "UPDATE market_prices SET base_price = 15, current_price = 15 "
+        "WHERE item_id = 'basic_gen'"
+    )
     await db.execute("INSERT INTO players (user_id, coins) VALUES (1, 1000)")
     await db.commit()
     return db

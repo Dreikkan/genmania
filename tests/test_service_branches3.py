@@ -198,6 +198,9 @@ def test_market_order_errors_and_fill_paths():
                 "('weird_gen', 'Weird', 100, 1, '⚙️', 'special', 1)"
             )
             await db.execute(
+                "UPDATE items SET price = 15 WHERE id = 'basic_gen'"
+            )
+            await db.execute(
                 "INSERT OR REPLACE INTO market_prices "
                 "(item_id, base_price, current_price) "
                 "VALUES ('basic_gen', 100, 100), ('epic_gen', 100, 100), "

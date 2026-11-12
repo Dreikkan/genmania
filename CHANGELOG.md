@@ -2,13 +2,15 @@
 
 ## 2026-11-13
 
-- Rebalanced generator progression: income multiplier raised from 1.9 to
-  3.0, so synthesizing three copies no longer reduces total income.
+- New progression curve: base generator costs 8, start coins are 8;
+  tiers 1–19 use ×2.8 price / ×2.2 income, tiers 20+ use ×3.8 / ×3.0.
+- Synthesis costs 2 copies up to tier 19 and 3 copies from tier 20;
+  early synthesis is cheaper and income-positive.
 - Star income bonuses reduced to +20/+50/+100/+200/+400% so low-tier
   star stacking no longer beats tier progression.
 - Gem generator price premium removed; divine and legendary no longer
   share the same capped price.
-- `CONTENT_VERSION` bumped to 10 for the new prices and incomes.
+- `CONTENT_VERSION` bumped to 11 for the new prices and incomes.
 - Large numbers are now formatted in the main menu, profile, analytics,
   leaderboards, bank and shop income; the shop also shows payback time.
 - Leaderboards show medals for the top three.
