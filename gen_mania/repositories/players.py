@@ -119,7 +119,9 @@ def make_player_layer(runtime: PlayerRuntime):
             )
         return bool(new_value)
 
-    async def get_player_stats(user_id: int, guild_id: int = None):
+    async def get_player_stats(
+        user_id: int, guild_id: int | None = None
+    ):
         async with runtime.db.execute(
             "SELECT grid_size, gems, coins FROM players WHERE user_id = ?",
             (user_id,),

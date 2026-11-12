@@ -2,6 +2,17 @@
 
 ## 2026-11-13
 
+- Bank loan interest raised to 15% for 7 days, above the deposit yield;
+  borrow-and-deposit arbitrage is no longer profitable.
+- Season premium price lowered from 250 to 150 gems.
+- Daily rewards, daily quests and achievements scale with prestige
+  (up to ×3).
+- Pets show a progress bar to the next breakthrough.
+- Raid daily loss cap lowered to 15%, target shield raised to 8 hours;
+  clan war rewards scale with clan level.
+- Main menu secondary actions moved to a select menu; guide gained
+  a quick section selector.
+- CI now runs branch coverage, mypy, bandit and pip-audit.
 - New progression curve: base generator costs 8, start coins are 8;
   tiers 1–19 use ×2.8 price / ×2.2 income, tiers 20+ use ×3.8 / ×3.0.
 - Synthesis costs 2 copies up to tier 19 and 3 copies from tier 20;

@@ -17,6 +17,9 @@ class ShopUiRuntime:
         self._embed_factory: Callable[..., Any] = lambda **kwargs: None
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self._price_formatter: Callable[[int], str] = str
+        self._reward_scale_getter: Callable[[], Callable] = (
+            lambda: lambda points: 1.0
+        )
         self._emoji_getter: Callable[[], Callable] = lambda: None
         self.button_emojis: dict = {}
         self.page_size = 10
@@ -35,6 +38,7 @@ class ShopUiRuntime:
         embed_factory: Callable[..., Any],
         emoji_fixer: Callable[[Any], Any],
         price_formatter: Callable[[int], str],
+        reward_scale_getter: Callable[[], Callable],
         emoji_getter: Callable[[], Callable],
         button_emojis: dict,
         page_size: int,
@@ -50,6 +54,7 @@ class ShopUiRuntime:
         self._embed_factory = embed_factory
         self._emoji_fixer = emoji_fixer
         self._price_formatter = price_formatter
+        self._reward_scale_getter = reward_scale_getter
         self._emoji_getter = emoji_getter
         self.button_emojis = button_emojis
         self.page_size = page_size
@@ -77,6 +82,9 @@ class ShopUiRuntime:
 
     def format_price(self, value: int) -> str:
         return self._price_formatter(value)
+
+    def reward_scale(self, prestige_points: int) -> float:
+        return self._reward_scale_getter()(prestige_points)
 
     def emoji(self, key: str):
         return self._emoji_getter()(key)
@@ -261,6 +269,13 @@ def make_shop_ui_layer(runtime: ShopUiRuntime):
         ) as c:
             unlocked = {r[0] for r in await c.fetchall()}
 
+        async with runtime.db.execute(
+            "SELECT prestige_points FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+        scale = runtime.reward_scale((row[0] if row else 0) or 0)
+
         total = len(all_ach)
         total_pages = max(
             1, (total + runtime.page_size - 1) // runtime.page_size
@@ -289,9 +304,13 @@ def make_shop_ui_layer(runtime: ShopUiRuntime):
             )
             embed.add_field(
                 name=f"{emoji} {name}",
-                value=f"{desc}\nНаграда: {gem} {reward} — {status}",
+                value=(
+                    f"{desc}\nНаграда: {gem} {int(reward * scale)} — "
+                    f"{status}"
+                ),
                 inline=False,
             )
+        embed.set_footer(text=f"Множитель престижа: ×{scale:g}")
         return await runtime.fix_emojis(embed), total_pages
 
     async def build_collection_embed(interaction, page: int = 0):

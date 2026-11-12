@@ -25,6 +25,7 @@ class ClanWarRuntime:
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self.declare_cost = 500
         self.reward = 1000
+        self.reward_per_level = 0
         self.attack_cooldown_hours = 1
         self.damage_rate = 0.15
         self.war_duration_hours = 24
@@ -47,6 +48,7 @@ class ClanWarRuntime:
         emoji_fixer: Callable[[Any], Any],
         declare_cost: int,
         reward: int,
+        reward_per_level: int,
         attack_cooldown_hours: int,
         damage_rate: float,
         war_duration_hours: int,
@@ -66,6 +68,7 @@ class ClanWarRuntime:
         self._emoji_fixer = emoji_fixer
         self.declare_cost = declare_cost
         self.reward = reward
+        self.reward_per_level = reward_per_level
         self.attack_cooldown_hours = attack_cooldown_hours
         self.damage_rate = damage_rate
         self.war_duration_hours = war_duration_hours
@@ -262,6 +265,9 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
                     )
 
                 level, _, _ = await runtime.get_clan_level_info(clan_id)
+                reward = runtime.reward + max(
+                    0, level - 1
+                ) * runtime.reward_per_level
                 level_mult = 1 + max(0, level - 1) * 0.01
                 damage = max(
                     1,
@@ -316,7 +322,7 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
                     await runtime.db.execute(
                         "UPDATE clans SET treasury = treasury + ? "
                         "WHERE id = ?",
-                        (runtime.reward, clan_id),
+                        (reward, clan_id),
                     )
         except ValueError as exc:
             return False, str(exc), False
@@ -330,7 +336,7 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
             return (
                 True,
                 f"🏆 Победа! Урон {damage}. "
-                f"Клан получает 🪙 {runtime.reward} в сундук.",
+                f"Клан получает 🪙 {reward} в сундук.",
                 True,
             )
 
@@ -430,7 +436,8 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
                 f"• Урон — около "
                 f"**{int(runtime.damage_rate * 100)}%** мощи\n"
                 f"• Победитель забирает 🪙 "
-                f"**{runtime.reward}** в сундук"
+                f"**{runtime.reward}** + "
+                f"**{runtime.reward_per_level}** за уровень клана"
             ),
             inline=False,
         )

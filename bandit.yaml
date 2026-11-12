@@ -1,0 +1,4 @@
+skips:
+  - B608  # dynamic SQL uses whitelisted columns and bound placeholders
+exclude_dirs:
+  - tests

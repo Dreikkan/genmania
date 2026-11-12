@@ -41,6 +41,11 @@ class MarketOrderRuntime:
             "mythic",
         }
         self.order_duration_hours = 72
+
+        async def _noop_match(item_id: str) -> None:
+            return None
+
+        self.match_market_orders: Callable[[str], Any] = _noop_match
         self.logger = logging.getLogger("gen_mania")
 
     def configure(
@@ -356,7 +361,7 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                     "filled, created_at, expires_at FROM market_orders "
                     "WHERE status = 'active' AND item_id = ?"
                 )
-                params = (item_id,)
+                params: tuple[Any, ...] = (item_id,)
             else:
                 query = (
                     "SELECT id, user_id, side, item_id, price, quantity, "

@@ -77,7 +77,7 @@ def make_content_layer(runtime: ContentRuntime):
         return value if runtime.id_re.fullmatch(value) else None
 
     def normalize_content_name(
-        value, max_length: int = None
+        value, max_length: int | None = None
     ) -> str | None:
         max_length = max_length or runtime.max_name
         value = (str(value) if value is not None else "").strip()
@@ -86,7 +86,7 @@ def make_content_layer(runtime: ContentRuntime):
         return value
 
     def parse_content_int(
-        value, maximum: int = None
+        value, maximum: int | None = None
     ) -> int | None:
         maximum = runtime.max_price if maximum is None else maximum
         try:
@@ -98,7 +98,7 @@ def make_content_layer(runtime: ContentRuntime):
         return number
 
     def parse_content_float(
-        value, maximum: float = None
+        value, maximum: float | None = None
     ) -> float | None:
         maximum = runtime.max_income if maximum is None else maximum
         try:
@@ -293,7 +293,7 @@ def make_content_layer(runtime: ContentRuntime):
         gem_income_value,
         rarity_value,
     ) -> tuple[bool, str]:
-        item_id = normalize_content_id(item_id)
+        item_id = normalize_content_id(item_id)  # type: ignore[assignment]
         if not item_id:
             return (
                 False,
@@ -350,7 +350,7 @@ def make_content_layer(runtime: ContentRuntime):
         emoji_value,
         buyable_value,
     ) -> tuple[bool, str]:
-        item_id = normalize_content_id(item_id)
+        item_id = normalize_content_id(item_id)  # type: ignore[assignment]
         if not item_id:
             return False, "❌ Неверный ID предмета."
         emoji = (
@@ -388,7 +388,7 @@ def make_content_layer(runtime: ContentRuntime):
     async def set_item_price(
         editor_id: int, item_id: str, price_value
     ) -> tuple[bool, str]:
-        item_id = normalize_content_id(item_id)
+        item_id = normalize_content_id(item_id)  # type: ignore[assignment]
         if not item_id:
             return False, "❌ Неверный ID предмета."
         price = parse_content_int(price_value)
@@ -420,7 +420,7 @@ def make_content_layer(runtime: ContentRuntime):
         income_value,
         gem_income_value,
     ) -> tuple[bool, str]:
-        item_id = normalize_content_id(item_id)
+        item_id = normalize_content_id(item_id)  # type: ignore[assignment]
         if not item_id:
             return False, "❌ Неверный ID предмета."
         async with runtime.db.execute(
@@ -485,7 +485,7 @@ def make_content_layer(runtime: ContentRuntime):
         emoji_value,
         rarity_value,
     ) -> tuple[bool, str]:
-        item_id = normalize_content_id(item_id)
+        item_id = normalize_content_id(item_id)  # type: ignore[assignment]
         if not item_id:
             return (
                 False,
@@ -571,7 +571,7 @@ def make_content_layer(runtime: ContentRuntime):
         reward_value,
         emoji_value,
     ) -> tuple[bool, str]:
-        ach_id = normalize_content_id(ach_id)
+        ach_id = normalize_content_id(ach_id)  # type: ignore[assignment]
         if not ach_id:
             return (
                 False,
@@ -627,7 +627,7 @@ def make_content_layer(runtime: ContentRuntime):
         reward_value,
         emoji_value,
     ) -> tuple[bool, str]:
-        ach_id = normalize_content_id(ach_id)
+        ach_id = normalize_content_id(ach_id)  # type: ignore[assignment]
         if not ach_id:
             return (
                 False,
@@ -681,7 +681,7 @@ def make_content_layer(runtime: ContentRuntime):
     ) -> tuple[bool, str]:
         if not confirmed:
             return False, "❌ Отменено."
-        ach_id = normalize_content_id(ach_id)
+        ach_id = normalize_content_id(ach_id)  # type: ignore[assignment]
         if not ach_id:
             return False, "❌ Неверный ID достижения."
         async with runtime.db.execute(

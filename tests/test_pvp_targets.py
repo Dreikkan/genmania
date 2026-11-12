@@ -68,7 +68,10 @@ def test_target_board_filters_by_mode_and_power():
             assert "Целей найдено: **2**" in duel_embed.description
 
             raid_embed = await m.build_pvp_targets_embed(1, "raid")
-            assert "25%" in raid_embed.description, raid_embed.description
+            assert (
+        f"{int(m.RAID_DAILY_LOSS_CAP * 100)}%"
+        in raid_embed.description
+    ), raid_embed.description
             assert "Целей найдено: **3**" in raid_embed.description
         finally:
             await db.close()
