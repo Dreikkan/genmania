@@ -15,11 +15,21 @@ def test_start_coins_cover_first_generator():
 
 
 def test_generator_payback_stays_reasonable():
-    # Самый дорогой обычный генератор должен окупаться быстрее 30 дней.
-    for tier in range(1, m.GENERATOR_TIER_COUNT - 2):
+    # Покупаемые обычные генераторы должны окупаться быстрее 30 дней.
+    for tier in range(1, 10):
         price, income = m.generator_price_income(tier)
         payback_hours = m.round_price(price) / income
         assert payback_hours <= 24 * 30, (tier, payback_hours)
+
+
+def test_craft_is_cheaper_than_buying():
+    # 3 копии предыдущего тира должны стоить меньше готового генератора.
+    for tier in range(1, 10):
+        source_price, _ = m.generator_price_income(tier)
+        result_price, _ = m.generator_price_income(tier + 1)
+        assert m.round_price(result_price) > (
+            m.CRAFT_COST * m.round_price(source_price)
+        ), tier
 
 
 def test_craft_is_slot_positive():

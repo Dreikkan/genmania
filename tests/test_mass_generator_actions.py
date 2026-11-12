@@ -29,6 +29,9 @@ class FakeResponse:
     async def send_message(self, *args, **kwargs):
         self.messages.append((args, kwargs))
 
+    async def send_modal(self, modal):
+        self.messages.append((modal,))
+
 
 class FakeFollowup:
     def __init__(self):
@@ -209,7 +212,7 @@ def test_mass_craft_failure_and_clan_progress():
             await _add_inventory(
                 db,
                 [
-                    (slot, "steel_gen", "profile" if slot < 4 else "storage", 0)
+                    (slot, "gold_gen", "profile" if slot < 4 else "storage", 0)
                     for slot in range(7)
                 ],
             )
@@ -219,7 +222,7 @@ def test_mass_craft_failure_and_clan_progress():
             assert stats["failures"] == 3
             assert stats["successes"] == 0
             assert stats["catalysts_used"] == 3
-            assert stats["gems_spent"] == 6
+            assert stats["gems_spent"] == 3
         finally:
             m.random.random = original_random
             await _close(db)
