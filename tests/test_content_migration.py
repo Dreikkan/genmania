@@ -138,7 +138,7 @@ async def run_checks(db):
         async with db.execute(
             "SELECT start_coins FROM guild_settings WHERE guild_id = 1"
         ) as c:
-            assert (await c.fetchone())[0] == 20
+            assert (await c.fetchone())[0] == m.DEFAULT_START_COINS
         async with db.execute(
             "SELECT start_coins FROM guild_settings WHERE guild_id = 2"
         ) as c:

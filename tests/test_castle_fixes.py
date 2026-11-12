@@ -174,7 +174,7 @@ def test_synthesis_counts_castle_and_storage():
                 if isinstance(child, m.discord.ui.Select)
             )
             option = next(o for o in select.options if o.value == "basic_gen")
-            assert "(3/3)" in option.label, option.label
+            assert f"(3/{m.craft_cost_for_item('basic_gen')})" in option.label, option.label
 
             pick = FakeInteraction(1, {"values": ["basic_gen"]})
             await view.item_select(pick)
@@ -190,7 +190,7 @@ def test_synthesis_counts_castle_and_storage():
                 "WHERE user_id = 1"
             ) as c:
                 rows = await c.fetchall()
-            assert not any(row[0] == "basic_gen" for row in rows), rows
+            assert sum(row[0] == "basic_gen" for row in rows) == 1, rows
             assert any(
                 row[0] == "copper_gen" and row[2] == 0 for row in rows
             ), rows

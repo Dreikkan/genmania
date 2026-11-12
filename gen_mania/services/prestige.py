@@ -25,7 +25,7 @@ class PrestigeRuntime:
         self._embed_factory: Callable[..., Any] = lambda **kwargs: None
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self._price_formatter: Callable[[int], str] = str
-        self.default_start_coins = 20
+        self.default_start_coins = 8
         self.base_requirement = 150_000
         self.step_requirement = 50_000
         self.bonus_per_point = 0.05

@@ -7,7 +7,7 @@ import os
 DEFAULT_BOT_NAME = "Gen Mania"
 DEFAULT_CURRENCY_COINS = "монеты"
 DEFAULT_CURRENCY_GEMS = "гемы"
-DEFAULT_START_COINS = 20
+DEFAULT_START_COINS = 8
 DEFAULT_TAX_RATE = 0.02
 INCOME_HINT = (
     "Доход начисляется каждую секунду, в интерфейсе показан за час."
@@ -19,7 +19,7 @@ BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "10"))
 
 # Schema / content migrations
 SCHEMA_VERSION = 18
-CONTENT_VERSION = 10
+CONTENT_VERSION = 11
 
 # Metrics / health
 SLOW_DB_TX_MS = 100.0

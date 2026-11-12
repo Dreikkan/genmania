@@ -171,7 +171,7 @@ def test_profile_exposes_stats_and_high_tier_limits():
     for tier in range(1, 10):
         source, _ = m.generator_price_income(tier)
         result, _ = m.generator_price_income(tier + 1)
-        craft = m.CRAFT_COST * m.round_price(source)
+        craft = m.craft_cost_for_tier(tier + 1) * m.round_price(source)
         assert craft <= int(m.round_price(result) * 0.85), tier
 
 
