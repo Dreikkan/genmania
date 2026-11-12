@@ -2,6 +2,14 @@
 
 ## 2026-11-12
 
+- Bank base limits raised: deposits to 1 000 000 and loans to 500 000.
+- Market high-tier limits raised: order value to 10^18, daily volume
+  to 5 × 10^18; item prices are capped at 10^18.
+- Generator price multiplier increased to 3.8 so crafting three copies
+  is clearly cheaper than buying the next tier.
+- P2 reliability: admin modals re-check admin access on submit, guild
+  access sync errors are handled, and the profile shows achievements
+  and synthesis success rate.
 - Currency exchange now uses a daily progressive rate and a 500-gem
   daily cap; the fee is a flat 5%. Daily state is stored per player.
 - Pet effects now use a soft cap after level 10 and a +10% base-effect

@@ -69,7 +69,7 @@ def test_loan_is_limited_by_income_cap():
             )
             await db.commit()
 
-            ok, message = await m.take_bank_loan(1, "big_relic", 0, 30000)
+            ok, message = await m.take_bank_loan(1, "big_relic", 0, m.BANK_LOAN_MAX + 1000)
             assert ok is False
             assert "Сумма кредита" in message, message
         finally:
