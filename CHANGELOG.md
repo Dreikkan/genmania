@@ -2,8 +2,8 @@
 
 ## 2026-11-12
 
-- Synthesis can optionally consume starred generators; the result keeps
-  the same star level and the UI warns before using them.
+- Synthesis can optionally consume starred generators; the result is
+  created at 0★ and the UI warns before using them.
 - Mass synthesis can target a maximum generator tier and now lists every
   created generator with its star level. Mass star upgrades also list the
   upgraded generators and their new stars.
