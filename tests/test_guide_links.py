@@ -57,6 +57,52 @@ def test_guide_paths_and_units():
     asyncio.run(run())
 
 
+def test_guide_reflects_latest_economy():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        await m.bot.init_db()
+        try:
+            economy = (await m._guide_section_data("economy"))[1]
+            assert "500K" in economy
+            assert "10%" in economy
+            assert "5%" in economy
+            assert "1 000" in economy or "1K" in economy
+            assert "500 гемов" in economy
+
+            generators = (await m._guide_section_data("generators"))[1]
+            assert "×3.8" in generators
+            assert "×1.9" in generators
+            assert "10 💎/ч" in generators
+            assert "20 💎/ч" in generators
+            assert "40 💎/ч" in generators
+            assert "2–21%" in generators
+            assert "2 копии сгорают" in generators
+
+            orders = (await m._guide_section_data("orders"))[1]
+            assert "72 ч" in orders
+            assert "1Qi" in orders
+            assert "5Qi" in orders
+            assert "100 предметов" in orders
+
+            pets = (await m._guide_section_data("pets"))[1]
+            assert "19 эффективных уровней" in pets
+
+            prestige = (await m._guide_section_data("prestige"))[1]
+            assert "максимум +500%" in prestige
+
+            collection = (await m._guide_section_data("collection"))[1]
+            assert "максимум +15%" in collection
+
+            season = (await m._guide_section_data("season"))[1]
+            assert "250 💎" in season
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_start_coins_modal_default_is_20():
     modal = m.EditStartCoinsModal(1)
     assert modal.value.default == "20"

@@ -304,6 +304,13 @@ CRAFT_RESULT_STARS = 0  # синтез создаёт обычную копию 
 # Генераторы, которые нельзя купить даже на бирже/аукционе.
 GEN_SYNTHESIS_ONLY = frozenset({"space_gen", "divine_gen", "legendary_gen"})
 
+# Гемовый доход топовых генераторов (в гемах в час).
+GEM_INCOME = {
+    "space_gen": 10.0,
+    "divine_gen": 20.0,
+    "legendary_gen": 40.0,
+}
+
 # --- БАЛАНС ГЕНЕРАТОРОВ ---
 # Цена растёт быстрее дохода: высокие тиры хуже окупаются, но дают
 # больше дохода на слот. Синтез 2→1 компенсирует потерю слота.
@@ -2579,12 +2586,6 @@ class CastleBot(commands.Bot):
             }
         }
 
-        GEM_INCOME = {
-            "space_gen":     10.0,
-            "divine_gen":    20.0,
-            "legendary_gen": 40.0,
-        }
-        
         # --- ЦЕНЫ И ДОХОД ГЕНЕРАТОРОВ ---
         items_data = []
 
@@ -4350,25 +4351,70 @@ GUIDE_RUNTIME.configure(
     emoji_getter=lambda: get_emoji,
     season_xp_getter=lambda: season_expected_daily_xp,
     constants={
+        "AUCTION_ANTI_SNIPE_SECONDS": AUCTION_ANTI_SNIPE_SECONDS,
         "BANK_DAILY_RATE": BANK_DAILY_RATE,
+        "BANK_DEPOSIT_INCOME_HOURS": BANK_DEPOSIT_INCOME_HOURS,
+        "BANK_LOAN_INCOME_HOURS": BANK_LOAN_INCOME_HOURS,
+        "BANK_LOAN_INTEREST": BANK_LOAN_INTEREST,
+        "BANK_LOAN_LTV": BANK_LOAN_LTV,
+        "BANK_LOAN_MAX": BANK_LOAN_MAX,
+        "BANK_LOAN_TERM_DAYS": BANK_LOAN_TERM_DAYS,
         "BANK_MAX_DEPOSIT": BANK_MAX_DEPOSIT,
         "CASTLE": CASTLE,
         "CATALYST_BONUS": CATALYST_BONUS,
+        "COLLECTION_BONUS_PER_ITEM": COLLECTION_BONUS_PER_ITEM,
         "CRAFT_COST": CRAFT_COST,
         "CRAFT_HARD_PITY": CRAFT_HARD_PITY,
         "CRAFT_PITY_BONUS": CRAFT_PITY_BONUS,
+        "CRAFT_PITY_MAX": CRAFT_PITY_MAX,
+        "CRAFT_SETTINGS": CRAFT_SETTINGS,
         "DEFAULT_TAX_RATE": DEFAULT_TAX_RATE,
         "DUEL_COOLDOWN_SECONDS": DUEL_COOLDOWN_SECONDS,
         "DUEL_MAX_BET_PCT": DUEL_MAX_BET_PCT,
         "DUEL_POWER_TOLERANCE": DUEL_POWER_TOLERANCE,
+        "EXCHANGE_DAILY_GEM_CAP": EXCHANGE_DAILY_GEM_CAP,
+        "EXCHANGE_FEE_RATE": EXCHANGE_FEE_RATE,
+        "GEM_INCOME": GEM_INCOME,
+        "GEMS_PER_COIN_RATE": GEMS_PER_COIN_RATE,
+        "GENERATOR_TIER_COUNT": GENERATOR_TIER_COUNT,
+        "MARKET_MAX_ACTIVE_ORDERS": MARKET_MAX_ACTIVE_ORDERS,
+        "MARKET_MAX_DAILY_VOLUME": MARKET_MAX_DAILY_VOLUME,
+        "MARKET_MAX_ORDER_QTY": MARKET_MAX_ORDER_QTY,
+        "MARKET_MAX_ORDER_VALUE": MARKET_MAX_ORDER_VALUE,
+        "MARKET_ORDER_DURATION_HOURS": MARKET_ORDER_DURATION_HOURS,
+        "PET_BREAKTHROUGH_EFFECT_BONUS": PET_BREAKTHROUGH_EFFECT_BONUS,
+        "PET_BREAKTHROUGH_LEVELS": PET_BREAKTHROUGH_LEVELS,
+        "PET_EFFECT_NAMES": PET_EFFECT_NAMES,
+        "PET_FEED_COOLDOWN_HOURS": PET_FEED_COOLDOWN_HOURS,
+        "PET_FEED_COST_COIN_GROWTH": PET_FEED_COST_COIN_GROWTH,
+        "PET_FEED_COST_COINS": PET_FEED_COST_COINS,
+        "PET_FEED_COST_GEM_GROWTH": PET_FEED_COST_GEM_GROWTH,
+        "PET_FEED_COST_GEMS": PET_FEED_COST_GEMS,
+        "PET_MAX_LEVEL": PET_MAX_LEVEL,
+        "PET_TYPES": PET_TYPES,
+        "PRESTIGE_BASE_REQUIREMENT": PRESTIGE_BASE_REQUIREMENT,
+        "PRESTIGE_BONUS_CAP": PRESTIGE_BONUS_CAP,
+        "PRESTIGE_BONUS_PER_POINT": PRESTIGE_BONUS_PER_POINT,
+        "PRESTIGE_STEP_REQUIREMENT": PRESTIGE_STEP_REQUIREMENT,
         "RAID_DAILY_LOSS_CAP": RAID_DAILY_LOSS_CAP,
         "RAID_LOOT_RATE": RAID_LOOT_RATE,
         "RAID_MIN_TARGET_POWER_RATIO": RAID_MIN_TARGET_POWER_RATIO,
+        "RAID_TARGET_SHIELD_HOURS": RAID_TARGET_SHIELD_HOURS,
+        "SEASON_PREMIUM_COST_GEMS": SEASON_PREMIUM_COST_GEMS,
         "SEASON_TOTAL_XP_TEXT": SEASON_TOTAL_XP_TEXT,
         "SEASON_XP_BASE": SEASON_XP_BASE,
         "SEASON_XP_STEP": SEASON_XP_STEP,
+        "SET_ADJACENCY_BONUS": SET_ADJACENCY_BONUS,
+        "SET_ADJACENCY_MAX": SET_ADJACENCY_MAX,
         "SET_DEFINITIONS": SET_DEFINITIONS,
+        "SET_FLOOR_BONUS": SET_FLOOR_BONUS,
+        "SET_FLOOR_MAX": SET_FLOOR_MAX,
+        "SET_TOTAL_MAX": SET_TOTAL_MAX,
         "STAR_BONUS": STAR_BONUS,
+        "STAR_HARD_PITY": STAR_HARD_PITY,
+        "STAR_PITY_BONUS": STAR_PITY_BONUS,
+        "STAR_PITY_MAX": STAR_PITY_MAX,
+        "STAR_UPGRADE": STAR_UPGRADE,
     },
     logger=log,
 )

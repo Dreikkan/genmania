@@ -129,9 +129,11 @@ def test_pet_guide_values_match_rework():
         try:
             embed = await m.build_guide_section_embed("pets")
             pets_text = embed.description
-            assert "+15% доход монет" in pets_text
-            assert "+20% шанс синтеза" in pets_text
-            assert "+25% доход гемов" in pets_text
+            assert "+1.5% доход монет/ур." in pets_text
+            assert "+2% шанс синтеза/ур." in pets_text
+            assert "+2.5% доход гемов/ур." in pets_text
+            assert "19 эффективных уровней" in pets_text
+            assert "+76% мощь" in pets_text
             assert "200 ур." in pets_text
             assert "Прорывы" in pets_text
         finally:
