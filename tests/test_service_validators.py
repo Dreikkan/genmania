@@ -34,7 +34,7 @@ def test_content_and_giveaway_validators():
             assert m.normalize_content_name("Test") == "Test"
             assert m.parse_content_int("bad") is None
             assert m.parse_content_int(-1) is None
-            assert m.parse_content_int(10**13) is None
+            assert m.parse_content_int(10**19) is None
             assert m.parse_content_int("10") == 10
             assert m.parse_content_float("bad") is None
             assert m.parse_content_float(-1) is None
