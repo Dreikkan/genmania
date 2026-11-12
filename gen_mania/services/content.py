@@ -16,7 +16,7 @@ class ContentRuntime:
         self.id_re = None
         self.max_name = 100
         self.max_description = 500
-        self.max_price = 10**12
+        self.max_price = 10**18
         self.max_income = 10**9
         self.rarity_colors: dict = {}
         self.logger = logging.getLogger("gen_mania")
