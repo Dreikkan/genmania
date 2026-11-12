@@ -30,13 +30,10 @@ async def _init():
     return db
 
 
-def test_exchange_fee_is_dynamic():
-    low = m.exchange_fee_rate(12, "coins_to_gems")
-    mid = m.exchange_fee_rate(250_000, "coins_to_gems")
-    high = m.exchange_fee_rate(10_000_000, "coins_to_gems")
-    assert low <= mid <= high
-    assert low == m.EXCHANGE_FEE_BASE
-    assert high == m.EXCHANGE_FEE_MAX
+def test_exchange_fee_is_fixed():
+    assert m.EXCHANGE_FEE_RATE == 0.05
+    assert m.exchange_fee_rate(12, "coins_to_gems") == 0.05
+    assert m.exchange_fee_rate(10_000_000, "coins_to_gems") == 0.05
 
 
 def test_prestige_cost_grows():

@@ -41,7 +41,7 @@ def test_pet_effect_entries_include_secondary_effect():
 
 
 def test_pet_balance_values():
-    level_10 = 10
+    level_10 = m.pet_effective_level(10)
     cat_coin = m.PET_TYPES["cat"]["per_level"] * level_10
     dog_craft = m.PET_TYPES["dog"]["per_level"] * level_10
     dog_coin = m.PET_TYPES["dog"]["extra_effects"]["income_coins"] * level_10
@@ -52,17 +52,17 @@ def test_pet_balance_values():
 
     assert m.PET_MAX_LEVEL == 200
     assert m.PET_BREAKTHROUGH_LEVELS[-1] == 200
-    assert cat_coin == 0.15
-    assert dog_craft == 0.20
-    assert dog_coin == 0.10
-    assert phoenix_gem == 0.25
-    assert phoenix_coin == 0.10
+    assert round(cat_coin, 6) == 0.165
+    assert round(dog_craft, 6) == 0.22
+    assert round(dog_coin, 6) == 0.11
+    assert round(phoenix_gem, 6) == 0.275
+    assert round(phoenix_coin, 6) == 0.11
     assert dog_coin < cat_coin
     assert phoenix_coin < cat_coin
-    assert m.PET_TYPES["dragon"]["per_level"] * level_10 == 0.40
-    assert m.PET_TYPES["wolf"]["per_level"] * level_10 == 0.20
+    assert round(m.PET_TYPES["dragon"]["per_level"] * level_10, 6) == 0.44
+    assert round(m.PET_TYPES["wolf"]["per_level"] * level_10, 6) == 0.22
     costs = [m.pet_feed_cost(level) for level in m.PET_BREAKTHROUGH_LEVELS]
-    assert costs[0] == (220, 2)
+    assert costs[0] == (190, 2)
     for previous, current in zip(costs, costs[1:]):
         assert current[0] > previous[0]
         assert current[1] > previous[1]
@@ -72,8 +72,8 @@ def test_get_pet_bonus_sums_primary_and_secondary():
     async def run():
         db = await _init()
         try:
-            assert await m.get_pet_bonus(1, "craft_chance") == 0.20
-            assert await m.get_pet_bonus(1, "income_coins") == 0.10
+            assert await m.get_pet_bonus(1, "craft_chance") == 0.22
+            assert await m.get_pet_bonus(1, "income_coins") == 0.11
             assert await m.get_pet_bonus(1, "income_gems") == 0.0
             assert await m.get_pet_bonus(1, "combat_power") == 0.0
 

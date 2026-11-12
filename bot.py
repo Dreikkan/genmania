@@ -825,11 +825,15 @@ COINS_PER_GEM = 1000
 GEMS_PER_COIN_RATE = 800
 GEM_EXCHANGE_MIN = 1
 COIN_EXCHANGE_MIN = COINS_PER_GEM
-EXCHANGE_FEE_BASE = 0.03
-EXCHANGE_FEE_STEP = 0.01
-EXCHANGE_FEE_MAX = 0.15
-EXCHANGE_FEE_COIN_UNIT = 50_000
-EXCHANGE_FEE_GEM_UNIT = 10
+EXCHANGE_FEE_RATE = 0.05
+EXCHANGE_DAILY_GEM_CAP = 500
+EXCHANGE_RATE_TIERS = (
+    (200_000, 1_000),
+    (500_000, 2_000),
+    (1_000_000, 4_000),
+    (2_000_000, 8_000),
+    (None, 15_000),
+)
 
 QUEST_POOL = {
     # --- СИНТЕЗ ---
@@ -1325,23 +1329,39 @@ def format_pet_effect_summary(ptype: dict, level: int | None = None) -> str:
     for effect, per_level in get_pet_effect_entries(ptype):
         name = PET_EFFECT_NAMES.get(effect, effect)
         if level:
-            current = int(per_level * level * 100)
+            effective = pet_effective_level(level)
+            current = f"{per_level * effective * 100:.1f}".rstrip("0").rstrip(".")
+            base = f"{per_level * 100:.1f}".rstrip("0").rstrip(".")
             lines.append(
-                f"+{int(per_level * 100)}% {name}/ур. → сейчас +{current}%"
+                f"+{base}% {name}/ур. → сейчас +{current}%"
             )
         else:
-            lines.append(f"+{int(per_level * 100)}% {name}/ур.")
+            base = f"{per_level * 100:.1f}".rstrip("0").rstrip(".")
+            lines.append(f"+{base}% {name}/ур.")
     return "\n".join(lines)
 
 
 PET_BREAKTHROUGH_LEVELS = (10, 25, 50, 75, 100, 125, 150, 175, 200)
 PET_MAX_LEVEL = PET_BREAKTHROUGH_LEVELS[-1]
+PET_BREAKTHROUGH_EFFECT_BONUS = 0.10
 PET_FEED_COOLDOWN_HOURS = 6
 PET_FEED_COST_COINS = 100          # кормление стоит монет
 PET_FEED_COST_GEMS = 1             # и немного гемов
-PET_FEED_COST_COIN_GROWTH = 2.2    # рост цены монет за каждый прорыв
+PET_FEED_COST_COIN_GROWTH = 1.9    # рост цены монет за каждый прорыв
 PET_FEED_COST_GEM_GROWTH = 1.5     # рост цены гемов за каждый прорыв
 PET_FEED_XP = 1                    # +1 уровень за кормление (упрощённо)
+
+
+def pet_effective_level(level: int) -> float:
+    """Эффективный уровень с soft cap после 10-го и бонусами прорывов."""
+    if not level or level <= 0:
+        return 0.0
+    breakthroughs = sum(
+        1 for threshold in PET_BREAKTHROUGH_LEVELS if level >= threshold
+    )
+    return min(level, 10) * (
+        1 + PET_BREAKTHROUGH_EFFECT_BONUS * breakthroughs
+    )
 
 # ============================================================
 #  🤖 АВТОСБОРЩИК
@@ -2016,7 +2036,10 @@ class CastleBot(commands.Bot):
                 last_tax_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 lifetime_production INTEGER DEFAULT 0,
                 accessibility_mode INTEGER DEFAULT 0,
-                top_excluded INTEGER DEFAULT 0
+                top_excluded INTEGER DEFAULT 0,
+                exchange_day TEXT DEFAULT NULL,
+                exchange_coins_today INTEGER DEFAULT 0,
+                exchange_gems_today INTEGER DEFAULT 0
             )
         """)
 
@@ -2089,6 +2112,9 @@ class CastleBot(commands.Bot):
             ("raid_wins", "INTEGER DEFAULT 0"),
             ("prestige_points", "INTEGER DEFAULT 0"),
             ("top_excluded", "INTEGER DEFAULT 0"),
+            ("exchange_day", "TEXT DEFAULT NULL"),
+            ("exchange_coins_today", "INTEGER DEFAULT 0"),
+            ("exchange_gems_today", "INTEGER DEFAULT 0"),
         ]:
             await ensure_column(self.db, "players", column, definition)
 
@@ -4206,6 +4232,7 @@ PET_RUNTIME.configure(
     feed_cost_gems=PET_FEED_COST_GEMS,
     feed_cost_coin_growth=PET_FEED_COST_COIN_GROWTH,
     feed_cost_gem_growth=PET_FEED_COST_GEM_GROWTH,
+    breakthrough_effect_bonus=PET_BREAKTHROUGH_EFFECT_BONUS,
     feed_xp=PET_FEED_XP,
     feed_cooldown_hours=PET_FEED_COOLDOWN_HOURS,
     autocollect_price_gems=AUTOCOLLECT_PRICE_GEMS,
@@ -6781,14 +6808,18 @@ class MainMenuView(BaseView):
         embed = BotEmbed(
             title="💱 Обмен валют",
             description=(
-                f"Курсы:\n"
-                f"🪙 {COINS_PER_GEM} монет → 💎 1 гем\n"
-                f"💎 1 гем → 🪙 {GEMS_PER_COIN_RATE} монет\n\n"
-                f"Комиссия: **{int(EXCHANGE_FEE_BASE * 100)}–{int(EXCHANGE_FEE_MAX * 100)}%** "
-                "в зависимости от суммы.\n\n"
-                f"Выбери направление:"
+                "Прогрессивный курс за сутки:\n"
+                "🪙 0–200k → 1 000 монет = 1 гем\n"
+                "🪙 200k–500k → 2 000 монет = 1 гем\n"
+                "🪙 500k–1M → 4 000 монет = 1 гем\n"
+                "🪙 1M–2M → 8 000 монет = 1 гем\n"
+                "🪙 выше 2M → 15 000 монет = 1 гем\n\n"
+                f"💎 1 гем → 🪙 {GEMS_PER_COIN_RATE} монет\n"
+                f"Комиссия: **{int(EXCHANGE_FEE_RATE * 100)}%**\n"
+                f"Дневной лимит: **{EXCHANGE_DAILY_GEM_CAP} гемов**.\n\n"
+                "Выбери направление:"
             ),
-            color=0x2ecc71
+            color=0x3498db,
         )
         await interaction.edit_original_response(embed=embed, view=ExchangeView(self.author_id))
 
@@ -13943,13 +13974,62 @@ class CosmeticIconModal(discord.ui.Modal, title="Иконка энергоста
 #  💱 ОБМЕН ВАЛЮТ
 # ============================================================
 
-def exchange_fee_rate(amount: int, direction: str) -> float:
-    """Динамическая комиссия: 3% на малых суммах, до 15% на крупных."""
-    if direction == "coins_to_gems":
-        steps = max(0, int(amount) // EXCHANGE_FEE_COIN_UNIT)
-    else:
-        steps = max(0, int(amount) // EXCHANGE_FEE_GEM_UNIT)
-    return min(EXCHANGE_FEE_MAX, EXCHANGE_FEE_BASE + steps * EXCHANGE_FEE_STEP)
+def exchange_fee_rate(amount: int = 0, direction: str = "coins_to_gems") -> float:
+    """Фиксированная комиссия обмена."""
+    return EXCHANGE_FEE_RATE
+
+
+def exchange_utc_day() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def exchange_max_gross_gems(max_net_gems: int) -> int:
+    """Максимальный gross-объём гемов под дневной лимит net."""
+    if max_net_gems <= 0:
+        return 0
+    low, high = 0, max(1, int(max_net_gems / (1 - EXCHANGE_FEE_RATE)) + 10)
+    while low < high:
+        middle = (low + high + 1) // 2
+        net = middle - int(middle * EXCHANGE_FEE_RATE)
+        if net <= max_net_gems:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def exchange_quote(
+    coins: int, used_coins: int, max_gross_gems: int
+) -> tuple[int, int, bool]:
+    """Считает гемы и реально потраченные монеты по прогрессивным тирам."""
+    remaining = max(0, int(coins))
+    cursor = max(0, int(used_coins))
+    gross = 0
+    spent = 0
+    for boundary, rate in EXCHANGE_RATE_TIERS:
+        if remaining <= 0 or gross >= max_gross_gems:
+            break
+        capacity = (
+            remaining
+            if boundary is None
+            else max(0, int(boundary) - cursor)
+        )
+        if capacity <= 0:
+            continue
+        portion = min(remaining, capacity)
+        tier_gems = portion // rate
+        if tier_gems > max_gross_gems - gross:
+            tier_gems = max_gross_gems - gross
+        if tier_gems <= 0:
+            break
+        used = tier_gems * rate
+        gross += tier_gems
+        spent += used
+        cursor += used
+        remaining -= used
+        if used < portion:
+            break
+    return gross, spent, gross >= max_gross_gems and spent < int(coins)
 
 
 class ExchangeView(SafeView):
@@ -14004,45 +14084,75 @@ class CoinsToGemsModal(discord.ui.Modal, title="Обмен монет на ге�
             )
             return
 
-        gems_gross = coins // COINS_PER_GEM
-        if gems_gross < 1:
-            await interaction.followup.send(
-                f"❌ Нужно минимум {COINS_PER_GEM} монет для 1 гема.", ephemeral=True
-            )
+        today = exchange_utc_day()
+        try:
+            async with db_transaction():
+                async with bot.db.execute(
+                    "SELECT coins, exchange_day, exchange_coins_today, "
+                    "exchange_gems_today FROM players WHERE user_id = ?",
+                    (user_id,),
+                ) as c:
+                    row = await c.fetchone()
+                if not row:
+                    raise ValueError("❌ Игрок не найден.")
+                balance, day, used_coins, used_gems = row
+                if day != today:
+                    used_coins, used_gems = 0, 0
+                used_coins = int(used_coins or 0)
+                used_gems = int(used_gems or 0)
+                remaining_cap = max(
+                    0, EXCHANGE_DAILY_GEM_CAP - used_gems
+                )
+                if remaining_cap <= 0:
+                    raise ValueError(
+                        "❌ Дневной лимит обмена уже исчерпан."
+                    )
+                max_gross = exchange_max_gross_gems(remaining_cap)
+                gross, spent, capped = exchange_quote(
+                    coins, used_coins, max_gross
+                )
+                if gross < 1 or spent < 1:
+                    raise ValueError(
+                        "❌ Сумма слишком мала для обмена."
+                    )
+                fee_gems = int(gross * EXCHANGE_FEE_RATE)
+                gems = gross - fee_gems
+                cursor = await bot.db.execute(
+                    "UPDATE players SET coins = coins - ?, gems = gems + ?, "
+                    "exchange_day = ?, exchange_coins_today = ?, "
+                    "exchange_gems_today = ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (
+                        spent,
+                        gems,
+                        today,
+                        used_coins + spent,
+                        used_gems + gems,
+                        user_id,
+                        spent,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        f"❌ Не хватает монет (нужно 🪙 {spent})."
+                    )
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
             return
 
-        fee_rate = exchange_fee_rate(coins, "coins_to_gems")
-        fee_gems = int(gems_gross * fee_rate)
-        gems = gems_gross - fee_gems
-        if gems < 1:
-            await interaction.followup.send(
-                "❌ Комиссия съедает всю сумму. Обменяй больше монет.",
-                ephemeral=True,
-            )
-            return
-
-        spent_coins = gems_gross * COINS_PER_GEM
-        remainder = coins - spent_coins  # сколько не обменялось
-
-        # атомарное списание (один раз!)
-        cursor = await bot.db.execute(
-            "UPDATE players SET coins = coins - ?, gems = gems + ? "
-            "WHERE user_id = ? AND coins >= ?",
-            (spent_coins, gems, user_id, spent_coins)
-        )
-        if cursor.rowcount == 0:
-            await interaction.followup.send(
-                f"❌ Не хватает монет (нужно 🪙 {spent_coins}).", ephemeral=True
-            )
-            return
-        await commit_if_needed()
-
+        remainder = coins - spent
         msg = (
-            f"✅ Обменяно 🪙 {spent_coins} → 💎 {gems}.\n"
-            f"Комиссия: **{int(fee_rate * 100)}%** (💎 {fee_gems})."
+            f"✅ Обменяно 🪙 {spent} → 💎 {gems}.\n"
+            f"Комиссия: **{int(EXCHANGE_FEE_RATE * 100)}%** "
+            f"(💎 {fee_gems})."
         )
+        if capped:
+            msg += (
+                f"\n⚠️ Дневной лимит: "
+                f"**{EXCHANGE_DAILY_GEM_CAP} гемов/день**."
+            )
         if remainder > 0:
-            msg += f"\n⚠️ Остаток 🪙 {remainder} не обменян (нужно кратно {COINS_PER_GEM})."
+            msg += f"\n⚠️ Остаток 🪙 {remainder} не обменян."
         await interaction.followup.send(msg, ephemeral=True)
 
 
@@ -20226,7 +20336,10 @@ class UserResetModal(discord.ui.Modal, title="Сброс прогресса"):
                         last_tax_time = CURRENT_TIMESTAMP,
                         raid_wins = 0,
                         prestige_points = 0,
-                        top_excluded = 0
+                        top_excluded = 0,
+                        exchange_day = NULL,
+                        exchange_coins_today = 0,
+                        exchange_gems_today = 0
                     WHERE user_id = ?
                 """, (start_coins, self.author_id))
 
@@ -22902,7 +23015,10 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
                     last_tax_time = CURRENT_TIMESTAMP,
                     raid_wins = 0,
                     prestige_points = 0,
-                    top_excluded = 0
+                    top_excluded = 0,
+                    exchange_day = NULL,
+                    exchange_coins_today = 0,
+                    exchange_gems_today = 0
                 WHERE user_id = ?
             """, (DEFAULT_START_COINS, uid))
 

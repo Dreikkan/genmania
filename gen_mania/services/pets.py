@@ -22,8 +22,9 @@ class PetRuntime:
         )
         self.feed_cost_coins = 1000
         self.feed_cost_gems = 5
-        self.feed_cost_coin_growth = 2.2
+        self.feed_cost_coin_growth = 1.9
         self.feed_cost_gem_growth = 1.5
+        self.breakthrough_effect_bonus = 0.10
         self.feed_xp = 1
         self.feed_cooldown_hours = 4
         self.autocollect_price_gems = 100
@@ -47,8 +48,9 @@ class PetRuntime:
         autocollect_levels: dict,
         logger: logging.Logger,
         breakthrough_levels: tuple[int, ...] | None = None,
-        feed_cost_coin_growth: float = 2.2,
+        feed_cost_coin_growth: float = 1.9,
         feed_cost_gem_growth: float = 1.5,
+        breakthrough_effect_bonus: float = 0.10,
     ) -> None:
         self._db_getter = db_getter
         self._transaction_getter = transaction_getter
@@ -60,6 +62,7 @@ class PetRuntime:
         self.feed_cost_gems = feed_cost_gems
         self.feed_cost_coin_growth = feed_cost_coin_growth
         self.feed_cost_gem_growth = feed_cost_gem_growth
+        self.breakthrough_effect_bonus = breakthrough_effect_bonus
         self.feed_xp = feed_xp
         self.feed_cooldown_hours = feed_cooldown_hours
         self.autocollect_price_gems = autocollect_price_gems
@@ -70,6 +73,15 @@ class PetRuntime:
     def breakthrough_count(self, level: int) -> int:
         return sum(
             1 for threshold in self.breakthrough_levels if level >= threshold
+        )
+
+    def effective_level(self, level: int) -> float:
+        if not level or level <= 0:
+            return 0.0
+        return min(level, 10) * (
+            1
+            + self.breakthrough_effect_bonus
+            * self.breakthrough_count(level)
         )
 
     def next_breakthrough(self, level: int) -> int | None:
@@ -143,7 +155,7 @@ def make_pet_layer(runtime: PetRuntime):
         per_level += ptype.get("extra_effects", {}).get(
             effect_type, 0.0
         )
-        return per_level * max(0, int(level or 0))
+        return per_level * runtime.effective_level(level)
 
     async def get_pet_bonus(user_id: int, effect_type: str) -> float:
         """Суммарный бонус активного питомца для эффекта."""

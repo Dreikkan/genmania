@@ -27,9 +27,11 @@ def test_status_ladder_values():
     assert m.status_rank("diamond") > m.status_rank("vip")
 
 
-def test_cat_matches_vip_at_first_breakthrough():
-    cat_at_10 = m.PET_TYPES["cat"]["per_level"] * 10
-    assert abs(cat_at_10 - m.STATUS_BONUSES["vip"]) < 1e-9, cat_at_10
+def test_cat_breakthrough_bonus_over_vip():
+    assert m.pet_effective_level(10) == 11
+    cat_at_10 = m.PET_TYPES["cat"]["per_level"] * m.pet_effective_level(10)
+    assert abs(cat_at_10 - 0.165) < 1e-9, cat_at_10
+    assert cat_at_10 > m.STATUS_BONUSES["vip"]
 
 
 def test_prestige_preserves_purchased_status():

@@ -18,7 +18,7 @@ BACKUP_INTERVAL_HOURS = float(os.getenv("BACKUP_INTERVAL_HOURS", "6"))
 BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "10"))
 
 # Schema / content migrations
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 CONTENT_VERSION = 7
 
 # Metrics / health
