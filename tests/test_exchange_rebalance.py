@@ -80,7 +80,7 @@ def test_exchange_320k_coins_gives_modest_gems():
             ) as c:
                 coins, gems = await c.fetchone()
             assert coins == 500
-            assert gems == 292
+            assert gems == 247
             assert interaction.followup.sent
             assert "Остаток" in interaction.followup.sent[-1][0][0]
         finally:
@@ -124,7 +124,63 @@ def test_reverse_exchange_rate_is_consistent():
             ) as c:
                 coins, gems = await c.fetchone()
             assert gems == 0
-            assert coins == 7680
+            assert coins == 7600
+        finally:
+            await _close(db)
+
+    asyncio.run(run())
+
+
+def test_progressive_exchange_quote():
+    assert m.exchange_quote(320_000, 0, 10**9) == (260, 320_000, False)
+    assert m.exchange_quote(2_000_000, 0, 10**9) == (600, 2_000_000, False)
+    assert m.exchange_quote(320_000, 200_000, 10**9) == (155, 320_000, False)
+    assert m.exchange_max_gross_gems(0) == 0
+    assert m.exchange_max_gross_gems(500) == 526
+
+
+def test_exchange_daily_cap_limits_conversion():
+    async def run():
+        db = await _init(coins=10_000_000)
+        try:
+            modal = m.CoinsToGemsModal(1)
+            modal.amount._value = "2000000"
+            interaction = FakeInteraction(1)
+            await modal.on_submit(interaction)
+            async with db.execute(
+                "SELECT coins, gems, exchange_gems_today, "
+                "exchange_coins_today FROM players WHERE user_id = 1"
+            ) as c:
+                coins, gems, gems_today, coins_today = await c.fetchone()
+            assert coins == 10_000_000 - 1_408_000
+            assert gems == 500
+            assert gems_today == 500
+            assert coins_today == 1_408_000
+            assert "\u0414\u043d\u0435\u0432\u043d\u043e\u0439" in interaction.followup.sent[-1][0][0]
+
+            second = m.CoinsToGemsModal(1)
+            second.amount._value = "100000"
+            second_interaction = FakeInteraction(1)
+            await second.on_submit(second_interaction)
+            assert "\u0414\u043d\u0435\u0432\u043d\u043e\u0439" in second_interaction.followup.sent[-1][0][0]
+        finally:
+            await _close(db)
+
+    asyncio.run(run())
+
+
+def test_exchange_rejects_missing_player():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute("DELETE FROM players WHERE user_id = 1")
+            await db.commit()
+            modal = m.CoinsToGemsModal(1)
+            modal.amount._value = "1000"
+            interaction = FakeInteraction(1)
+            await modal.on_submit(interaction)
+            assert interaction.followup.sent
+            assert interaction.followup.sent[-1][0][0]
         finally:
             await _close(db)
 

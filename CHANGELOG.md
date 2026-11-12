@@ -2,6 +2,11 @@
 
 ## 2026-11-12
 
+- Currency exchange now uses a daily progressive rate and a 500-gem
+  daily cap; the fee is a flat 5%. Daily state is stored per player.
+- Pet effects now use a soft cap after level 10 and a +10% base-effect
+  bonus per breakthrough; feeding coin growth was reduced to 1.9x.
+- Schema version bumped to 18 for the exchange daily-state columns.
 - Synthesis can optionally consume starred generators; the result is
   created at 0★ and the UI warns before using them.
 - Mass synthesis can target a maximum generator tier and now lists every

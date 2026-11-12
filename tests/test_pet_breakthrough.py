@@ -83,14 +83,19 @@ def test_breakthrough_levels_and_feed_costs():
     assert m.pet_breakthrough_count(50) == 3
     assert m.pet_breakthrough_count(200) == 9
 
+    assert m.pet_effective_level(0) == 0
+    assert m.PET_RUNTIME.effective_level(0) == 0
+    assert m.pet_effective_level(200) == 19.0
+    assert m.PET_RUNTIME.effective_level(200) == 19.0
+    assert m.pet_feed_cost(200) == (32269, 39)
     assert m.pet_next_breakthrough(9) == 10
     assert m.pet_next_breakthrough(10) == 25
     assert m.pet_next_breakthrough(200) is None
 
     assert m.pet_feed_cost(9) == (100, 1)
-    assert m.pet_feed_cost(10) == (220, 2)
-    assert m.pet_feed_cost(25) == (484, 3)
-    assert m.pet_feed_cost(50) == (1065, 4)
+    assert m.pet_feed_cost(10) == (190, 2)
+    assert m.pet_feed_cost(25) == (361, 3)
+    assert m.pet_feed_cost(50) == (686, 4)
 
     costs = [m.pet_feed_cost(level) for level in m.PET_BREAKTHROUGH_LEVELS]
     for previous, current in zip(costs, costs[1:]):
@@ -107,7 +112,7 @@ def test_feed_breakthrough_and_max_level():
             assert level == 10
             assert pet_id == "cat"
             assert "Прорыв" in message
-            assert "220" in message
+            assert "190" in message
             assert "2" in message
 
             async with db.execute(
@@ -161,7 +166,7 @@ def test_pet_embed_shows_breakthrough_and_cost():
             field = next(
                 field for field in embed.fields if "Кот" in field.name
             )
-            assert "220" in field.value
+            assert "190" in field.value
             assert "2" in field.value
             assert "Прорывов" in field.value
             assert "1/9" in field.value
