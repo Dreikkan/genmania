@@ -317,8 +317,9 @@ GEM_INCOME = {
 GENERATOR_BASE_PRICE = 15
 GENERATOR_BASE_INCOME_HOUR = 2.0
 GENERATOR_PRICE_MULT = 3.8
-GENERATOR_INCOME_MULT = 1.9
+GENERATOR_INCOME_MULT = 3.0
 GENERATOR_TIER_COUNT = 30
+GEM_GENERATOR_PRICE_MULT = 1.0  # ценность гем-генераторов в доходе, не в цене
 MAX_GENERATOR_ITEM_PRICE = 10**18
 
 
@@ -740,11 +741,11 @@ STAR_UPGRADE = {
 
 STAR_BONUS = {
     0: 0.00,
-    1: 1.10,   # +110% → 2.1x
-    2: 3.50,   # +350% → 4.5x
-    3: 9.60,   # +960% → 10.6x
-    4: 27.50,  # +2750% → 28.5x
-    5: 92.00,  # +9200% → 93x
+    1: 0.20,   # +20% → 1.2x
+    2: 0.50,   # +50% → 1.5x
+    3: 1.00,   # +100% → 2x
+    4: 2.00,   # +200% → 3x
+    5: 4.00,   # +400% → 5x
 }
 
 CATALYST_PRICE = 10
@@ -2601,7 +2602,10 @@ class CastleBot(commands.Bot):
                 items_data.append((
                     item_id,
                     name,
-                    min(round_price(price * 10), MAX_GENERATOR_ITEM_PRICE),
+                    min(
+                        round_price(price * GEM_GENERATOR_PRICE_MULT),
+                        MAX_GENERATOR_ITEM_PRICE,
+                    ),
                     income_hour / 3600,
                     emoji,
                     rarity,
@@ -4376,6 +4380,8 @@ GUIDE_RUNTIME.configure(
         "EXCHANGE_FEE_RATE": EXCHANGE_FEE_RATE,
         "GEM_INCOME": GEM_INCOME,
         "GEMS_PER_COIN_RATE": GEMS_PER_COIN_RATE,
+        "GENERATOR_INCOME_MULT": GENERATOR_INCOME_MULT,
+        "GENERATOR_PRICE_MULT": GENERATOR_PRICE_MULT,
         "GENERATOR_TIER_COUNT": GENERATOR_TIER_COUNT,
         "MARKET_MAX_ACTIVE_ORDERS": MARKET_MAX_ACTIVE_ORDERS,
         "MARKET_MAX_DAILY_VOLUME": MARKET_MAX_DAILY_VOLUME,
@@ -4587,6 +4593,7 @@ ANALYTICS_UI_RUNTIME.configure(
     prestige_getter=lambda: get_prestige_points,
     collection_getter=lambda: get_collection_count,
     bonus_line_getter=lambda: get_total_bonus_line,
+    price_formatter=lambda value: format_price(value),
     embed_factory=lambda **kwargs: BotEmbed(**kwargs),
     emoji_fixer=lambda embed: fix_embed_emojis(embed),
     pet_types=PET_TYPES,
@@ -4936,6 +4943,7 @@ LEADERBOARD_RUNTIME.configure(
     embed_factory=lambda **kwargs: BotEmbed(**kwargs),
     emoji_getter=lambda: get_emoji,
     emoji_fixer=lambda embed: fix_embed_emojis(embed),
+    price_formatter=lambda value: format_price(value),
     top_types=TOP_TYPES,
     top_type_emojis=TOP_TYPE_EMOJIS,
     cache_ttl=TOP_CACHE_TTL,
@@ -6153,9 +6161,9 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
 
     parts = []
     if per_sec_coins > 0:
-        parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
+        parts.append(f"{coin} {format_price(per_sec_coins * 3600)}/час")
     if per_sec_gems > 0:
-        parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
+        parts.append(f"{gem} {format_price(per_sec_gems * 3600)}/час")
     income_str = (
         " | ".join(parts)
         if parts
@@ -6194,7 +6202,7 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
     embed.add_field(
         name=f"Кошелёк ({settings['currency_coins']}/{settings['currency_gems']})",
-        value=f"{coin} {coins} | {gem} {gems}",
+        value=f"{coin} {format_price(coins)} | {gem} {format_price(gems)}",
         inline=False
     )
     embed.add_field(

@@ -41,6 +41,20 @@ def test_craft_is_slot_positive():
         assert ratio > 1.0, (tier, ratio)
 
 
+def test_synthesis_keeps_total_income():
+    # 3 копии должны давать не меньше суммарного дохода, чем 1 результат.
+    for tier in range(1, 30):
+        _, source_income = m.generator_price_income(tier)
+        _, result_income = m.generator_price_income(tier + 1)
+        assert result_income >= m.CRAFT_COST * source_income - 1e-9, tier
+
+
+def test_star_stacking_does_not_beat_tier_progression():
+    _, basic_income = m.generator_price_income(1)
+    _, steel_income = m.generator_price_income(5)
+    assert basic_income * (1 + m.STAR_BONUS[5]) < steel_income
+
+
 def test_star_upgrades_have_positive_expected_value():
     for star in range(1, 6):
         low_mult = 1 + m.STAR_BONUS[star - 1]
@@ -48,7 +62,8 @@ def test_star_upgrades_have_positive_expected_value():
         chance = m.STAR_UPGRADE[star]["chance"]
         # При провале одна копия остаётся на прежней звезде.
         expected = chance * high_mult + (1 - chance) * low_mult
-        assert expected >= 2 * low_mult, (star, expected, 2 * low_mult)
+        assert high_mult > low_mult, (star, low_mult, high_mult)
+        assert expected > low_mult, (star, expected, low_mult)
 
 
 def test_passive_cap_removed():

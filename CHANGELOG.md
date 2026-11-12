@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-13
+
+- Rebalanced generator progression: income multiplier raised from 1.9 to
+  3.0, so synthesizing three copies no longer reduces total income.
+- Star income bonuses reduced to +20/+50/+100/+200/+400% so low-tier
+  star stacking no longer beats tier progression.
+- Gem generator price premium removed; divine and legendary no longer
+  share the same capped price.
+- `CONTENT_VERSION` bumped to 10 for the new prices and incomes.
+- Large numbers are now formatted in the main menu, profile, analytics,
+  leaderboards, bank and shop income; the shop also shows payback time.
+- Leaderboards show medals for the top three.
+- CI coverage gate raised from 50% to 95%.
+
 ## 2026-11-12
 
 - In-game guide actualized: bank loan limits, exchange fee and daily cap,

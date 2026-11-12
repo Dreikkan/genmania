@@ -179,9 +179,13 @@ def make_shop_ui_layer(runtime: ShopUiRuntime):
             emoji = custom.get(item_id, default_emoji)
             inc = []
             if income_coins > 0:
-                inc.append(f"{coin} {income_coins * 3600:.2f}/час")
+                inc.append(
+                    f"{coin} {runtime.format_price(income_coins * 3600)}/час"
+                )
             if income_gems > 0:
-                inc.append(f"{gem} {income_gems * 3600:.4f}/час")
+                inc.append(
+                    f"{gem} {runtime.format_price(income_gems * 3600)}/час"
+                )
             inc_str = " ".join(inc) if inc else "без дохода"
 
             if buyable:
@@ -211,6 +215,15 @@ def make_shop_ui_layer(runtime: ShopUiRuntime):
             value_parts = [price_str]
             if market_str:
                 value_parts.append(market_str)
+            if buyable and income_coins > 0 and price > 0:
+                payback_hours = price / (income_coins * 3600)
+                if payback_hours < 48:
+                    payback = f"Окупаемость: {payback_hours:.1f} ч"
+                else:
+                    payback = f"Окупаемость: {payback_hours / 24:.1f} дн"
+                if payback_hours > 24 * 30:
+                    payback = "⚠️ " + payback
+                value_parts.append(payback)
             value_parts.extend(
                 [
                     inc_str,

@@ -20,6 +20,7 @@ class LeaderboardRuntime:
         self._embed_factory: Callable[..., Any] = lambda **kwargs: None
         self._emoji_getter: Callable[[], Callable] = lambda: None
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
+        self._price_formatter: Callable[[int], str] = str
         self.top_types: dict = {}
         self.top_type_emojis: dict = {}
         self.cache_ttl = 300
@@ -35,6 +36,7 @@ class LeaderboardRuntime:
         embed_factory: Callable[..., Any],
         emoji_getter: Callable[[], Callable],
         emoji_fixer: Callable[[Any], Any],
+        price_formatter: Callable[[int], str],
         top_types: dict,
         top_type_emojis: dict,
         cache_ttl: int,
@@ -47,6 +49,7 @@ class LeaderboardRuntime:
         self._embed_factory = embed_factory
         self._emoji_getter = emoji_getter
         self._emoji_fixer = emoji_fixer
+        self._price_formatter = price_formatter
         self.top_types = top_types
         self.top_type_emojis = top_type_emojis
         self.cache_ttl = cache_ttl
@@ -73,6 +76,9 @@ class LeaderboardRuntime:
 
     def emoji(self, key: str):
         return self._emoji_getter()(key)
+
+    def format_price(self, value: int) -> str:
+        return self._price_formatter(value)
 
     async def fix_emojis(self, embed):
         return await self._emoji_fixer(embed)
@@ -336,17 +342,25 @@ def make_leaderboard_layer(runtime: LeaderboardRuntime):
                         user_cache[uid] = user
 
         lines = []
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         for i, row in enumerate(rows, start=1):
+            prefix = medals.get(i, f"**{i}.**")
             if top_type == "clans":
                 clan_id, name, power = row
-                lines.append(f"**{i}.** 🏰 {name} — ⚔️ {power}")
+                lines.append(
+                    f"{prefix} 🏰 {name} — ⚔️ "
+                    f"{runtime.format_price(power)}"
+                )
             else:
                 uid, value = row
                 user = user_cache.get(uid)
                 display = (
                     f"**{user.name}**" if user else f"`{uid}`"
                 )
-                lines.append(f"**{i}.** {display} — {value}")
+                lines.append(
+                    f"{prefix} {display} — "
+                    f"{runtime.format_price(value)}"
+                )
 
         chunk_size = 10
         for i in range(0, len(lines), chunk_size):

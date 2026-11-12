@@ -296,6 +296,41 @@ def test_shop_shows_market_price_and_synthesis_only():
     asyncio.run(run())
 
 
+def test_shop_warns_about_long_payback():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute("INSERT INTO players (user_id, coins) VALUES (1, 0)")
+            await db.execute(
+                "UPDATE items SET price = ?, income_per_hour = ? "
+                "WHERE id = 'basic_gen'",
+                (1_000_000_000, 1 / 3600),
+            )
+            await db.commit()
+            interaction = FakeInteraction(1)
+            basic = None
+            for page in range(6):
+                embed, total_pages = await m.build_shop_page(interaction, page)
+                basic = next(
+                    (
+                        field.value
+                        for field in embed.fields
+                        if "basic_gen" in field.name
+                    ),
+                    None,
+                )
+                if basic or page >= total_pages - 1:
+                    break
+            assert basic is not None
+            assert "Окупаемость" in basic
+            assert "дн" in basic
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_market_view_hides_synthesis_only():
     async def run():
         db = await _init()

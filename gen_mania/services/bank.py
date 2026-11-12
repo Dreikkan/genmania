@@ -194,10 +194,10 @@ def make_bank_layer(runtime: BankRuntime):
             return False, f"❌ {e}"
 
         return True, (
-            f"✅ Кредит 🪙 **{amount}** выдан под залог "
+            f"✅ Кредит 🪙 **{runtime.format_price(amount)}** выдан под залог "
             f"**{item_id}** ({stars}★).\n"
             f"К возврату до {due.strftime('%d.%m %H:%M')}: "
-            f"🪙 {amount + int(amount * runtime.loan_interest)}."
+            f"🪙 {runtime.format_price(amount + int(amount * runtime.loan_interest))}."
         )
 
     async def repay_bank_loan(user_id: int) -> tuple[bool, str]:
@@ -250,7 +250,7 @@ def make_bank_layer(runtime: BankRuntime):
             return False, f"❌ {e}"
 
         return True, (
-            f"✅ Кредит погашен: 🪙 **{total_due}**. "
+            f"✅ Кредит погашен: 🪙 **{runtime.format_price(total_due)}**. "
             f"Залог **{item_id}** возвращён на энергостанцию или в почту."
         )
 
@@ -317,20 +317,24 @@ def make_bank_layer(runtime: BankRuntime):
             total_value = int(amount * ((1 + daily_rate) ** days))
             if datetime.datetime.now() >= end_dt:
                 value_line = (
-                    f"К получению: {runtime.coin} **{total_value}** "
-                    f"(+{total_value - amount})"
+                    f"К получению: {runtime.coin} "
+                    f"**{runtime.format_price(total_value)}** "
+                    f"(+{runtime.format_price(total_value - amount)})"
                 )
             else:
                 value_line = (
                     f"При завершении: {runtime.coin} "
-                    f"**{total_value}** (+{total_value - amount})\n"
-                    f"Досрочно: {runtime.coin} **{amount}** "
+                    f"**{runtime.format_price(total_value)}** "
+                    f"(+{runtime.format_price(total_value - amount)})\n"
+                    f"Досрочно: {runtime.coin} "
+                    f"**{runtime.format_price(amount)}** "
                     "(без процентов)"
                 )
             embed.add_field(
                 name="Вклад",
                 value=(
-                    f"Сумма: {runtime.coin} **{amount}**\n"
+                    f"Сумма: {runtime.coin} "
+                    f"**{runtime.format_price(amount)}**\n"
                     f"Срок: до `{end_dt.strftime('%d.%m %H:%M')}` "
                     f"({days:.0f} дн.)\n{value_line}"
                 ),
@@ -355,8 +359,10 @@ def make_bank_layer(runtime: BankRuntime):
             embed.add_field(
                 name="Кредит",
                 value=(
-                    f"Получено: {runtime.coin} **{amount}**\n"
-                    f"К возврату: {runtime.coin} **{total_due}**\n"
+                    f"Получено: {runtime.coin} "
+                    f"**{runtime.format_price(amount)}**\n"
+                    f"К возврату: {runtime.coin} "
+                    f"**{runtime.format_price(total_due)}**\n"
                     f"Срок: до `{str(due)[:16]}`\n"
                     f"Залог: {item_emoji} **{item_name}** "
                     f"({stars or 0}★)"
@@ -409,7 +415,7 @@ def make_bank_layer(runtime: BankRuntime):
             )
             extra = f" · {details}" if details else ""
             lines.append(
-                f"🪙 **{amount}** — {label}{extra}\n"
+                f"🪙 **{runtime.format_price(amount)}** — {label}{extra}\n"
                 f"`{str(opened_at)[:16]}`"
             )
         embed.description = "\n\n".join(lines)
