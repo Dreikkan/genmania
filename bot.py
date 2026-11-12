@@ -309,7 +309,7 @@ GEN_SYNTHESIS_ONLY = frozenset({"space_gen", "divine_gen", "legendary_gen"})
 # больше дохода на слот. Синтез 2→1 компенсирует потерю слота.
 GENERATOR_BASE_PRICE = 15
 GENERATOR_BASE_INCOME_HOUR = 2.0
-GENERATOR_PRICE_MULT = 2.2
+GENERATOR_PRICE_MULT = 3.25
 GENERATOR_INCOME_MULT = 1.9
 GENERATOR_TIER_COUNT = 30
 
@@ -695,11 +695,11 @@ CRAFT_SETTINGS = {
     "copper_gen":     {"chance": 1.00, "gems": 0},
     "bronze_gen":     {"chance": 0.95, "gems": 0},
     "iron_gen":       {"chance": 0.90, "gems": 0},
-    "steel_gen":      {"chance": 0.85, "gems": 2},
-    "silver_gen":     {"chance": 0.80, "gems": 3},
-    "gold_gen":       {"chance": 0.75, "gems": 5},
-    "platinum_gen":   {"chance": 0.70, "gems": 8},
-    "emerald_gen":    {"chance": 0.65, "gems": 12},
+    "steel_gen":      {"chance": 0.85, "gems": 0},
+    "silver_gen":     {"chance": 0.80, "gems": 0},
+    "gold_gen":       {"chance": 0.75, "gems": 1},
+    "platinum_gen":   {"chance": 0.70, "gems": 2},
+    "emerald_gen":    {"chance": 0.65, "gems": 3},
     "ruby_gen":       {"chance": 0.60, "gems": 18},
     "sapphire_gen":   {"chance": 0.55, "gems": 25},
     "diamond_gen":    {"chance": 0.55, "gems": 35},
@@ -14502,12 +14502,153 @@ class StorageView(BaseView):
         )
 
 
+async def mass_move_temp_items(user_id: int, target: str) -> tuple[int, int]:
+    if target not in ("profile", "storage"):
+        return 0, 0
+    target_size = (
+        await get_storage_size(user_id)
+        if target == "storage"
+        else await get_grid_size(user_id)
+    )
+    moved = 0
+    remaining = 0
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT slot, item_id, stars, COALESCE(is_locked, 0) "
+            "FROM inventory WHERE user_id = ? AND location = 'temp' "
+            "ORDER BY slot ASC",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+        async with bot.db.execute(
+            "SELECT slot FROM inventory WHERE user_id = ? AND location = ?",
+            (user_id, target),
+        ) as c:
+            used = {row[0] for row in await c.fetchall()}
+        free = [slot for slot in range(target_size) if slot not in used]
+        for slot, item_id, stars, is_locked in rows:
+            if not free:
+                break
+            new_slot = free.pop(0)
+            await bot.db.execute(
+                "DELETE FROM inventory WHERE user_id = ? "
+                "AND location = 'temp' AND slot = ?",
+                (user_id, slot),
+            )
+            await bot.db.execute(
+                "INSERT INTO inventory "
+                "(user_id, slot, item_id, location, stars, is_locked) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, new_slot, item_id, target, stars, is_locked),
+            )
+            moved += 1
+        remaining = len(rows) - moved
+    if moved:
+        await sort_inventory(user_id, target)
+        await sort_inventory(user_id, "temp")
+        await update_quest_progress(user_id, "move_2", moved)
+        await update_quest_progress(user_id, "move_5", moved)
+    return moved, remaining
+
+
+class MassTempMoveConfirmView(BaseView):
+    feature_key = "storage"
+
+    async def _run(self, interaction: discord.Interaction, target: str):
+        moved, remaining = await mass_move_temp_items(self.author_id, target)
+        target_text = "хранилище" if target == "storage" else "энергостанцию"
+        if moved:
+            description = (
+                f"✅ Перемещено **{moved}** предметов в {target_text}."
+            )
+            if remaining:
+                description += (
+                    f"\n⚠️ Осталось во временном хранилище: "
+                    f"**{remaining}** (нет места)."
+                )
+        else:
+            description = (
+                "❌ Не удалось переместить предметы: нет свободного места "
+                f"в {target_text}."
+            )
+        embed = BotEmbed(
+            title="📦 Массовое перемещение",
+            description=description,
+            color=0x2ecc71 if moved else 0xe74c3c,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=TempStorageView(self.author_id)
+        )
+
+    @discord.ui.button(
+        label="В хранилище",
+        emoji=get_emoji("_storage"),
+        style=discord.ButtonStyle.primary,
+    )
+    async def to_storage(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await self._run(interaction, "storage")
+
+    @discord.ui.button(
+        label="На энергостанцию",
+        emoji=get_emoji("_castle"),
+        style=discord.ButtonStyle.success,
+    )
+    async def to_profile(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        await self._run(interaction, "profile")
+
+    @discord.ui.button(
+        label="Отмена",
+        emoji=get_emoji("_cancel"),
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.defer()
+        embed = await build_temp_storage_embed(interaction)
+        await interaction.edit_original_response(
+            embed=embed, view=TempStorageView(self.author_id)
+        )
+
+
 class TempStorageView(BaseView):
     feature_key = "storage"
     @discord.ui.button(label="Переместить", emoji=get_emoji("_move"), style=discord.ButtonStyle.primary, row=0)
     async def btn_move(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_move_view(interaction, "temp", self.author_id)
+
+    @discord.ui.button(label="Переместить всё", emoji=get_emoji("_move"), style=discord.ButtonStyle.success, row=1)
+    async def btn_mass_move(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        async with bot.db.execute(
+            "SELECT COUNT(*) FROM inventory "
+            "WHERE user_id = ? AND location = 'temp'",
+            (self.author_id,),
+        ) as c:
+            count = (await c.fetchone())[0]
+        if count <= 0:
+            await interaction.followup.send(
+                "❌ Временное хранилище пусто.", ephemeral=True
+            )
+            return
+        embed = BotEmbed(
+            title="📦 Массовое перемещение",
+            description=(
+                f"Во временном хранилище: **{count}** предметов.\n"
+                "Куда переместить всё, что поместится?"
+            ),
+            color=0x3498db,
+        )
+        await interaction.edit_original_response(
+            embed=embed, view=MassTempMoveConfirmView(self.author_id)
+        )
 
     @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
     async def btn_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -16410,11 +16551,18 @@ class StarConfirmView(SafeView):
 async def mass_star_upgrade_all(user_id: int) -> dict:
     """Повышает звёздность всем генераторам, где хватает копий и гемов."""
     successes = failures = attempts = gems_spent = 0
+    upgraded: dict[tuple[str, int], dict] = {}
     async with bot.db.execute(
         "SELECT gems FROM players WHERE user_id = ?", (user_id,)
     ) as c:
         row = await c.fetchone()
     gems = (row[0] if row else 0) or 0
+    async with bot.db.execute(
+        "SELECT id, name, emoji FROM items"
+    ) as c:
+        item_info = {
+            row[0]: (row[1], row[2]) for row in await c.fetchall()
+        }
 
     while True:
         async with bot.db.execute(
@@ -16446,6 +16594,19 @@ async def mass_star_upgrade_all(user_id: int) -> dict:
         gems_spent += result["gem_cost"]
         if result["success"]:
             successes += 1
+            name, emoji = item_info.get(chosen[0], (chosen[0], "⭐"))
+            key = (chosen[0], result["next_star"])
+            entry = upgraded.setdefault(
+                key,
+                {
+                    "item_id": chosen[0],
+                    "name": name,
+                    "emoji": emoji,
+                    "stars": result["next_star"],
+                    "count": 0,
+                },
+            )
+            entry["count"] += 1
         else:
             failures += 1
 
@@ -16466,6 +16627,7 @@ async def mass_star_upgrade_all(user_id: int) -> dict:
         "failures": failures,
         "gems_spent": gems_spent,
         "unlocked": unlocked,
+        "upgraded": list(upgraded.values()),
     }
 
 
@@ -16530,6 +16692,16 @@ class MassStarConfirmView(BaseView):
                 f"Всего попыток: **{result['attempts']}**\n"
                 f"Потрачено гемов: **💎 {result['gems_spent']}**"
             )
+            if result["upgraded"]:
+                made = sorted(
+                    result["upgraded"],
+                    key=lambda entry: (entry["stars"], entry["name"]),
+                )
+                description += "\n\nУлучшено:\n" + "\n".join(
+                    f"• {entry['count']}× {entry['emoji']} "
+                    f"{entry['name']} → {entry['stars']}★"
+                    for entry in made
+                )
             if result["unlocked"]:
                 description += "\n\n🏆 " + ", ".join(
                     f"{emoji} {name}"
@@ -17002,7 +17174,12 @@ class CraftSelectView(SafeView):
         await go_back(interaction, self.author_id, fallback="profile")
 
 
-async def craft_attempt(user_id: int, item_id: str, use_cat: bool) -> dict:
+async def craft_attempt(
+    user_id: int,
+    item_id: str,
+    use_cat: bool,
+    use_starred: bool = False,
+) -> dict:
     """Одна попытка синтеза. Возвращает результат и данные для embed."""
     next_id = CRAFT_CHAIN.get(item_id)
     if not next_id:
@@ -17026,18 +17203,41 @@ async def craft_attempt(user_id: int, item_id: str, use_cat: bool) -> dict:
     try:
         async with db_transaction():
             async with bot.db.execute(
-                "SELECT location, slot FROM inventory "
-                "WHERE user_id = ? AND item_id = ? AND stars = 0 "
+                "SELECT location, slot, stars FROM inventory "
+                "WHERE user_id = ? AND item_id = ? "
                 "AND location IN ('profile', 'storage') "
-                "ORDER BY CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
-                "slot LIMIT ?",
-                (user_id, item_id, CRAFT_COST),
+                "ORDER BY stars ASC, "
+                "CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
+                "slot ASC",
+                (user_id, item_id),
             ) as c:
-                owned = await c.fetchall()
+                all_copies = await c.fetchall()
+
+            target_star = 0
+            if use_starred:
+                by_star: dict[int, list] = {}
+                for row in all_copies:
+                    by_star.setdefault(row[2], []).append(row)
+                for star in sorted(by_star):
+                    if len(by_star[star]) >= CRAFT_COST:
+                        owned = by_star[star][:CRAFT_COST]
+                        target_star = star
+                        break
+                else:
+                    owned = []
+            else:
+                owned = [
+                    row for row in all_copies if row[2] == 0
+                ][:CRAFT_COST]
 
             if len(owned) < CRAFT_COST:
+                suffix = (
+                    "одинаковой звёздности"
+                    if use_starred
+                    else "без звёзд"
+                )
                 raise ValueError(
-                    f"Нужно {CRAFT_COST} × {src_name} без звёзд, "
+                    f"Нужно {CRAFT_COST} × {src_name} {suffix}, "
                     f"у тебя {len(owned)}."
                 )
 
@@ -17051,7 +17251,7 @@ async def craft_attempt(user_id: int, item_id: str, use_cat: bool) -> dict:
             if use_cat and cats < 1:
                 raise ValueError("Нет катализаторов.")
 
-            for location, slot in owned:
+            for location, slot, _star in owned:
                 await bot.db.execute(
                     "DELETE FROM inventory "
                     "WHERE user_id = ? AND location = ? AND slot = ?",
@@ -17094,20 +17294,21 @@ async def craft_attempt(user_id: int, item_id: str, use_cat: bool) -> dict:
                 try:
                     await place_items(
                         user_id, next_id, 1, commit=False,
-                        stars=CRAFT_RESULT_STARS,
+                        stars=target_star,
                     )
                 except ValueError:
-                    loc, slot = owned[0]
+                    loc, slot, _star = owned[0]
                     await bot.db.execute(
                         "INSERT INTO inventory "
                         "(user_id, slot, item_id, location, stars) "
                         "VALUES (?, ?, ?, ?, ?)",
-                        (user_id, slot, next_id, loc, CRAFT_RESULT_STARS),
+                        (user_id, slot, next_id, loc, target_star),
                     )
             else:
                 try:
                     await place_items(
-                        user_id, item_id, 1, commit=False, stars=0
+                        user_id, item_id, 1, commit=False,
+                        stars=target_star,
                     )
                 except ValueError:
                     log.exception(
@@ -17149,17 +17350,21 @@ async def craft_attempt(user_id: int, item_id: str, use_cat: bool) -> dict:
         "guaranteed": guaranteed,
         "src_name": src_name,
         "src_emoji": src_emoji,
+        "dst_id": next_id,
         "dst_name": dst_name,
         "dst_emoji": dst_emoji,
+        "result_stars": target_star,
+        "source_stars": target_star,
     }
 
 
 class CraftConfirmView(SafeView):
     feature_key = "craft"
-    def __init__(self, author_id: int, item_id: str):
+    def __init__(self, author_id: int, item_id: str, use_starred: bool = False):
         super().__init__(timeout=120)
         self.author_id = author_id
         self.item_id = item_id
+        self.use_starred = use_starred
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -17167,24 +17372,45 @@ class CraftConfirmView(SafeView):
             return False
         return True
 
-    @discord.ui.button(label="Без катализатора", emoji=get_emoji("_synthesis"), style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Без катализатора", emoji=get_emoji("_synthesis"), style=discord.ButtonStyle.primary, row=0)
     async def no_catalyst(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.do_craft(interaction, False)
 
-    @discord.ui.button(label="С катализатором", emoji=get_emoji("_catalyst"), style=discord.ButtonStyle.success)
+    @discord.ui.button(label="С катализатором", emoji=get_emoji("_catalyst"), style=discord.ButtonStyle.success, row=0)
     async def with_catalyst(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.do_craft(interaction, True)
 
-    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Звёздные: выкл", emoji=get_emoji("_stars"), style=discord.ButtonStyle.secondary, row=1)
+    async def toggle_starred(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.use_starred = not self.use_starred
+        self.toggle_starred.label = (
+            "Звёздные: вкл" if self.use_starred else "Звёздные: выкл"
+        )
+        self.toggle_starred.style = (
+            discord.ButtonStyle.success
+            if self.use_starred
+            else discord.ButtonStyle.secondary
+        )
+        await interaction.response.defer()
+        await interaction.edit_original_response(view=self)
+        if self.use_starred:
+            await interaction.followup.send(
+                "⚠️ Будут использованы звёздные копии генераторов.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Отмена", emoji=get_emoji("_cancel"), style=discord.ButtonStyle.secondary, row=1)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
         await interaction.edit_original_response(embed=embed, view=ProfileView(self.author_id))
 
     async def do_craft(self, interaction: discord.Interaction, use_cat: bool):
-        result = await craft_attempt(self.author_id, self.item_id, use_cat)
+        result = await craft_attempt(
+            self.author_id, self.item_id, use_cat, use_starred=self.use_starred
+        )
         if not result["ok"]:
             return await self.fail(interaction, f"❌ {result['message']}")
 
@@ -17200,6 +17426,7 @@ class CraftConfirmView(SafeView):
         src_emoji = result["src_emoji"]
         dst_name = result["dst_name"]
         dst_emoji = result["dst_emoji"]
+        result_stars = result["result_stars"]
 
         await sort_inventory(user_id, "profile")
         await sort_inventory(user_id, "storage")
@@ -17241,7 +17468,7 @@ class CraftConfirmView(SafeView):
             msg = (
                 f"⚗️ Успех! {CRAFT_COST}×{src_emoji} {src_name} → "
                 f"1×{dst_emoji} {dst_name} "
-                f"{CRAFT_RESULT_STARS}★\n{chance_str}{gem_str}"
+                f"{result_stars}★\n{chance_str}{gem_str}"
             )
         else:
             msg = (
@@ -17265,15 +17492,29 @@ class CraftConfirmView(SafeView):
 
 
 async def mass_craft_all(
-    user_id: int, guild_id: int | None, use_cat: bool = False
+    user_id: int,
+    guild_id: int | None,
+    use_cat: bool = False,
+    use_starred: bool = False,
+    max_result_id: str | None = None,
 ) -> dict:
     """Выполняет все доступные синтезы и возвращает статистику попыток."""
     successes = failures = attempts = 0
     gems_spent = catalysts_used = 0
+    crafted: dict[tuple[str, int], dict] = {}
+
+    chain = list(CRAFT_CHAIN)
+    if max_result_id in chain:
+        allowed = chain[: chain.index(max_result_id)]
+    else:
+        allowed = chain
+
     while True:
         progressed = False
-        for item_id in CRAFT_CHAIN:
-            result = await craft_attempt(user_id, item_id, use_cat)
+        for item_id in allowed:
+            result = await craft_attempt(
+                user_id, item_id, use_cat, use_starred=use_starred
+            )
             if not result["ok"]:
                 continue
             progressed = True
@@ -17282,6 +17523,18 @@ async def mass_craft_all(
             catalysts_used += result["catalyst_used"]
             if result["success"]:
                 successes += 1
+                key = (result["dst_id"], result["result_stars"])
+                entry = crafted.setdefault(
+                    key,
+                    {
+                        "item_id": result["dst_id"],
+                        "name": result["dst_name"],
+                        "emoji": result["dst_emoji"],
+                        "stars": result["result_stars"],
+                        "count": 0,
+                    },
+                )
+                entry["count"] += 1
             else:
                 failures += 1
         if not progressed:
@@ -17328,7 +17581,36 @@ async def mass_craft_all(
         "gems_spent": gems_spent,
         "catalysts_used": catalysts_used,
         "unlocked": unlocked,
+        "crafted": list(crafted.values()),
     }
+
+
+async def _mass_craft_target_options():
+    target_ids = list(dict.fromkeys(CRAFT_CHAIN.values()))[:24]
+    async with bot.db.execute(
+        "SELECT id, name, emoji FROM items"
+    ) as c:
+        info = {row[0]: (row[1], row[2]) for row in await c.fetchall()}
+    options = [
+        discord.SelectOption(
+            label="Все генераторы",
+            value="__all__",
+            description="Синтезировать до максимально возможного тира",
+            emoji=parse_emoji_safe(get_emoji("_generators")),
+        )
+    ]
+    for item_id in target_ids:
+        name, emoji = info.get(item_id, (item_id, ""))
+        options.append(
+            discord.SelectOption(
+                label=f"До {name}"[:100],
+                value=item_id,
+                emoji=parse_emoji_safe(
+                    emoji or get_emoji("_generators")
+                ),
+            )
+        )
+    return options
 
 
 async def show_mass_craft_confirm(
@@ -17352,42 +17634,102 @@ async def show_mass_craft_confirm(
             count = (await c.fetchone())[0]
         possible += count // CRAFT_COST
 
-    if possible <= 0:
+    async with bot.db.execute(
+        "SELECT item_id, stars, COUNT(*) FROM inventory "
+        "WHERE user_id = ? AND location IN ('profile', 'storage') "
+        "AND stars > 0 GROUP BY item_id, stars",
+        (user_id,),
+    ) as c:
+        star_rows = await c.fetchall()
+    starred_count = sum(row[2] for row in star_rows)
+    starred_possible = any(
+        count >= CRAFT_COST for _item_id, _stars, count in star_rows
+    )
+
+    if possible <= 0 and not starred_possible:
         await interaction.followup.send(
-            "❌ Нет копий 0★ для массового синтеза.", ephemeral=True
+            "❌ Нет копий для массового синтеза.", ephemeral=True
         )
         return
 
+    target_options = await _mass_craft_target_options()
+    starred_line = ""
+    if starred_count and starred_possible:
+        starred_line = (
+            f"\n⚠️ Звёздных копий: **{starred_count}**. "
+            "По умолчанию они не используются; включи «Звёздные», "
+            "чтобы синтезировать и их."
+        )
     embed = BotEmbed(
         title="⚗️ Массовый синтез",
         description=(
-            f"Доступно синтезов (минимум): **{possible}**\n"
+            f"0★-синтезов (минимум): **{possible}**\n"
             f"Копии берутся из энергостанции и хранилища.\n"
-            f"Гемов: **💎 {gems}** · катализаторов: **{catalysts}**\n\n"
-            "Будут выполнены все возможные синтезы. "
-            "После завершения бот покажет число успешных и неудачных попыток."
+            f"Гемов: **💎 {gems}** · катализаторов: **{catalysts}**"
+            f"{starred_line}\n\n"
+            "Выбери, до какого генератора синтезировать, и запусти. "
+            "После завершения бот покажет успешные/неудачные попытки "
+            "и список созданных генераторов."
         ),
         color=0x3498db,
     )
     await interaction.edit_original_response(
         embed=embed,
-        view=MassCraftConfirmView(author_id, page, catalysts),
+        view=MassCraftConfirmView(
+            author_id,
+            page,
+            catalysts,
+            target_options=target_options,
+            starred_count=starred_count,
+        ),
     )
 
 
 class MassCraftConfirmView(BaseView):
     feature_key = "craft"
 
-    def __init__(self, author_id: int, page: int = 0, catalysts: int = 0):
+    def __init__(
+        self,
+        author_id: int,
+        page: int = 0,
+        catalysts: int = 0,
+        target_options: list | None = None,
+        starred_count: int = 0,
+    ):
         super().__init__(author_id, timeout=120)
         self.page = page
         self.catalysts = catalysts
+        self.target_id = None
+        self.use_starred = False
+        self.starred_count = starred_count
         if catalysts < 1:
             self.with_catalyst.disabled = True
+        if target_options:
+            self.add_item(
+                make_select(
+                    "До какого генератора синтезировать",
+                    target_options,
+                    self.select_target,
+                    row=0,
+                )
+            )
+        self.starred_toggle.label = "Звёздные: выкл"
+        self.starred_toggle.style = discord.ButtonStyle.secondary
+        if starred_count < CRAFT_COST:
+            self.starred_toggle.disabled = True
+
+    async def select_target(self, interaction: discord.Interaction):
+        value = interaction.data["values"][0]
+        self.target_id = None if value == "__all__" else value
+        await interaction.response.defer()
 
     async def _run(self, interaction: discord.Interaction, use_cat: bool):
         result = await mass_craft_all(
-            self.author_id, interaction.guild_id, use_cat
+            self.author_id,
+            interaction.guild_id,
+            use_cat,
+            use_starred=self.use_starred,
+            max_result_id=self.target_id,
         )
         if result["attempts"] == 0:
             description = (
@@ -17406,6 +17748,16 @@ class MassCraftConfirmView(BaseView):
                 description += (
                     f"\nИспользовано катализаторов: "
                     f"**{result['catalysts_used']}**"
+                )
+            if result["crafted"]:
+                made = sorted(
+                    result["crafted"],
+                    key=lambda entry: (entry["stars"], entry["name"]),
+                )
+                description += "\n\nСделано:\n" + "\n".join(
+                    f"• {entry['count']}× {entry['emoji']} "
+                    f"{entry['name']} {entry['stars']}★"
+                    for entry in made
                 )
             if result["unlocked"]:
                 description += "\n\n🏆 " + ", ".join(
@@ -17426,6 +17778,7 @@ class MassCraftConfirmView(BaseView):
         label="Без катализатора",
         emoji=get_emoji("_synthesis"),
         style=discord.ButtonStyle.primary,
+        row=1,
     )
     async def no_catalyst(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -17437,6 +17790,7 @@ class MassCraftConfirmView(BaseView):
         label="С катализатором",
         emoji=get_emoji("_catalyst"),
         style=discord.ButtonStyle.success,
+        row=1,
     )
     async def with_catalyst(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -17445,9 +17799,36 @@ class MassCraftConfirmView(BaseView):
         await self._run(interaction, True)
 
     @discord.ui.button(
+        label="Звёздные: выкл",
+        emoji=get_emoji("_stars"),
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def starred_toggle(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.use_starred = not self.use_starred
+        self.starred_toggle.label = (
+            "Звёздные: вкл" if self.use_starred else "Звёздные: выкл"
+        )
+        self.starred_toggle.style = (
+            discord.ButtonStyle.success
+            if self.use_starred
+            else discord.ButtonStyle.secondary
+        )
+        await interaction.response.defer()
+        await interaction.edit_original_response(view=self)
+        if self.use_starred:
+            await interaction.followup.send(
+                "⚠️ Будут использованы звёздные копии генераторов.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
         label="Отмена",
         emoji=get_emoji("_cancel"),
         style=discord.ButtonStyle.secondary,
+        row=2,
     )
     async def cancel(
         self, interaction: discord.Interaction, button: discord.ui.Button
@@ -18954,12 +19335,32 @@ class BuyItemQuantityView(SafeView):
         back.callback = self.back
         self.add_item(back)
 
+        custom = discord.ui.Button(
+            label="Своё количество",
+            emoji=get_emoji("_settings"),
+            style=discord.ButtonStyle.primary,
+            row=1,
+        )
+        custom.callback = self.custom_quantity
+        self.add_item(custom)
+
+    async def custom_quantity(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            CustomBuyQuantityModal(
+                self.author_id, self.item_id, self.page
+            )
+        )
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await self.check_owner(interaction)
 
-    async def quantity_select(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        qty = int(interaction.data["values"][0])
+    async def quantity_select(
+        self, interaction: discord.Interaction, qty: int | None = None
+    ):
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        if qty is None:
+            qty = int(interaction.data["values"][0])
         user_id = interaction.user.id
 
         async with bot.db.execute("SELECT price, name, buyable, emoji FROM items WHERE id = ?", (self.item_id,)) as c:
@@ -19065,6 +19466,33 @@ class BuyItemQuantityView(SafeView):
         ) as c:
             rows = await c.fetchall()
         await open_shop_buy_select(interaction, self.author_id, rows, self.page)
+
+
+class CustomBuyQuantityModal(discord.ui.Modal, title="Своё количество"):
+    quantity = discord.ui.TextInput(
+        label="Сколько генераторов купить",
+        placeholder="Например, 100",
+        required=True,
+    )
+
+    def __init__(self, author_id: int, item_id: str, page: int = 0):
+        super().__init__()
+        self.author_id = author_id
+        self.item_id = item_id
+        self.page = page
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.quantity.value)
+            if qty < 1 or qty > 10000:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Введи число от 1 до 10 000.", ephemeral=True
+            )
+            return
+        view = BuyItemQuantityView(self.author_id, self.item_id, self.page)
+        await view.quantity_select(interaction, qty)
 
 
 # ============================================================

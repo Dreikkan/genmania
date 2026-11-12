@@ -19,7 +19,7 @@ BACKUP_KEEP = int(os.getenv("BACKUP_KEEP", "10"))
 
 # Schema / content migrations
 SCHEMA_VERSION = 17
-CONTENT_VERSION = 6
+CONTENT_VERSION = 7
 
 # Metrics / health
 SLOW_DB_TX_MS = 100.0

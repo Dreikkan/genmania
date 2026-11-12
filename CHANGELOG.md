@@ -2,6 +2,17 @@
 
 ## 2026-11-12
 
+- Synthesis can optionally consume starred generators; the result keeps
+  the same star level and the UI warns before using them.
+- Mass synthesis can target a maximum generator tier and now lists every
+  created generator with its star level. Mass star upgrades also list the
+  upgraded generators and their new stars.
+- Added mass movement from temporary storage to storage or the energy
+  station.
+- Added a custom-quantity button to generator purchases.
+- Generator shop prices were increased so crafting three copies is
+  cheaper than buying the next tier; early craft gem fees were reduced
+  and the content migration was bumped to version 7.
 - Pets now have a 200-level progression with breakthroughs at
   10, 25, 50, 75, 100, 125, 150, 175 and 200. Every breakthrough
   increases the feeding cost in coins and gems.
