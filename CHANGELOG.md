@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-12
+
+- Added mass synthesis to the craft screen with success/failure counts
+  and an optional catalyst mode.
+- Added mass star upgrades to the stars screen with success/failure
+  counts and automatic cascading through available copies.
+- Grids that are equal to or worse than the current grid are no longer
+  offered in upgrades, including gem-purchased grids.
+- Added regression tests for mass actions and grid filtering.
+
 ## 2026-11-09
 
 - Fixed UI navigation regressions found in the button/menu audit:
