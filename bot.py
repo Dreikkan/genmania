@@ -44,6 +44,7 @@ from gen_mania.navigation import (
 )
 from gen_mania.metrics import METRICS, MetricsRegistry  # noqa: F401 - re-export
 from gen_mania.dashboard_sync import DashboardSync
+from gen_mania.web_game import WebGameBridge
 from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
@@ -1574,6 +1575,8 @@ class CastleBot(commands.Bot):
         self.background_restart_delay = 5.0
         self.background_restart_max = 300.0
         self.dashboard_sync = None
+        self.web_game = None
+        self._web_game_table_ready = False
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -1657,6 +1660,14 @@ class CastleBot(commands.Bot):
                 self._spawn_background(
                     "dashboard_sync", self.dashboard_sync.run
                 )
+            )
+
+        self.web_game = WebGameBridge(
+            self, handler=self.handle_web_game_command
+        )
+        if self.web_game.enabled:
+            self.background_tasks.append(
+                self._spawn_background("web_game", self.web_game.run)
             )
 
     async def apply_dashboard_settings(self, update: dict) -> dict:
@@ -1749,6 +1760,385 @@ class CastleBot(commands.Bot):
             "warnings": warnings,
             "guild_id": guild_id,
         }
+
+    # ------------------------------------------------------------------
+    # Web game bridge
+    # ------------------------------------------------------------------
+
+    async def _ensure_web_game_table(self) -> None:
+        if self._web_game_table_ready:
+            return
+        await self.db.execute(
+            "CREATE TABLE IF NOT EXISTS web_game_commands ("
+            "id TEXT PRIMARY KEY, result TEXT, "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        await self.db.commit()
+        self._web_game_table_ready = True
+
+    def _web_game_guilds(self, user_id: int) -> list[dict]:
+        result = []
+        for guild in self.guilds:
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            result.append(
+                {
+                    "id": str(guild.id),
+                    "name": guild.name,
+                    "members": guild.member_count or len(guild.members),
+                    "icon": guild.icon.url if guild.icon else None,
+                }
+            )
+        result.sort(key=lambda item: item["members"], reverse=True)
+        return result
+
+    def _is_web_admin(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        admin_role_id: int | None,
+    ) -> bool:
+        if guild.owner_id == member.id:
+            return True
+        if member.guild_permissions.administrator:
+            return True
+        if admin_role_id:
+            return any(role.id == int(admin_role_id) for role in member.roles)
+        return False
+
+    async def _require_web_admin(
+        self, guild: discord.Guild, member: discord.Member
+    ) -> None:
+        settings = await get_settings(guild.id)
+        role_id = settings.get("admin_role_id")
+        if not self._is_web_admin(guild, member, role_id):
+            raise PermissionError(
+                "Нужны права администратора этого сервера или админ-роль."
+            )
+
+    async def _web_game_state(
+        self, user_id: int, guild_id: int
+    ) -> dict:
+        guilds = self._web_game_guilds(user_id)
+        guild = self.get_guild(guild_id) if guild_id else None
+        member = guild.get_member(user_id) if guild else None
+        if guild is None or member is None:
+            if not guilds:
+                return {
+                    "ok": True,
+                    "guilds": [],
+                    "guild_id": None,
+                    "player": None,
+                    "inventory": [],
+                    "settings": {},
+                }
+            guild_id = int(guilds[0]["id"])
+            guild = self.get_guild(guild_id)
+            member = guild.get_member(user_id) if guild else None
+            if guild is None or member is None:
+                return {
+                    "ok": True,
+                    "guilds": guilds,
+                    "guild_id": None,
+                    "player": None,
+                    "inventory": [],
+                    "settings": {},
+                }
+
+        await get_player_stats(user_id, guild_id)
+        async with self.db.execute(
+            "SELECT coins, gems, COALESCE(prestige_points, 0), "
+            "COALESCE(grid_size, 9), COALESCE(storage_size, 36), "
+            "COALESCE(title, ''), last_collected "
+            "FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            raise RuntimeError("Игрок не найден в базе.")
+
+        coins, gems, prestige, grid_size, storage_size, title, last_collected = row
+        per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
+        pending_coins, pending_gems = await calculate_passive_income(
+            user_id, guild_id
+        )
+        power = await get_combat_power(user_id)
+        clan_row = await get_clan(user_id)
+        settings = await get_settings(guild_id)
+        admin_role_id = settings.get("admin_role_id")
+        is_admin = self._is_web_admin(guild, member, admin_role_id)
+
+        async with self.db.execute(
+            """
+            SELECT inv.location, inv.slot, inv.item_id, i.name, i.rarity,
+                   inv.stars, i.price, i.income_per_hour, i.income_gems_per_hour
+            FROM inventory inv
+            JOIN items i ON i.id = inv.item_id
+            WHERE inv.user_id = ?
+            ORDER BY inv.location ASC, inv.slot ASC
+            LIMIT 250
+            """,
+            (user_id,),
+        ) as cursor:
+            inventory_rows = await cursor.fetchall()
+
+        inventory = []
+        generators = 0
+        for (
+            location,
+            slot,
+            item_id,
+            name,
+            rarity,
+            stars,
+            price,
+            income_coins,
+            income_gems,
+        ) in inventory_rows:
+            if location == "profile":
+                generators += 1
+            inventory.append(
+                {
+                    "location": location,
+                    "slot": slot,
+                    "item_id": item_id,
+                    "name": name,
+                    "rarity": rarity,
+                    "stars": stars or 0,
+                    "price": price or 0,
+                    "income_hour": round(
+                        float(income_coins or 0)
+                        * (1 + STAR_BONUS.get(int(stars or 0), 0)),
+                        2,
+                    ),
+                    "income_gems_hour": round(
+                        float(income_gems or 0)
+                        * (1 + STAR_BONUS.get(int(stars or 0), 0)),
+                        2,
+                    ),
+                }
+            )
+
+        avatar = getattr(member.display_avatar, "url", None)
+        clan_name = clan_row[1] if clan_row else None
+        return {
+            "ok": True,
+            "guilds": guilds,
+            "guild_id": str(guild.id),
+            "guild_name": guild.name,
+            "player": {
+                "user_id": str(user_id),
+                "name": member.display_name,
+                "handle": member.name,
+                "avatar": avatar,
+                "coins": int(coins or 0),
+                "gems": int(gems or 0),
+                "prestige": int(prestige or 0),
+                "grid_size": int(grid_size or 9),
+                "storage_size": int(storage_size or 36),
+                "title": str(title or ""),
+                "income_hour_coins": round(per_sec_coins * 3600, 2),
+                "income_hour_gems": round(per_sec_gems * 3600, 2),
+                "pending_coins": int(pending_coins or 0),
+                "pending_gems": int(pending_gems or 0),
+                "power": int(power or 0),
+                "generators": generators,
+                "clan": clan_name,
+                "is_admin": is_admin,
+                "last_collected": last_collected,
+            },
+            "inventory": inventory,
+            "settings": {
+                "currency_name": settings.get("currency_coins", "монеты"),
+                "premium_name": settings.get("currency_gems", "гемы"),
+                "tax_rate": round(float(settings.get("tax_rate", 0.0)) * 100, 1),
+            },
+        }
+
+    async def _web_game_grant(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        await self._require_web_admin(guild, actor)
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id"))
+            amount = int(payload.get("amount"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректные параметры начисления.")
+        currency = str(payload.get("currency", "coins"))
+        if currency not in {"coins", "gems"}:
+            raise ValueError("Неизвестная валюта.")
+        if not 1 <= amount <= 1_000_000:
+            raise ValueError("Сумма должна быть от 1 до 1 000 000.")
+        target = guild.get_member(target_id)
+        if target is None:
+            raise ValueError("Игрок не состоит в этом сервере.")
+        if target.bot:
+            raise ValueError("Нельзя начислять ботам.")
+
+        await self._ensure_web_game_table()
+        command_id = str(command.get("id", ""))
+        result: dict
+        created = False
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "INSERT OR IGNORE INTO web_game_commands (id) VALUES (?)",
+                (command_id,),
+            )
+            if cursor.rowcount == 0:
+                async with self.db.execute(
+                    "SELECT result FROM web_game_commands WHERE id = ?",
+                    (command_id,),
+                ) as read_cursor:
+                    cached = await read_cursor.fetchone()
+                if cached and cached[0]:
+                    return json.loads(cached[0])
+                return {"ok": False, "error": "Команда уже обработана."}
+
+            created = True
+            await self.db.execute(
+                "INSERT OR IGNORE INTO players (user_id, coins, gems) "
+                "VALUES (?, 0, 0)",
+                (target_id,),
+            )
+            if currency == "coins":
+                await self.db.execute(
+                    "UPDATE players SET coins = MAX(0, coins + ?) "
+                    "WHERE user_id = ?",
+                    (amount, target_id),
+                )
+            else:
+                await self.db.execute(
+                    "UPDATE players SET gems = MAX(0, gems + ?) "
+                    "WHERE user_id = ?",
+                    (amount, target_id),
+                )
+            async with self.db.execute(
+                "SELECT coins, gems FROM players WHERE user_id = ?",
+                (target_id,),
+            ) as balance_cursor:
+                balance = await balance_cursor.fetchone()
+            result = {
+                "ok": True,
+                "action": "admin_grant",
+                "target_id": str(target_id),
+                "target_name": target.display_name,
+                "currency": currency,
+                "amount": amount,
+                "coins": int(balance[0] or 0) if balance else 0,
+                "gems": int(balance[1] or 0) if balance else 0,
+            }
+            await self.db.execute(
+                "UPDATE web_game_commands SET result = ? WHERE id = ?",
+                (
+                    json.dumps(result, ensure_ascii=False),
+                    command_id,
+                ),
+            )
+
+        if created:
+            await log_admin_action(
+                actor.id,
+                target_id,
+                "web_grant_coins" if currency == "coins" else "web_grant_gems",
+                f"+{amount} ({currency})",
+                guild_id=guild.id,
+            )
+        return result
+
+    async def _web_game_reset(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        await self._require_web_admin(guild, actor)
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный игрок.")
+        target = guild.get_member(target_id)
+        if target is None:
+            raise ValueError("Игрок не состоит в этом сервере.")
+
+        removed = {}
+        async with db_transaction():
+            for table in (
+                "duel_cooldowns",
+                "raid_cooldowns",
+                "espionage_cooldowns",
+            ):
+                try:
+                    cursor = await self.db.execute(
+                        f"DELETE FROM {table} WHERE user_id = ?",
+                        (target_id,),
+                    )
+                    removed[table] = cursor.rowcount
+                except Exception:
+                    removed[table] = 0
+
+        await log_admin_action(
+            actor.id,
+            target_id,
+            "web_reset_cooldowns",
+            ", ".join(f"{key}={value}" for key, value in removed.items()),
+            guild_id=guild.id,
+        )
+        return {
+            "ok": True,
+            "action": "admin_reset",
+            "target_id": str(target_id),
+            "target_name": target.display_name,
+            "removed": removed,
+        }
+
+    async def handle_web_game_command(self, command: dict) -> dict:
+        action = str(command.get("action", ""))
+        try:
+            user_id = int(command.get("user_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный пользователь.")
+        if user_id <= 0:
+            raise ValueError("Некорректный пользователь.")
+
+        try:
+            guild_id = int(command.get("guild_id") or 0)
+        except (TypeError, ValueError):
+            guild_id = 0
+
+        if action == "state":
+            return await self._web_game_state(user_id, guild_id)
+        if not guild_id:
+            raise ValueError("Выберите сервер.")
+
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            raise ValueError("Бот не находится на этом сервере.")
+        member = guild.get_member(user_id)
+        if member is None:
+            raise ValueError("Вы не состоите в этом сервере.")
+
+        if action == "collect":
+            coins, gems = await collect_income(user_id, guild_id)
+            state = await self._web_game_state(user_id, guild_id)
+            return {
+                "ok": True,
+                "action": "collect",
+                "coins": int(coins or 0),
+                "gems": int(gems or 0),
+                "state": state,
+            }
+        if action == "admin_grant":
+            return await self._web_game_grant(command, guild, member)
+        if action == "admin_reset":
+            return await self._web_game_reset(command, guild, member)
+        raise ValueError("Неизвестное игровое действие.")
 
     def _spawn_background(self, name: str, factory) -> asyncio.Task:
         """Запускает фоновую задачу и перезапускает её после сбоя."""

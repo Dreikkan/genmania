@@ -168,8 +168,8 @@ python -m bandit -q -c bandit.yaml -r gen_mania bot.py -ll
 python -m pip_audit -r requirements.txt --progress-spinner off
 ```
 
-Текущий статус: **510 passed**, 145 test files.
-Coverage: **99.5% line, 95.6% branch**, минимальный порог — **95%**.
+Текущий статус: **517 passed**, 147 test files.
+Coverage: **99.4% line, 95.5% branch**, минимальный порог — **95%**.
 
 Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
 owner-only команда `/health` показывает метрики и состояние задач.
@@ -185,7 +185,12 @@ owner-only команда `/health` показывает метрики и со�
 DASHBOARD_SYNC_URL=https://genmania.tech/api/ingest.php
 DASHBOARD_SYNC_TOKEN=<тот же токен, что ingest_token в config.php сайта>
 DASHBOARD_SYNC_INTERVAL=300
+DASHBOARD_GAME_INTERVAL=5
 ```
+
+`DASHBOARD_GAME_INTERVAL` — период опроса игровых команд для вкладки
+«Игра» (2–60 секунд). Игровой канал использует тот же токен, что и
+синхронизация статистики, либо отдельный `DASHBOARD_GAME_TOKEN`.
 
 Если переменные не заданы, задача синхронизации не запускается и бот
 работает как обычно. Токен должен быть не короче 16 символов; сайт хранит
