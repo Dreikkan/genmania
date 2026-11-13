@@ -105,6 +105,27 @@ python bot.py
 База и бэкапы должны оставаться в `/app/data`, иначе они потеряются
 при перезапуске.
 
+### Если в логе `ModuleNotFoundError: No module named 'discord'`
+
+Это значит, что зависимости не установлены в текущем Python-окружении.
+Одного перезапуска недостаточно. В Bothost:
+
+1. Нажмите **«Переустановить зависимости»** / **Rebuild** (не просто
+   Restart).
+2. Либо в консоли выполните:
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+3. Проверьте:
+   ```bash
+   python -c "import discord; print(discord.__version__)"
+   ```
+4. Только после этого запускайте бота.
+
+После смены `bothost.json`, `requirements.txt` или `requirements.lock`
+всегда делайте переустановку зависимостей: смена версии Python создаёт
+чистое окружение без пакетов.
+
 ## Dev-стенд
 
 Инструкция: [`dev/README_DEV.md`](dev/README_DEV.md).
