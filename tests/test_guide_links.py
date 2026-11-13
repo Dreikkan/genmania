@@ -43,8 +43,8 @@ def test_guide_paths_and_units():
             assert "Синтез: +50" in season.description
             assert "Дневные лимиты" in season.description
             assert "Сюжетный квест: +200" in season.description
-            assert "46 500" in season.description
-            assert "+100" in season.description
+            assert "48 150" in season.description
+            assert "+90" in season.description
 
             power = await m.build_guide_section_embed("power")
             assert "0.5 × звёзды" in power.description

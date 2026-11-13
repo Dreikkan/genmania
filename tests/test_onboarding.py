@@ -27,7 +27,7 @@ def test_onboarding_steps_and_rewards():
             await db.commit()
 
             first = await m.complete_onboarding_step(1, "buy_generator")
-            assert first and first["coins"] == 50, first
+            assert first and first["coins"] == 100, first
             assert await m.complete_onboarding_step(1, "buy_generator") is None
 
             for step in ("claim_daily", "open_quests", "craft", "social"):
@@ -40,7 +40,7 @@ def test_onboarding_steps_and_rewards():
                 "SELECT coins, gems FROM players WHERE user_id = 1"
             ) as c:
                 coins, gems = await c.fetchone()
-            assert coins == 275, coins
+            assert coins == 425, coins
             assert gems == 2, gems
         finally:
             await db.close()

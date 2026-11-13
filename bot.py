@@ -221,31 +221,31 @@ ONBOARDING_STEPS = {
     "buy_generator": (
         "Купи первый генератор",
         "Магазин → Генераторы",
-        50,
+        100,
         0,
     ),
     "claim_daily": (
         "Забери ежедневную награду",
         "Главное меню → Ежедневная награда",
-        50,
+        75,
         1,
     ),
     "open_quests": (
         "Открой квесты",
         "Главное меню → Квесты",
-        25,
+        50,
         0,
     ),
     "craft": (
         "Сделай синтез",
         "Энергостанция → Синтез",
-        100,
+        125,
         1,
     ),
     "social": (
         "Загляни в Социум",
         "Главное меню → Социум",
-        50,
+        75,
         0,
     ),
 }
@@ -486,8 +486,8 @@ GIVEAWAY_REWARDS = {
 # --- СЕЗОНЫ / BATTLE PASS ---
 SEASON_LEVELS = 30
 SEASON_PREMIUM_COST_GEMS = 150
-SEASON_XP_BASE = 100                  # XP с 0 на 1 уровень
-SEASON_XP_STEP = 100                  # +100 XP к стоимости каждого следующего уровня
+SEASON_XP_BASE = 300                  # XP с 0 на 1 уровень
+SEASON_XP_STEP = 90                   # +90 XP к стоимости каждого следующего уровня
 SEASON_TOTAL_XP = (
     SEASON_XP_BASE * SEASON_LEVELS
     + SEASON_XP_STEP * (SEASON_LEVELS - 1) * SEASON_LEVELS // 2
@@ -498,7 +498,7 @@ SEASON_WEEKEND_XP_MULT = 1.5          # событие выходного дня
 # Награды каждого действия и лимиты. per_tx — максимум за одно начисление
 # (до выходного множителя), daily — максимум эффективного XP в сутки.
 # Баланс: активная игра даёт ~1 670 XP/день, за 30 дней — ~50 100 XP
-# при необходимых 46 500 XP на 30 уровней.
+# при необходимых 48 150 XP на 30 уровней.
 SEASON_XP_ACTIONS = {
     "story_quest": {
         "label": "Сюжетный квест",
@@ -4639,6 +4639,7 @@ GUIDE_RUNTIME.configure(
         "RAID_MIN_TARGET_POWER_RATIO": RAID_MIN_TARGET_POWER_RATIO,
         "RAID_TARGET_SHIELD_HOURS": RAID_TARGET_SHIELD_HOURS,
         "SEASON_PREMIUM_COST_GEMS": SEASON_PREMIUM_COST_GEMS,
+        "SEASON_LEVELS": SEASON_LEVELS,
         "SEASON_TOTAL_XP_TEXT": SEASON_TOTAL_XP_TEXT,
         "SEASON_XP_BASE": SEASON_XP_BASE,
         "SEASON_XP_STEP": SEASON_XP_STEP,

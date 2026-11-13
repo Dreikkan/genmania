@@ -63,12 +63,12 @@ async def run_checks(db):
 
     m.check_achievements = noop_achievements
 
-    # Формулы уровней: 100, 200, 300...
-    assert m.season_xp_for_next_level(0) == 100
-    assert m.season_xp_for_next_level(1) == 200
+    # Формулы уровней: 300, 390, 480...
+    assert m.season_xp_for_next_level(0) == 300
+    assert m.season_xp_for_next_level(1) == 390
     assert m.season_level_from_xp(0) == (0, 0)
-    assert m.season_level_from_xp(100) == (1, 0)
-    assert m.season_level_from_xp(300) == (2, 0)
+    assert m.season_level_from_xp(300) == (1, 0)
+    assert m.season_level_from_xp(690) == (2, 0)
 
     data = await m.get_season_data(1)
     assert data["level"] == 0
@@ -76,8 +76,8 @@ async def run_checks(db):
     assert data["claimable_free"] == []
 
     # Первый уровень.
-    expected = int(round(100 * m.season_event_multiplier()))
-    gained = await m.add_season_xp(1, 100)
+    expected = int(round(300 * m.season_event_multiplier()))
+    gained = await m.add_season_xp(1, 300, action="prestige")
     assert gained == expected
     data = await m.get_season_data(1)
     assert data["level"] == 1, data
@@ -124,12 +124,12 @@ async def run_checks(db):
     assert await m.add_season_xp(1, daily_amount, action="daily") == daily_amount
     assert await m.add_season_xp(1, daily_amount, action="daily") == 0
     await db.execute(
-        "UPDATE season_progress SET xp = 300 WHERE user_id = 1"
+        "UPDATE season_progress SET xp = 690 WHERE user_id = 1"
     )
     await db.commit()
     data = await m.get_season_data(1)
     assert data["level"] == 2, data
-    assert data["needed"] == 300, data
+    assert data["needed"] == 480, data
 
     # Лимит на одно начисление: story_quest не больше per_tx.
     story = m.SEASON_XP_ACTIONS["story_quest"]
@@ -160,8 +160,8 @@ def test_battle_pass_reachable_for_active_player():
     total_needed = sum(
         m.season_xp_for_next_level(level) for level in range(m.SEASON_LEVELS)
     )
-    assert total_needed == m.SEASON_TOTAL_XP == 46500
-    assert m.SEASON_TOTAL_XP_TEXT == "46 500"
+    assert total_needed == m.SEASON_TOTAL_XP == 48150
+    assert m.SEASON_TOTAL_XP_TEXT == "48 150"
 
     # Теоретический потолок дневных лимитов должен давать запас.
     daily_caps = sum(
