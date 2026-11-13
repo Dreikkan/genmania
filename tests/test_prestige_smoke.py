@@ -115,6 +115,12 @@ async def run_checks(db):
         await db.commit()
 
         ok, message, gain, points = await m.do_prestige(USER_ID)
+        assert ok is False and "аукционы" in message.lower(), (ok, message)
+        await db.execute("DELETE FROM auction_bids")
+        await db.execute("DELETE FROM auctions")
+        await db.commit()
+
+        ok, message, gain, points = await m.do_prestige(USER_ID)
     finally:
         m.add_season_xp = original_add_season_xp
 
@@ -152,11 +158,6 @@ async def run_checks(db):
         async with db.execute(f"SELECT COUNT(*) FROM {table}") as c:
             count = (await c.fetchone())[0]
         assert count == 0, (table, count)
-
-    async with db.execute(
-        "SELECT coins FROM players WHERE user_id = ?", (BIDDER_ID,)
-    ) as c:
-        assert (await c.fetchone())[0] == 500
 
     class FakeInteraction:
         user = type("User", (), {"id": USER_ID})()

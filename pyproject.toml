@@ -1,0 +1,18 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+exclude = [
+    ".git",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+]
+
+[tool.ruff.lint]
+# CI проверяет критичные ошибки; остальные правила можно включать постепенно.
+select = ["F821", "F811", "F401"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"

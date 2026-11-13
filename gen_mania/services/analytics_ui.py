@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from ..formatting import plural_ru
+
 
 class AnalyticsUiRuntime:
     """Адаптер между bot.py и аналитикой."""
@@ -128,7 +130,7 @@ class AnalyticsUiRuntime:
 def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
     """Возвращает ``build_analytics_embed``, привязанный к runtime."""
 
-    async def build_analytics_embed(interaction):
+    async def build_analytics_embed(interaction, details: bool = False):
         user_id = interaction.user.id
         compact = await runtime.is_accessibility_mode(user_id)
 
@@ -287,10 +289,24 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
 
         prestige_points = await runtime.get_prestige_points(user_id)
         collection_count = await runtime.get_collection_count(user_id)
+        async with runtime.db.execute(
+            "SELECT COUNT(*) FROM player_star_collection "
+            "WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            stars_found = (await c.fetchone())[0] or 0
+        total_bonus_line = await runtime.get_bonus_line(user_id)
 
         embed = runtime.embed(
             title=f"📈 Аналитика — {interaction.user.name}",
-            description="Подробная статистика твоего прогресса.",
+            description=(
+                "Полная статистика твоего прогресса."
+                if details
+                else (
+                    "Краткая сводка. "
+                    "Нажми «Подробнее» для полной статистики."
+                )
+            ),
             color=0x3498db,
         )
         if not compact:
@@ -298,90 +314,141 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
                 url=interaction.user.display_avatar.url
             )
 
-        embed.add_field(
-            name="📊 Всего заработано",
-            value=(
-                f"🪙 {runtime.format_price(tce or 0)}\n"
-                f"💎 {runtime.format_price(tge or 0)}"
+        def add_pair(field_one, field_two=None):
+            """Добавляет поля по два в ряд (2 колонки)."""
+            embed.add_field(**field_one)
+            if field_two is not None:
+                embed.add_field(**field_two)
+            if not compact and field_two is not None:
+                embed.add_field(
+                    name="\u200b", value="\u200b", inline=True
+                )
+
+        add_pair(
+            dict(
+                name="📊 Всего заработано",
+                value=(
+                    f"🪙 {runtime.format_price(tce or 0)}\n"
+                    f"💎 {runtime.format_price(tge or 0)}"
+                ),
+                inline=True,
             ),
-            inline=True,
+            dict(
+                name="💰 Доход",
+                value=(
+                    f"🪙 {runtime.format_price(income_coins_h)}/час\n"
+                    f"💎 {runtime.format_price(income_gems_h)}/час\n"
+                    f"{total_bonus_line}"
+                ),
+                inline=True,
+            ),
         )
 
-        total_bonus_line = await runtime.get_bonus_line(user_id)
-        embed.add_field(
-            name="💰 Доход",
-            value=(
-                f"🪙 {runtime.format_price(income_coins_h)}/час\n"
-                f"💎 {runtime.format_price(income_gems_h)}/час\n"
-                f"{total_bonus_line}"
+        add_pair(
+            dict(
+                name=f"{runtime.castle} Энергостанция",
+                value=(
+                    f"Генераторов: **{gens_total}**\n"
+                    f"Доходных: **{gens_income}**\n"
+                    f"Средний: 🪙 "
+                    f"{runtime.format_price(avg_income)}/час\n"
+                    f"Сетка: **{grid_size}**\n"
+                    f"⚔️ Мощь: **{runtime.format_price(power)}**"
+                ),
+                inline=True,
             ),
-            inline=True,
+            dict(
+                name="🧩 Коллекция и сеты",
+                value=(
+                    f"Коллекция: **{collection_count}**\n"
+                    f"Бонус коллекции: "
+                    f"**+{collection_count * runtime.collection_bonus * 100:.1f}%**\n"
+                    f"Сеты: **+{int(set_details['total'] * 100)}%**\n"
+                    f"Сезон: **{season_data['level']}/"
+                    f"{runtime.season_levels}**"
+                ),
+                inline=True,
+            ),
         )
 
-        embed.add_field(
-            name=f"{runtime.castle} Энергостанция",
-            value=(
-                f"Генераторов: **{gens_total}**\n"
-                f"Доходных: **{gens_income}**\n"
-                f"Средний: 🪙 {runtime.format_price(avg_income)}/час\n"
-                f"Сетка: **{grid_size}**\n"
-                f"⚔️ Мощь: **{runtime.format_price(power)}**"
+        add_pair(
+            dict(
+                name="⚗️ Синтез",
+                value=(
+                    f"Попыток: **{crafts}**\n"
+                    f"Успехов: **{successes}**\n"
+                    f"Винрейт: **{winrate:.1f}%**\n"
+                    f"Катализаторов: **{catalysts}**"
+                ),
+                inline=True,
             ),
-            inline=True,
+            dict(
+                name="⚔️ PvP",
+                value=(
+                    f"Дуэли: **{duel_wins}W / {duel_losses}L** "
+                    f"({duel_wr:.1f}%)\n"
+                    f"Рейды (победы): **{raid_wins}**"
+                ),
+                inline=True,
+            ),
         )
 
-        embed.add_field(
-            name="🧩 Коллекция и сеты",
-            value=(
-                f"Коллекция: **{collection_count}**\n"
-                f"Бонус коллекции: "
-                f"**+{collection_count * runtime.collection_bonus * 100:.1f}%**\n"
-                f"Сеты: **+{int(set_details['total'] * 100)}%**\n"
-                f"Сезон: **{season_data['level']}/"
-                f"{runtime.season_levels}**"
+        add_pair(
+            dict(
+                name="🏆 Прогресс",
+                value=(
+                    f"Достижений: **{ach_count}**\n"
+                    f"Престиж: **{prestige_points}** "
+                    f"{plural_ru(prestige_points, 'очко', 'очка', 'очков')}\n"
+                    f"Коллекция: **{collection_count}**\n"
+                    f"Гемов: **{runtime.format_price(gems)}**\n"
+                    f"Монет: **{runtime.format_price(coins)}**"
+                ),
+                inline=True,
             ),
-            inline=True,
+            dict(
+                name="🧪 Ресурсы",
+                value=(
+                    f"Катализаторов: **{catalysts}**\n"
+                    f"Титул: **{title or 'Новичок'}**\n"
+                    f"Питомцев: **{pet_count}**"
+                ),
+                inline=True,
+            ),
         )
 
-        embed.add_field(
-            name="⚗️ Синтез",
-            value=(
-                f"Попыток: **{crafts}**\n"
-                f"Успехов: **{successes}**\n"
-                f"Винрейт: **{winrate:.1f}%**\n"
-                f"Катализаторов: **{catalysts}**"
-            ),
-            inline=True,
-        )
+        if not details:
+            add_pair(
+                dict(
+                    name="🏦 Экономика",
+                    value=(
+                        "Вклад, кредит, ордера и налоги — "
+                        "во вкладке «Подробнее»."
+                    ),
+                    inline=False,
+                )
+            )
+            return await runtime.fix_emojis(embed)
 
-        embed.add_field(
-            name="🐾 Питомцы",
-            value=(
-                f"Куплено: **{pet_count}**\n"
-                f"Лучший ур.: **{pet_max}**\n"
-                f"Активный: {active_pet_str}"
+        add_pair(
+            dict(
+                name="🐾 Питомцы",
+                value=(
+                    f"Куплено: **{pet_count}**\n"
+                    f"Лучший ур.: **{pet_max}**\n"
+                    f"Активный: {active_pet_str}"
+                ),
+                inline=True,
             ),
-            inline=True,
-        )
-
-        embed.add_field(
-            name="🏅 Титулы",
-            value=(
-                f"Активный: **{title or 'Новичок'}**\n"
-                f"Открыто: **{len(unlocked_titles)}/"
-                f"{len(runtime.titles)}**"
+            dict(
+                name="🏅 Титулы",
+                value=(
+                    f"Активный: **{title or 'Новичок'}**\n"
+                    f"Открыто: **{len(unlocked_titles)}/"
+                    f"{len(runtime.titles)}**"
+                ),
+                inline=True,
             ),
-            inline=True,
-        )
-
-        embed.add_field(
-            name="⚔️ PvP",
-            value=(
-                f"Дуэли: **{duel_wins}W / {duel_losses}L** "
-                f"({duel_wr:.1f}%)\n"
-                f"Рейды (победы): **{raid_wins}**"
-            ),
-            inline=True,
         )
 
         loan_text = "нет"
@@ -389,28 +456,27 @@ def make_analytics_ui_layer(runtime: AnalyticsUiRuntime):
             loan_text = (
                 f"🪙 {loan_row[0]} до {str(loan_row[1])[:10]}"
             )
-        embed.add_field(
-            name="🏦 Экономика",
-            value=(
-                f"Вклад: {deposit_str}\n"
-                f"Кредит: {loan_text}\n"
-                f"Активных ордеров: **{active_orders}**\n"
-                f"Налогов: **{tax_count}**\n"
-                f"Лотов продано: **{auction_sold}**"
+        add_pair(
+            dict(
+                name="🏦 Экономика",
+                value=(
+                    f"Вклад: {deposit_str}\n"
+                    f"Кредит: {loan_text}\n"
+                    f"Активных ордеров: **{active_orders}**\n"
+                    f"Налогов: **{tax_count}**\n"
+                    f"Лотов продано: **{auction_sold}**"
+                ),
+                inline=True,
             ),
-            inline=True,
-        )
-
-        embed.add_field(
-            name="🏆 Прогресс",
-            value=(
-                f"Достижений: **{ach_count}**\n"
-                f"Престиж: **{prestige_points}** очк.\n"
-                f"Коллекция: **{collection_count}**\n"
-                f"Гемов: **{runtime.format_price(gems)}**\n"
-                f"Монет: **{runtime.format_price(coins)}**"
+            dict(
+                name="📦 Прочее",
+                value=(
+                    f"Открыто достижений: **{ach_count}**\n"
+                    f"Звёзд в коллекции: **{stars_found}**\n"
+                    f"Сезонных уровней: **{season_data['level']}**"
+                ),
+                inline=True,
             ),
-            inline=True,
         )
         return await runtime.fix_emojis(embed)
 

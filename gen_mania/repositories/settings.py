@@ -94,6 +94,15 @@ class SettingsRuntime:
 def make_settings_layer(runtime: SettingsRuntime):
     """Возвращает пару ``get_settings`` / ``save_setting``."""
 
+    def _json_load(raw, fallback):
+        if not raw:
+            return copy.deepcopy(fallback)
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            runtime.logger.warning("Повреждён JSON настройки: %r", raw)
+            return copy.deepcopy(fallback)
+
     async def get_settings(guild_id: int) -> dict:
         defaults = runtime.defaults
         if not guild_id:
@@ -106,10 +115,9 @@ def make_settings_layer(runtime: SettingsRuntime):
 
         async with runtime.db.execute(
             """
-            SELECT bot_name, custom_emojis, currency_coins, currency_gems, prefix,
-                   gem_cap, start_coins, passive_limit, disabled_commands, status_roles,
-                   battlepass_enabled, admin_role_id, tax_rate, inflation_rate,
-                   auction_fee
+            SELECT bot_name, custom_emojis, currency_coins, currency_gems,
+                   prefix, start_coins, disabled_commands, status_roles,
+                   battlepass_enabled, admin_role_id, tax_rate
             FROM guild_settings WHERE guild_id = ?
             """,
             (guild_id,),
@@ -121,16 +129,18 @@ def make_settings_layer(runtime: SettingsRuntime):
 
         result = {
             "bot_name": row[0] or defaults["bot_name"],
-            "custom_emojis": json.loads(row[1] or "{}"),
+            "custom_emojis": _json_load(row[1], {}),
             "currency_coins": row[2] or defaults["currency_coins"],
             "currency_gems": row[3] or defaults["currency_gems"],
             "prefix": row[4] or "/",
-            "start_coins": row[6] or defaults["start_coins"],
-            "disabled_commands": json.loads(row[8] or "[]"),
-            "status_roles": json.loads(row[9] or "{}"),
-            "battlepass_enabled": bool(row[10]) if row[10] is not None else True,
-            "admin_role_id": row[11],
-            "tax_rate": row[12] if row[12] is not None else defaults["tax_rate"],
+            "start_coins": (
+                row[5] if row[5] is not None else defaults["start_coins"]
+            ),
+            "disabled_commands": _json_load(row[6], []),
+            "status_roles": _json_load(row[7], {}),
+            "battlepass_enabled": bool(row[8]) if row[8] is not None else True,
+            "admin_role_id": row[9],
+            "tax_rate": row[10] if row[10] is not None else defaults["tax_rate"],
         }
         runtime.settings_cache[guild_id] = (now_ts, result)
         return copy.deepcopy(result)

@@ -189,21 +189,25 @@ def test_deep_ui_batch_two():
             await auction.on_submit(interaction)
             assert interaction.followup.sent
 
-            interaction = FakeInteraction(1)
-            emoji = m.StarEmojiModal1(1, "basic_gen")
-            emoji.e0._value = "<:basic_0:1>"
-            emoji.e1._value = ""
-            emoji.e2._value = ""
-            await emoji.on_submit(interaction)
-            assert interaction.followup.sent
+            m.is_global_owner = owner
+            try:
+                interaction = FakeInteraction(1)
+                emoji = m.StarEmojiModal1(1, "basic_gen")
+                emoji.e0._value = "<:basic_0:1>"
+                emoji.e1._value = ""
+                emoji.e2._value = ""
+                await emoji.on_submit(interaction)
+                assert interaction.followup.sent
 
-            interaction = FakeInteraction(1)
-            emoji2 = m.StarEmojiModal2(1, "basic_gen")
-            emoji2.e3._value = "<:basic_3:3>"
-            emoji2.e4._value = ""
-            emoji2.e5._value = ""
-            await emoji2.on_submit(interaction)
-            assert interaction.followup.sent
+                interaction = FakeInteraction(1)
+                emoji2 = m.StarEmojiModal2(1, "basic_gen")
+                emoji2.e3._value = "<:basic_3:3>"
+                emoji2.e4._value = ""
+                emoji2.e5._value = ""
+                await emoji2.on_submit(interaction)
+                assert interaction.followup.sent
+            finally:
+                m.is_global_owner = original_owner
 
             interaction = FakeInteraction(1)
             edit = m.EditEmojiModal(1, "_coin")

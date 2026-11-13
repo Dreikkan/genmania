@@ -302,6 +302,10 @@ def test_craft_clan_and_admin_branches():
             await view.quantity_select(interaction)
             assert interaction.edited
 
+            async def owner_true(interaction):
+                return True
+
+            m.is_global_owner = owner_true
             modal = m.AdminTakeValuesModal(1, "coins")
             await _set_modal(modal, user_id="1", amount="0")
             interaction = FakeInteraction(1)
@@ -584,6 +588,7 @@ def test_more_small_branches():
         original_swap_page = m._build_swap_second_page
         original_remove_item = m.MainMenuView.remove_item
         try:
+            m.is_global_owner = lambda interaction: _true()
             await db.executemany(
                 "INSERT INTO players (user_id, coins, gems) VALUES (?, 1000, 1000)",
                 [(1,), (2,), (3,)],
@@ -1407,6 +1412,7 @@ def test_final_bot_and_service_branches():
         original_sleep = m.asyncio.sleep
         original_proxy_db = None
         try:
+            m.is_global_owner = lambda interaction: _true()
             await db.executemany(
                 "INSERT INTO players (user_id, coins, gems) VALUES (?, 1000, 1000)",
                 [(1,), (2,), (3,)],
@@ -1674,7 +1680,9 @@ def test_small_crossing_branches():
         original_get_giveaway = m.get_giveaway
         original_global = m.is_global_giveaway
         original_giveaway_embed = m.build_giveaway_embed
+        original_owner = m.is_global_owner
         try:
+            m.is_global_owner = lambda interaction: _true()
             await db.execute(
                 "INSERT INTO players (user_id, coins, gems) VALUES (1, 1000, 0)"
             )
@@ -1778,6 +1786,7 @@ def test_small_crossing_branches():
             m.get_giveaway = original_get_giveaway
             m.is_global_giveaway = original_global
             m.build_giveaway_embed = original_giveaway_embed
+            m.is_global_owner = original_owner
             await _close(db)
 
     asyncio.run(run())

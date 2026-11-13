@@ -78,7 +78,7 @@ async def main():
     admin = FakeInteraction(admin_user, guild=admin_guild, guild_id=1)
     await m.admin_panel.callback(admin)
     assert admin.response.messages
-    assert "Панель администратора" in admin.response.messages[-1]["embed"].title
+    assert "Локальная админ-панель" in admin.response.messages[-1]["embed"].title
     admin_view = admin.response.messages[-1]["view"]
     admin_labels = [getattr(child, "label", None) for child in admin_view.children]
     assert "Владелец" not in admin_labels
@@ -92,7 +92,7 @@ async def main():
     owner_interaction = FakeInteraction(owner, guild=owner_guild, guild_id=1)
     await m.admin_panel.callback(owner_interaction)
     assert owner_interaction.response.messages
-    assert "Панель администратора" in owner_interaction.response.messages[-1]["embed"].title
+    assert "Локальная админ-панель" in owner_interaction.response.messages[-1]["embed"].title
     # Владелец сервера — не владелец бота: кнопки «Владелец» быть не должно.
     owner_view = owner_interaction.response.messages[-1]["view"]
     owner_labels = [getattr(child, "label", None) for child in owner_view.children]

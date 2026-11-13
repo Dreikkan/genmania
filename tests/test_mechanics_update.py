@@ -29,6 +29,14 @@ class FakeResponse:
         self.done = True
 
 
+class FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+
 class FakeInteraction:
     def __init__(self, user_id=1, values=None):
         self.user = SimpleNamespace(
@@ -39,11 +47,8 @@ class FakeInteraction:
         self.guild_id = 1
         self.data = {"values": values or []}
         self.response = FakeResponse()
-        self.followup = SimpleNamespace(send=self._followup)
+        self.followup = FakeFollowup()
         self.edited = []
-
-    async def _followup(self, *args, **kwargs):
-        return None
 
     async def edit_original_response(self, **kwargs):
         self.edited.append(kwargs)
@@ -174,6 +179,98 @@ def test_main_menu_more_select_all_actions():
     asyncio.run(run())
 
 
+def test_premium_track_total_is_220_gems():
+    total = sum(
+        m.season_reward(level, True)["gems"] for level in range(1, 31)
+    )
+    assert total == 220
+
+
+def test_start_coins_modal_rejects_above_cap():
+    async def run():
+        original_owner = m.is_global_owner
+
+        async def owner_true(interaction):
+            return True
+
+        m.is_global_owner = owner_true
+        try:
+            modal = m.EditStartCoinsModal(1)
+            modal.value._value = str(m.MAX_START_COINS + 1)
+            interaction = FakeInteraction(1)
+            await modal.on_submit(interaction)
+            assert interaction.followup.sent
+        finally:
+            m.is_global_owner = original_owner
+
+    asyncio.run(run())
+
+
+def test_buyable_survives_reinit():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute(
+                "UPDATE items SET buyable = 0 WHERE id = 'basic_gen'"
+            )
+            await db.commit()
+            await m.bot.init_db()
+            async with db.execute(
+                "SELECT buyable FROM items WHERE id = 'basic_gen'"
+            ) as c:
+                assert (await c.fetchone())[0] == 0
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_status_expiry_backfill_runs_once():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute(
+                "DELETE FROM schema_migrations "
+                "WHERE name = 'status_expiry_backfill_v1'"
+            )
+            await db.execute(
+                "INSERT INTO player_upgrades (user_id, upgrade_id, expires_at) "
+                "VALUES (1, 'vip', NULL)"
+            )
+            await db.commit()
+            await m.bot.init_db()
+            async with db.execute(
+                "SELECT expires_at FROM player_upgrades "
+                "WHERE user_id = 1 AND upgrade_id = 'vip'"
+            ) as c:
+                assert (await c.fetchone())[0] is not None
+
+            await db.execute(
+                "UPDATE player_upgrades SET expires_at = NULL "
+                "WHERE user_id = 1 AND upgrade_id = 'vip'"
+            )
+            await db.commit()
+            await m.bot.init_db()
+            async with db.execute(
+                "SELECT expires_at FROM player_upgrades "
+                "WHERE user_id = 1 AND upgrade_id = 'vip'"
+            ) as c:
+                assert (await c.fetchone())[0] is None
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_local_admin_view_only_has_giveaways():
+    view = m.LocalAdminView(1)
+    labels = {child.label for child in view.children}
+    assert "Розыгрыши" in labels
+    assert "В меню" in labels
+
+
 def test_market_runtime_placeholder_match():
     async def run():
         runtime = m.MarketOrderRuntime()
@@ -203,3 +300,61 @@ def test_guide_select_opens_section():
             m.bot.db = None
 
     asyncio.run(run())
+
+def test_init_db_rejects_newer_schema():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        try:
+            await db.execute(f"PRAGMA user_version = {m.SCHEMA_VERSION + 1}")
+            try:
+                await m.bot.init_db()
+            except RuntimeError as exc:
+                assert "более новой" in str(exc)
+            else:
+                raise AssertionError("init_db должен отклонять новую схему")
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_analytics_details_toggle():
+    async def run():
+        db = await _init()
+        try:
+            await db.execute(
+                "INSERT INTO players (user_id, coins, gems) VALUES (1, 100, 10)"
+            )
+            await db.execute(
+                "INSERT INTO bank_loans "
+                "(user_id, amount, interest_rate, due_time, collateral_item) "
+                "VALUES (1, 100, 0.25, '2026-12-01T00:00:00', 'basic_gen')"
+            )
+            await db.commit()
+            view = m.AnalyticsView(1)
+            assert any(
+                getattr(child, "label", None) == "Подробнее"
+                for child in view.children
+            )
+            interaction = FakeInteraction(1)
+            await view.btn_details(interaction, None)
+            assert interaction.edited
+            embed = interaction.edited[0]["embed"]
+            names = [field.name for field in embed.fields]
+            assert any("Экономика" in name for name in names)
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
+def test_plural_helper():
+    assert m.plural_ru(1, "штука", "штуки", "штук") == "штука"
+    assert m.plural_ru(2, "штука", "штуки", "штук") == "штуки"
+    assert m.plural_ru(5, "штука", "штуки", "штук") == "штук"
+    assert m.plural_ru(11, "штука", "штуки", "штук") == "штук"
+    assert m.plural_ru(21, "штука", "штуки", "штук") == "штука"
+    assert m.plural_ru("bad", "штука", "штуки", "штук") == "штук"

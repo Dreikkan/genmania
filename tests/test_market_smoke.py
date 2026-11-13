@@ -137,7 +137,7 @@ async def run_checks(db):
     ok, msg = await m.fill_market_order(1, 2)
     assert ok, msg
     async with db.execute("SELECT coins FROM players WHERE user_id = 1") as c:
-        assert (await c.fetchone())[0] == 1300
+        assert (await c.fetchone())[0] == 1294
     async with db.execute(
         "SELECT COUNT(*) FROM inventory WHERE user_id = 2 AND item_id = 'basic_gen'"
     ) as c:
@@ -162,7 +162,7 @@ async def run_checks(db):
     ok, msg = await m.fill_market_order(2, 1)
     assert ok, msg
     async with db.execute("SELECT coins FROM players WHERE user_id = 1") as c:
-        assert (await c.fetchone())[0] == 1500
+        assert (await c.fetchone())[0] == 1490
     async with db.execute(
         "SELECT COUNT(*) FROM inventory WHERE user_id = 2 AND item_id = 'basic_gen'"
     ) as c:

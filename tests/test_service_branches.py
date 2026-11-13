@@ -183,7 +183,7 @@ def test_autocollector_buy_and_upgrade_branches():
         try:
             await db.executemany(
                 "INSERT INTO players (user_id, coins, gems) VALUES (?, 0, ?)",
-                [(1, 0), (2, 1000), (3, 1000), (4, 1000), (5, 0), (6, 1000)],
+                [(1, 0), (2, 1000), (3, 1000), (4, 1000), (5, 0), (6, 2000)],
             )
             await db.execute(
                 "INSERT INTO autocollectors (user_id, level) VALUES (2, 1)"

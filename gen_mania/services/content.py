@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import logging
-import math
 from typing import Any, Callable
 
-
-SHORT_NUMBER_SUFFIXES = (
-    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc"
+from ..formatting import (
+    format_content_input,
+    format_content_number,
 )
+
+
+SECONDS_PER_HOUR = 3600
 
 
 class ContentRuntime:
@@ -108,34 +110,6 @@ def make_content_layer(runtime: ContentRuntime):
         if not (0 <= number <= maximum):
             return None
         return number
-
-    def format_content_number(value) -> str:
-        number = value if value is not None else 0
-        try:
-            numeric = float(number)
-        except (TypeError, ValueError):
-            return str(number)
-        if math.isfinite(numeric) and abs(numeric) >= 1000:
-            sign = "-" if numeric < 0 else ""
-            scaled_value = abs(numeric)
-            tier = min(
-                int(math.log10(scaled_value) // 3),
-                len(SHORT_NUMBER_SUFFIXES) - 1,
-            )
-            scaled = scaled_value / (1000 ** tier)
-            if scaled >= 999.5 and tier < len(SHORT_NUMBER_SUFFIXES) - 1:
-                tier += 1
-                scaled = scaled_value / (1000 ** tier)
-            text = (
-                f"{scaled:.0f}" if scaled >= 100 else f"{scaled:.1f}"
-            )
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            return f"{sign}{text}{SHORT_NUMBER_SUFFIXES[tier]}"
-        if isinstance(value, float):
-            text = f"{value:.8f}".rstrip("0").rstrip(".")
-            return text or "0"
-        return str(value if value is not None else 0)
 
     def is_non_negative_number(value) -> bool:
         try:
@@ -312,6 +286,8 @@ def make_content_layer(runtime: ContentRuntime):
         gem_income = parse_content_float(gem_income_value)
         if gem_income is None:
             return False, "❌ Доход гемов: число от 0."
+        income /= SECONDS_PER_HOUR
+        gem_income /= SECONDS_PER_HOUR
         rarity = (
             str(rarity_value) if rarity_value is not None else ""
         ).strip().lower()
@@ -334,6 +310,16 @@ def make_content_layer(runtime: ContentRuntime):
                 "income_per_hour = ?, income_gems_per_hour = ?, "
                 "rarity = ? WHERE id = ?",
                 (name, price, income, gem_income, rarity, item_id),
+            )
+            await runtime.db.execute(
+                "INSERT OR IGNORE INTO market_prices "
+                "(item_id, base_price, current_price) VALUES (?, ?, ?)",
+                (item_id, price, price),
+            )
+            await runtime.db.execute(
+                "UPDATE market_prices SET base_price = ?, "
+                "current_price = ? WHERE item_id = ?",
+                (price, price, item_id),
             )
             await record_content_edit(
                 editor_id,
@@ -405,6 +391,16 @@ def make_content_layer(runtime: ContentRuntime):
                 "UPDATE items SET price = ? WHERE id = ?",
                 (price, item_id),
             )
+            await runtime.db.execute(
+                "INSERT OR IGNORE INTO market_prices "
+                "(item_id, base_price, current_price) VALUES (?, ?, ?)",
+                (item_id, price, price),
+            )
+            await runtime.db.execute(
+                "UPDATE market_prices SET base_price = ?, "
+                "current_price = ? WHERE item_id = ?",
+                (price, price, item_id),
+            )
             await record_content_edit(
                 editor_id,
                 "item",
@@ -440,20 +436,22 @@ def make_content_layer(runtime: ContentRuntime):
             if gem_income_value is not None
             else ""
         ).strip()
-        income = (
-            parse_content_float(income_text)
-            if income_text
-            else (row[1] or 0)
-        )
-        gem_income = (
-            parse_content_float(gem_text)
-            if gem_text
-            else (row[2] or 0)
-        )
-        if income is None:
-            return False, "❌ Неверный доход монет."
-        if gem_income is None:
-            return False, "❌ Неверный доход гемов."
+        if income_text:
+            income_hour = parse_content_float(income_text)
+            if income_hour is None:
+                return False, "❌ Неверный доход монет."
+            income = income_hour / SECONDS_PER_HOUR
+        else:
+            income = row[1] or 0
+            income_hour = income * SECONDS_PER_HOUR
+        if gem_text:
+            gem_income_hour = parse_content_float(gem_text)
+            if gem_income_hour is None:
+                return False, "❌ Неверный доход гемов."
+            gem_income = gem_income_hour / SECONDS_PER_HOUR
+        else:
+            gem_income = row[2] or 0
+            gem_income_hour = gem_income * SECONDS_PER_HOUR
 
         async with runtime.transaction():
             await runtime.db.execute(
@@ -466,13 +464,13 @@ def make_content_layer(runtime: ContentRuntime):
                 "item",
                 item_id,
                 "income",
-                f"coins={format_content_number(income)}, "
-                f"gems={format_content_number(gem_income)}",
+                f"coins={format_content_number(income_hour)}, "
+                f"gems={format_content_number(gem_income_hour)}",
             )
         return True, (
             f"✅ Доход **{row[0]}**: "
-            f"🪙 {format_content_number(income)}/час, "
-            f"💎 {format_content_number(gem_income)}/час."
+            f"🪙 {format_content_number(income_hour)}/час, "
+            f"💎 {format_content_number(gem_income_hour)}/час."
         )
 
     async def add_generator_content(
@@ -504,6 +502,8 @@ def make_content_layer(runtime: ContentRuntime):
         gem_income = parse_content_float(gem_income_value)
         if gem_income is None:
             return False, "❌ Доход гемов: число от 0."
+        income /= SECONDS_PER_HOUR
+        gem_income /= SECONDS_PER_HOUR
         emoji = (
             str(emoji_value) if emoji_value is not None else ""
         ).strip()
@@ -715,6 +715,7 @@ def make_content_layer(runtime: ContentRuntime):
         parse_content_int,
         parse_content_float,
         format_content_number,
+        format_content_input,
         is_non_negative_number,
         get_content_status,
         record_content_edit,

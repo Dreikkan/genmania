@@ -31,6 +31,7 @@ class MarketOrderRuntime:
         self._max_active_orders_getter: Callable[[], int] = lambda: 10
         self._max_daily_volume_getter: Callable[[], int] = lambda: 50_000_000
         self.sell_rate = 0.70
+        self.order_fee_rate = 0.0
         self.sell_allowed_rarities = {"common", "uncommon", "rare"}
         self.order_rarities = {
             "common",
@@ -67,6 +68,7 @@ class MarketOrderRuntime:
         max_order_value_getter: Callable[[], int],
         max_active_orders_getter: Callable[[], int],
         max_daily_volume_getter: Callable[[], int],
+        order_fee_rate: float,
         order_duration_hours: int,
         logger: logging.Logger,
     ) -> None:
@@ -86,6 +88,7 @@ class MarketOrderRuntime:
         self._max_order_value_getter = max_order_value_getter
         self._max_active_orders_getter = max_active_orders_getter
         self._max_daily_volume_getter = max_daily_volume_getter
+        self.order_fee_rate = order_fee_rate
         self.order_duration_hours = order_duration_hours
         self.logger = logger
 
@@ -484,12 +487,14 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                                 stars=0,
                             )
                             total = execution_price * quantity
+                            fee = int(total * runtime.order_fee_rate)
+                            seller_net = total - fee
                             await runtime.db.execute(
                                 "UPDATE players SET coins = coins + ?, "
                                 "total_coins_earned = "
                                 "total_coins_earned + ? "
                                 "WHERE user_id = ?",
-                                (total, total, seller_id),
+                                (seller_net, seller_net, seller_id),
                             )
                             refund = (
                                 buy["price"] - execution_price
@@ -551,6 +556,7 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                             "sell_order_id": sell["id"],
                             "quantity": quantity,
                             "price": execution_price,
+                            "fee": fee,
                         }
                     )
 
@@ -799,6 +805,8 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                 if remaining <= 0:
                     raise ValueError("Ордер уже исполнен.")
                 total = price * remaining
+                fee = int(total * runtime.order_fee_rate)
+                seller_net = total - fee
 
                 if side == "sell":
                     cur = await runtime.db.execute(
@@ -812,7 +820,7 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                         "UPDATE players SET coins = coins + ?, "
                         "total_coins_earned = total_coins_earned + ? "
                         "WHERE user_id = ?",
-                        (total, total, owner_id),
+                        (seller_net, seller_net, owner_id),
                     )
                     await runtime.place_items(
                         user_id,
@@ -859,7 +867,7 @@ def make_market_order_layer(runtime: MarketOrderRuntime):
                         "UPDATE players SET coins = coins + ?, "
                         "total_coins_earned = total_coins_earned + ? "
                         "WHERE user_id = ?",
-                        (total, total, user_id),
+                        (seller_net, seller_net, user_id),
                     )
                     buyer_id, seller_id = owner_id, user_id
 

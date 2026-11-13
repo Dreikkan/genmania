@@ -120,7 +120,13 @@ def test_update_item_content_bumps_revision_and_audits():
                 "rarity FROM items WHERE id = 'basic_gen'"
             ) as c:
                 row = await c.fetchone()
-            assert row == ("Новый генератор", 123, 0.5, 0.01, "rare")
+            assert row == (
+                "Новый генератор",
+                123,
+                0.5 / 3600,
+                0.01 / 3600,
+                "rare",
+            )
 
             status = await m.get_content_status()
             assert status["manual_revision"] == 1
@@ -203,7 +209,7 @@ def test_set_item_income_is_atomic():
                 "SELECT income_per_hour, income_gems_per_hour "
                 "FROM items WHERE id = 'basic_gen'"
             ) as c:
-                assert await c.fetchone() == (0.6, 0.02)
+                assert await c.fetchone() == (0.6 / 3600, 0.02 / 3600)
             assert await _status_row(db, "manual_revision") == "1"
         finally:
             await db.close()
@@ -418,7 +424,7 @@ def test_content_modals_construct_with_valid_labels():
     edit = m.ContentItemEditModal(1, item)
     assert edit.rarity.label == "Редкость"
     assert edit.name.default == "Медный генератор"
-    assert edit.income_coins.default == "0.5"
+    assert edit.income_coins.default == "1800"
     assert len(edit.rarity.label) <= 45
 
     appearance = m.ContentItemAppearanceModal(1, item)

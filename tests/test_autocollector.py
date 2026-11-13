@@ -56,9 +56,13 @@ def test_full_income_has_no_offline_penalty():
     asyncio.run(run())
 
 
-def test_offline_cap_removed():
-    assert m.cap_passive_income(1_000_000, 7201, 100_000) == 1_000_000
-    assert m.cap_passive_income(1_000_000, 999_999, 1) == 1_000_000
+def test_offline_cap_and_penalty():
+    assert m.effective_offline_seconds(3600) == 3600
+    assert m.effective_offline_seconds(7200) == 7200
+    assert m.effective_offline_seconds(10800) == 7200 + 3600 * 0.7
+    assert m.effective_offline_seconds(48 * 3600) == (
+        m.effective_offline_seconds(24 * 3600)
+    )
 
 
 def test_placing_generator_resets_retroactive_income():

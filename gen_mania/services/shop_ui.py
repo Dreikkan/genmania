@@ -240,7 +240,7 @@ def make_shop_ui_layer(runtime: ShopUiRuntime):
             )
 
             embed.add_field(
-                name=f"{emoji} {name} (`{item_id}`)",
+                name=f"{emoji} {name}",
                 value=" | ".join(value_parts),
                 inline=False,
             )
