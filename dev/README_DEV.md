@@ -90,6 +90,19 @@ python dev\check_backup_restore.py dev\data\backups\castle_....db
 (`players`, `inventory`, `items`, `guild_settings`). Запускай его
 после важных изменений схемы и перед крупными обновлениями.
 
+## Шаг 5.2. Экономический отчёт
+
+```powershell
+python dev\economy_report.py
+python dev\economy_report.py dev\data\castle.db
+python dev\economy_report.py dev\data\castle.db --json
+```
+
+Показывает: активных игроков, монеты/гемы, топ-10 и концентрацию,
+доход в час, вклады, кредиты, биржу, аукционы, налоги, кланы,
+сезон и автосборщики. База открывается **только на чтение**;
+лучше запускать по свежему бэкапу, чтобы не нагружать живую БД.
+
 ## Шаг 6. Кастомные эмодзи
 
 Один раз после создания тестового приложения:

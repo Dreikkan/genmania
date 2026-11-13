@@ -49,8 +49,9 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
 - `tests/` — pytest-набор: экономика, банк, биржа, аукцион, PvP,
   кланы, сезоны, розыгрыши, миграции, транзакции, UI-смоуки.
 - `dev/` — локальный dev-стенд: запуск отдельного тестового бота с
-  изолированной папкой `data`, проверка токена, БД, live-smoke и
-  restore-drill (`dev/check_backup_restore.py`).
+  изолированной папкой `data`, проверка токена, БД, live-smoke,
+  restore-drill (`dev/check_backup_restore.py`) и экономический отчёт
+  (`dev/economy_report.py`).
 - `CHANGELOG.md` — краткая история изменений.
 - `.github/workflows/ci.yml` — матрица Linux/Windows, Python 3.11/3.12/3.14,
   pytest с branch coverage, ruff, mypy, bandit и pip-audit.
