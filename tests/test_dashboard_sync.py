@@ -393,6 +393,36 @@ def test_run_handles_collect_error(tmp_path, monkeypatch):
     assert sync._last_error is not None
 
 
+def test_apply_pending_settings(tmp_path):
+    applied = []
+
+    async def apply(update):
+        applied.append(update)
+        return {"ok": True, "applied": ["start_coins"], "guild_id": update.get("guild_id")}
+
+    sync = DashboardSync(FakeBot(None, tmp_path), apply_settings=apply)
+    update = {
+        "revision": "abc123",
+        "guild_id": 1,
+        "settings": {"start_coins": 10},
+    }
+    asyncio.run(sync._apply_pending_settings({"settings_update": update}))
+    assert applied and applied[0]["revision"] == "abc123"
+    assert sync._applied_settings_revision == "abc123"
+    assert sync.applied_revision_path.read_text(encoding="utf-8") == "abc123"
+
+    async def reject(_update):
+        return {"ok": False, "error": "no fields"}
+
+    sync.apply_settings = reject
+    asyncio.run(
+        sync._apply_pending_settings(
+            {"settings_update": {"revision": "def456", "settings": {"x": 1}}}
+        )
+    )
+    assert sync._applied_settings_revision == "abc123"
+
+
 def test_display_name_fallbacks(tmp_path):
     sync = DashboardSync(FakeBot(None, tmp_path))
     assert sync._display_name(999, {}) == ("Игрок 999", "999")

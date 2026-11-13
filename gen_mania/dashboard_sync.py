@@ -24,7 +24,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import aiohttp
 import discord
@@ -84,8 +84,13 @@ def _percent(current: int | float, previous: int | float) -> float:
 class DashboardSync:
     """Collects aggregates and posts them to the dashboard ingest endpoint."""
 
-    def __init__(self, bot: Any):
+    def __init__(
+        self,
+        bot: Any,
+        apply_settings: Callable[[dict], Awaitable[dict]] | None = None,
+    ):
         self.bot = bot
+        self.apply_settings = apply_settings
         self.url = os.getenv("DASHBOARD_SYNC_URL", "").strip()
         self.token = os.getenv("DASHBOARD_SYNC_TOKEN", "").strip()
         self.interval = _env_int("DASHBOARD_SYNC_INTERVAL", 300, 60, 3600)
@@ -97,6 +102,15 @@ class DashboardSync:
             )
         )
         self.history_path = self.data_dir / "dashboard_history.json"
+        self.applied_revision_path = (
+            self.data_dir / "dashboard_settings_revision.txt"
+        )
+        try:
+            self._applied_settings_revision = self.applied_revision_path.read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError:
+            self._applied_settings_revision = ""
         self._last_success: dt.datetime | None = None
         self._last_error: dt.datetime | None = None
 
@@ -119,7 +133,8 @@ class DashboardSync:
             started = time.monotonic()
             try:
                 payload = await self.collect()
-                await self.push(payload)
+                response = await self.push(payload)
+                await self._apply_pending_settings(response)
                 self._last_success = dt.datetime.now(UTC)
                 log.info(
                     "DASHBOARD_SYNC: отправлено (players=%s, guilds=%s)",
@@ -202,6 +217,7 @@ class DashboardSync:
 
         return {
             "generated_at": dt.datetime.now(UTC).isoformat(),
+            "applied_settings_revision": self._applied_settings_revision,
             "stats": stats,
             "activity": activity,
             "top_players": players[:8],
@@ -590,10 +606,23 @@ class DashboardSync:
         return result
 
     async def _collect_settings(self) -> dict:
-        row = await self._fetchone(
-            "SELECT start_coins, currency_coins, currency_gems, tax_rate, "
-            "admin_role_id FROM guild_settings ORDER BY guild_id LIMIT 1"
+        guilds = sorted(
+            getattr(self.bot, "guilds", []) or [],
+            key=lambda guild: getattr(guild, "member_count", 0) or len(guild.members),
+            reverse=True,
         )
+        primary = guilds[0] if guilds else None
+        if primary is not None:
+            row = await self._fetchone(
+                "SELECT start_coins, currency_coins, currency_gems, tax_rate, "
+                "admin_role_id FROM guild_settings WHERE guild_id = ?",
+                (int(primary.id),),
+            )
+        else:
+            row = await self._fetchone(
+                "SELECT start_coins, currency_coins, currency_gems, tax_rate, "
+                "admin_role_id FROM guild_settings ORDER BY guild_id LIMIT 1"
+            )
         start_coins, currency_coins, currency_gems, tax_rate, admin_role_id = (
             row if row else (8, "монеты", "гемы", 0.02, None)
         )
@@ -607,6 +636,8 @@ class DashboardSync:
         else:
             interval_text = "24 часа"
         return {
+            "guild_id": int(primary.id) if primary is not None else 0,
+            "guild_name": str(primary.name) if primary is not None else "—",
             "start_coins": int(start_coins or 8),
             "currency_name": str(currency_coins or "монеты"),
             "premium_name": str(currency_gems or "гемы"),
@@ -855,7 +886,7 @@ class DashboardSync:
     # HTTP
     # ------------------------------------------------------------------
 
-    async def push(self, payload: dict) -> None:
+    async def push(self, payload: dict) -> dict:
         headers = {
             "Accept": "application/json",
             "User-Agent": "GenManiaBot/1.0",
@@ -871,3 +902,43 @@ class DashboardSync:
                     raise RuntimeError(
                         f"ingest вернул {response.status}: {body[:200]}"
                     )
+                if not body:
+                    return {}
+                try:
+                    decoded = json.loads(body)
+                except ValueError:
+                    return {}
+                return decoded if isinstance(decoded, dict) else {}
+
+    async def _apply_pending_settings(self, response: dict) -> None:
+        if not self.apply_settings or not isinstance(response, dict):
+            return
+        update = response.get("settings_update")
+        if not isinstance(update, dict) or not update.get("settings"):
+            return
+        revision = str(update.get("revision", "")).strip()
+        try:
+            result = await self.apply_settings(update)
+        except Exception:
+            log.exception("DASHBOARD_SETTINGS: ошибка применения")
+            return
+        if not isinstance(result, dict) or not result.get("ok"):
+            log.warning("DASHBOARD_SETTINGS: не применены: %s", result)
+            return
+
+        if revision:
+            self._applied_settings_revision = revision
+            try:
+                temp = self.applied_revision_path.with_suffix(".txt.tmp")
+                temp.write_text(revision, encoding="utf-8")
+                os.replace(temp, self.applied_revision_path)
+            except OSError:
+                log.debug(
+                    "DASHBOARD_SETTINGS: не удалось сохранить revision",
+                    exc_info=True,
+                )
+        log.info(
+            "DASHBOARD_SETTINGS: применены %s (guild=%s)",
+            result.get("applied", []),
+            update.get("guild_id"),
+        )
