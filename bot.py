@@ -61,6 +61,7 @@ from gen_mania.repositories.settings import (
     SettingsRuntime,
     make_settings_layer,
 )
+from gen_mania.admin_guard import guard_admin_modal
 from gen_mania.economy import (
     OFFLINE_MAX_HOURS,
     effective_offline_seconds,
@@ -25283,32 +25284,17 @@ async def on_guild_role_delete(role):
 #  🛡️ ADMIN MODAL GUARD
 # ============================================================
 
-def _guard_admin_modal(modal_cls):
-    """Повторно проверяет права администратора при submit модалки."""
-    original = modal_cls.on_submit
-
-    async def guarded(self, interaction):
-        guild = getattr(interaction, "guild", None)
-        if guild is not None and getattr(guild, "owner_id", None) is not None:
-            if not await is_global_owner(interaction):
-                return await interaction.response.send_message(
-                    "❌ Глобальные действия доступны только владельцу бота.",
-                    ephemeral=True,
-                )
-        return await original(self, interaction)
-
-    guarded.__name__ = getattr(original, "__name__", "on_submit")
-    modal_cls.on_submit = guarded
-    return modal_cls
-
-
 for _modal_name, _modal_value in list(globals().items()):
     if (
         _modal_name.startswith("Admin")
         and isinstance(_modal_value, type)
         and issubclass(_modal_value, discord.ui.Modal)
     ):
-        _guard_admin_modal(_modal_value)
+        guard_admin_modal(
+            _modal_value,
+            lambda interaction: is_global_owner(interaction),
+            "❌ Глобальные действия доступны только владельцу бота.",
+        )
 
 
 # ============================================================
