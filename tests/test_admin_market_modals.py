@@ -60,8 +60,14 @@ def test_admin_market_modals():
     async def run():
         db = await aiosqlite.connect(":memory:")
         m.bot.db = db
+        original_owner = m.is_global_owner
         try:
             await m.bot.init_db()
+
+            async def owner_true(interaction):
+                return True
+
+            m.is_global_owner = owner_true
             await db.executemany(
                 "INSERT INTO players (user_id, coins, gems) "
                 "VALUES (?, 1000, 1000)",
@@ -175,6 +181,7 @@ def test_admin_market_modals():
             await modal.on_submit(interaction)
             assert interaction.followup.sent
         finally:
+            m.is_global_owner = original_owner
             await db.close()
             m.bot.db = None
 

@@ -13,8 +13,12 @@ spec.loader.exec_module(m)
 
 
 def test_guide_has_new_sections():
-    for key in ("offline", "sets", "season", "power", "buyout", "orders"):
+    for key in ("economy", "sets", "season", "power", "orders"):
         assert key in m.GUIDE_SECTIONS, key
+    # Дублирующие разделы объединены: офлайн — в «Экономике»,
+    # buyout — в «Аукционе».
+    assert "offline" not in m.GUIDE_SECTIONS
+    assert "buyout" not in m.GUIDE_SECTIONS
 
 
 def test_guide_paths_and_units():

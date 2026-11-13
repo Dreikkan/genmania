@@ -184,7 +184,7 @@ def test_season_level_30_reward_is_capped():
 
     premium = m.season_reward(30, premium=True)
     assert premium["coins"] == 1800
-    assert premium["gems"] == 18
+    assert premium["gems"] == 13
     assert premium["catalysts"] == 1
 
     coins = [m.season_reward(level)["coins"] for level in range(1, 31)]

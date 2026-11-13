@@ -41,6 +41,9 @@ def test_short_number_formatting():
     assert m.format_short_number(float("inf")) == "inf"
     assert m.format_short_number("bad") == "bad"
     assert m.format_content_number("bad") == "bad"
+    assert m.format_content_input(1.5) == "1.5"
+    assert m.format_content_input("bad") == "bad"
+    assert m.format_content_input(float("inf")) == "inf"
 
 
 def test_top_generators_have_meaningful_gem_income():

@@ -68,12 +68,13 @@ def test_star_upgrades_have_positive_expected_value():
         assert expected > low_mult, (star, expected, low_mult)
 
 
-def test_passive_cap_removed():
-    # До 2 часов лимит не мешает активной игре.
-    assert m.cap_passive_income(1_000_000, 3600, 100_000) == 1_000_000
-    assert m.cap_passive_income(1_000_000, 7200, 100_000) == 1_000_000
-    # Оффлайн-потолок удалён: накопление не обрезается.
-    assert m.cap_passive_income(1_000_000, 7201, 100_000) == 1_000_000
+def test_passive_cap_and_penalty():
+    assert m.effective_offline_seconds(3600) == 3600
+    assert m.effective_offline_seconds(7200) == 7200
+    assert m.effective_offline_seconds(7201) > 7200
+    assert m.effective_offline_seconds(48 * 3600) == (
+        m.effective_offline_seconds(24 * 3600)
+    )
 
 
 def test_content_version_includes_balance_change():

@@ -20,8 +20,8 @@ class BankRuntime:
         self.ltv = 0.50
         self.loan_min = 100
         self.loan_term_days = 7
-        self.loan_interest = 0.10
-        self.daily_rate = 0.02
+        self.loan_interest = 0.25
+        self.daily_rate = 0.005
         self.deposit_income_hours = 24
         self.loan_income_hours = 12
         self.coin = "🪙"

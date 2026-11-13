@@ -102,22 +102,31 @@ def test_stateful_ui_and_settings():
             await settings.on_submit(interaction)
             assert interaction.followup.sent
 
-            interaction = FakeInteraction(1)
-            role_modal = m.SettingsAdminRoleModal(1)
-            role_modal.role_id._value = "0"
-            await role_modal.on_submit(interaction)
-            saved = await m.get_settings(1)
-            assert saved["admin_role_id"] is None
+            original_owner_check = m.is_global_owner
 
-            interaction = FakeInteraction(1)
-            interaction.guild = SimpleNamespace(
-                get_role=lambda role_id: SimpleNamespace(id=role_id)
-            )
-            role_modal = m.SettingsAdminRoleModal(1)
-            role_modal.role_id._value = "123"
-            await role_modal.on_submit(interaction)
-            saved = await m.get_settings(1)
-            assert saved["admin_role_id"] == 123
+            async def owner_true(interaction):
+                return True
+
+            m.is_global_owner = owner_true
+            try:
+                interaction = FakeInteraction(1)
+                role_modal = m.SettingsAdminRoleModal(1)
+                role_modal.role_id._value = "0"
+                await role_modal.on_submit(interaction)
+                saved = await m.get_settings(1)
+                assert saved["admin_role_id"] is None
+
+                interaction = FakeInteraction(1)
+                interaction.guild = SimpleNamespace(
+                    get_role=lambda role_id: SimpleNamespace(id=role_id)
+                )
+                role_modal = m.SettingsAdminRoleModal(1)
+                role_modal.role_id._value = "123"
+                await role_modal.on_submit(interaction)
+                saved = await m.get_settings(1)
+                assert saved["admin_role_id"] == 123
+            finally:
+                m.is_global_owner = original_owner_check
 
             added = []
             role = SimpleNamespace(id=777)

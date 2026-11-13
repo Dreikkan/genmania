@@ -85,6 +85,7 @@ async def _close(db):
 def test_admin_modal_guard_and_branch_edges():
     async def run():
         db = await _init()
+        original_owner = m.is_global_owner
         try:
             denied = FakeInteraction(1, owner_id=2)
             modal = m.AdminGrantValuesModal(1, "coins")
@@ -94,6 +95,10 @@ def test_admin_modal_guard_and_branch_edges():
             assert denied.response.messages
             assert not denied.followup.sent
 
+            async def owner_true(interaction):
+                return True
+
+            m.is_global_owner = owner_true
             interaction = FakeInteraction(1)
             modal = m.AdminRemoveAchievementModal(1)
             modal.user_id._value = "1"
@@ -121,6 +126,7 @@ def test_admin_modal_guard_and_branch_edges():
             await modal.on_submit(interaction)
             assert interaction.followup.sent
         finally:
+            m.is_global_owner = original_owner
             await _close(db)
 
     asyncio.run(run())

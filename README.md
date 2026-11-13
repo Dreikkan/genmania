@@ -8,6 +8,7 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
 
 - `bot.py` — основной монолит бота (discord.py 2.x + aiosqlite).
 - `gen_mania/` — вынесенные модули: `config.py` (runtime-константы),
+  `formatting.py` (короткие числа и русская плюрализация),
   `metrics.py` (in-process метрики), `db/transaction.py`
   (managed SQLite-транзакции), `repositories/audit.py`
   (журнал админ-действий), `repositories/settings.py`
@@ -50,13 +51,15 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
 - `dev/` — локальный dev-стенд: запуск отдельного тестового бота с
   изолированной папкой `data`, проверка токена, БД и live-smoke.
 - `CHANGELOG.md` — краткая история изменений.
-- `.github/workflows/ci.yml` — pytest + обязательный ruff-профиль.
+- `.github/workflows/ci.yml` — матрица Linux/Windows, Python 3.12/3.14,
+  pytest с branch coverage, ruff, mypy, bandit и pip-audit.
 
 ## Требования
 
-- Python **3.10+** (проверялось на 3.14).
+- Python **3.12+** (проверялось на 3.14).
 - `discord.py>=2.4`
 - `aiosqlite>=0.20`
+- Для воспроизводимых сборок используйте `requirements.lock`.
 - В Discord Developer Portal включён **Server Members Intent**
   (нужен для локальных топов, налогов и состава участников).
 
@@ -65,7 +68,7 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements.lock
 
 $env:DISCORD_BOT_TOKEN="your_token"
 $env:DATA_DIR="$PWD\data"

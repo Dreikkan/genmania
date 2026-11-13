@@ -296,6 +296,36 @@ def test_shop_shows_market_price_and_synthesis_only():
     asyncio.run(run())
 
 
+def test_shop_purchase_full_inventory_does_not_charge():
+    async def run():
+        db = await _init()
+        original_place = m.place_items
+        try:
+            await db.execute(
+                "INSERT INTO players (user_id, coins) VALUES (1, 1000)"
+            )
+            await db.commit()
+
+            async def no_space(*args, **kwargs):
+                raise ValueError("нет места")
+
+            m.place_items = no_space
+            view = m.BuyItemQuantityView(1, "basic_gen")
+            interaction = FakeInteraction(1)
+            await view.quantity_select(interaction, 1)
+            async with db.execute(
+                "SELECT coins FROM players WHERE user_id = 1"
+            ) as c:
+                assert (await c.fetchone())[0] == 1000
+            assert interaction.edited
+        finally:
+            m.place_items = original_place
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_shop_warns_about_long_payback():
     async def run():
         db = await _init()

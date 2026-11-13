@@ -112,18 +112,19 @@ def make_market_ui_layer(runtime: MarketUiRuntime):
         embed = runtime.embed(
             title=f"{runtime.emoji('_history')} История цен: {name}",
             description=(
-                f"{emoji or '📦'} База: 🪙 **{base}** · "
-                f"Сейчас: 🪙 **{current}**\n"
+                f"{emoji or '📦'} База: 🪙 **{runtime.format_price(base)}** · "
+                f"Сейчас: 🪙 **{runtime.format_price(current)}**\n"
                 f"`{spark}`\n"
-                f"Изменение: **{change:+d}** ({change_pct:+.1f}%)"
+                f"Изменение: **{runtime.format_price(change)}** "
+                f"({change_pct:+.1f}%)"
             ),
             color=0x9B59B6,
         )
         embed.add_field(
             name="Диапазон",
             value=(
-                f"Мин: 🪙 **{min(history)}**\n"
-                f"Макс: 🪙 **{max(history)}**\n"
+                f"Мин: 🪙 **{runtime.format_price(min(history))}**\n"
+                f"Макс: 🪙 **{runtime.format_price(max(history))}**\n"
                 f"Точек: **{len(history)}**"
             ),
             inline=True,
@@ -261,7 +262,8 @@ def make_market_ui_layer(runtime: MarketUiRuntime):
             embed.add_field(
                 name=f"{trend} {emoji} {name}",
                 value=(
-                    f"Цена: 🪙 **{current}** (база {base})\n"
+                    f"Цена: 🪙 **{runtime.format_price(current)}** "
+                    f"(база {runtime.format_price(base)})\n"
                     f"Спрос: **{demand}** | Предложение: **{supply}**\n"
                     f"`{spark}`"
                 ),

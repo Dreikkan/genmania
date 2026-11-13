@@ -8,6 +8,7 @@ DEFAULT_BOT_NAME = "Gen Mania"
 DEFAULT_CURRENCY_COINS = "монеты"
 DEFAULT_CURRENCY_GEMS = "гемы"
 DEFAULT_START_COINS = 8
+MAX_START_COINS = 100
 DEFAULT_TAX_RATE = 0.02
 INCOME_HINT = (
     "Доход начисляется каждую секунду, в интерфейсе показан за час."

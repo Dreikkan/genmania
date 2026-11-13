@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from ..formatting import plural_ru
+
 
 class StorageUiRuntime:
     """Адаптер между bot.py и UI хранилища."""
@@ -148,7 +150,8 @@ def make_storage_ui_layer(runtime: StorageUiRuntime):
         )
         if sellable:
             embed.description += (
-                f"Быстрая продажа 0★: **{len(sellable)}** шт. за "
+                f"Быстрая продажа 0★: **{len(sellable)}** "
+                f"{plural_ru(len(sellable), 'штука', 'штуки', 'штук')} за "
                 f"🪙 **{runtime.format_price(sell_total)}**\n"
             )
         else:

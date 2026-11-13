@@ -193,7 +193,9 @@ def test_analytics_embed_empty_and_deposit_pet():
                 ),
             )
             await db.commit()
-            embed = await m.build_analytics_embed(FakeInteraction(1))
+            embed = await m.build_analytics_embed(
+                FakeInteraction(1), details=True
+            )
             text = "\n".join(field.value for field in embed.fields)
             assert "Кот" in text
             assert "500" in text

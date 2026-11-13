@@ -26,6 +26,7 @@ class PrestigeRuntime:
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self._price_formatter: Callable[[int], str] = str
         self.default_start_coins = 8
+        self.max_start_coins = 100
         self.base_requirement = 150_000
         self.step_requirement = 50_000
         self.bonus_per_point = 0.05
@@ -51,6 +52,7 @@ class PrestigeRuntime:
         emoji_fixer: Callable[[Any], Any],
         price_formatter: Callable[[int], str],
         default_start_coins: int,
+        max_start_coins: int,
         base_requirement: int,
         step_requirement: int,
         bonus_per_point: float,
@@ -73,6 +75,7 @@ class PrestigeRuntime:
         self._emoji_fixer = emoji_fixer
         self._price_formatter = price_formatter
         self.default_start_coins = default_start_coins
+        self.max_start_coins = max_start_coins
         self.base_requirement = base_requirement
         self.step_requirement = step_requirement
         self.bonus_per_point = bonus_per_point
@@ -136,15 +139,34 @@ def make_prestige_layer(runtime: PrestigeRuntime):
     def prestige_gain_from_lifetime(
         lifetime: int, existing_points: int
     ) -> int:
-        """Сколько новых очков даёт текущее производство."""
-        remaining = max(0, int(lifetime or 0))
+        """Сколько новых очков даёт текущее производство.
+
+        Стоимость очков — арифметическая прогрессия, поэтому считаем
+        сумму через формулу и бинарный поиск, без цикла по каждому очку.
+        """
+        budget = max(0, int(lifetime or 0))
         points = max(0, int(existing_points or 0))
-        gain = 0
-        while remaining >= prestige_point_cost(points):
-            remaining -= prestige_point_cost(points)
-            points += 1
-            gain += 1
-        return gain
+        if budget < prestige_point_cost(points):
+            return 0
+
+        def total_cost(count: int) -> int:
+            return (
+                count * runtime.base_requirement
+                + runtime.step_requirement
+                * (count * points + count * (count - 1) // 2)
+            )
+
+        high = 1
+        while total_cost(high) <= budget:
+            high *= 2
+        low = 0
+        while low + 1 < high:
+            middle = (low + high) // 2
+            if total_cost(middle) <= budget:
+                low = middle
+            else:
+                high = middle
+        return low
 
     def prestige_points_from_lifetime(total: int) -> int:
         """Сколько всего очков заработано при данном производстве."""
@@ -170,7 +192,9 @@ def make_prestige_layer(runtime: PrestigeRuntime):
             if guild_id
             else {"start_coins": runtime.default_start_coins}
         )
-        start_coins = settings["start_coins"]
+        start_coins = min(
+            int(settings["start_coins"]), runtime.max_start_coins
+        )
         points = await runtime.get_prestige_points(user_id)
         released_bids = 0
 
@@ -212,14 +236,30 @@ def make_prestige_layer(runtime: PrestigeRuntime):
                         "SELECT 1 FROM market_orders WHERE user_id = ? "
                         "AND status = 'active'",
                     ),
+                    (
+                        "аукционы",
+                        "SELECT 1 FROM auctions WHERE seller_id = ? "
+                        "AND status = 'active'",
+                    ),
+                    (
+                        "почту",
+                        "SELECT 1 FROM mailbox WHERE user_id = ?",
+                    ),
                 ):
-                    async with runtime.db.execute(sql, (user_id,)) as c:
-                        if await c.fetchone():
-                            raise ValueError(
-                                f"Сначала закрой {label}: "
-                                "перерождение не должно терять "
-                                "активные обязательства."
-                            )
+                    try:
+                        async with runtime.db.execute(
+                            sql, (user_id,)
+                        ) as c:
+                            if await c.fetchone():
+                                raise ValueError(
+                                    f"Сначала закрой {label}: "
+                                    "перерождение не должно терять "
+                                    "активные обязательства."
+                                )
+                    except aiosqlite.OperationalError:
+                        # Очень старые/упрощённые схемы могут не иметь
+                        # соответствующей таблицы.
+                        continue
 
                 # Снимаем ставки игрока на чужих лотах.
                 released_bids, _refunded = await runtime.release_bids(
@@ -320,6 +360,14 @@ def make_prestige_layer(runtime: PrestigeRuntime):
                     "DELETE FROM bank_loans WHERE user_id = ?",
                     (user_id,),
                 )
+                for pity_table in ("craft_pity", "star_pity"):
+                    try:
+                        await runtime.db.execute(
+                            f"DELETE FROM {pity_table} WHERE user_id = ?",
+                            (user_id,),
+                        )
+                    except aiosqlite.OperationalError:
+                        continue
         except ValueError as e:
             return False, f"❌ {e}", 0, points
 

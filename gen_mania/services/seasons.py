@@ -178,7 +178,8 @@ def make_season_layer(runtime: SeasonRuntime):
         gems = 0
         catalysts = 0
         if premium:
-            gems = 3 + level // 2
+            # Итого 220 премиум-гемов за 30 уровней.
+            gems = 2 + level // 3 + (1 if level >= 16 else 0)
             if level % 5 == 0:
                 catalysts = 1
         else:

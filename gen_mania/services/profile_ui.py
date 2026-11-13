@@ -32,7 +32,7 @@ class ProfileUiRuntime:
         self._emoji_getter: Callable[[], Callable] = lambda: None
         self._embed_factory: Callable[..., Any] = lambda **kwargs: None
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
-        self._price_formatter: Callable[[int], str] = str
+        self._price_formatter: Callable[[int | float], str] = str
         self.titles: dict = {}
         self.title_bonuses: dict = {}
         self.btype_names: dict = {}
@@ -78,7 +78,7 @@ class ProfileUiRuntime:
         emoji_getter: Callable[[], Callable],
         embed_factory: Callable[..., Any],
         emoji_fixer: Callable[[Any], Any],
-        price_formatter: Callable[[int], str],
+        price_formatter: Callable[[int | float], str],
         titles: dict,
         title_bonuses: dict,
         btype_names: dict,
@@ -208,7 +208,7 @@ class ProfileUiRuntime:
     def embed(self, **kwargs):
         return self._embed_factory(**kwargs)
 
-    def format_price(self, value: int) -> str:
+    def format_price(self, value: int | float) -> str:
         return self._price_formatter(value)
 
     async def fix_emojis(self, embed):
@@ -545,15 +545,15 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
             )
             embed.add_field(
                 name="⚔️ Мощь",
-                value=f"**{power}**",
+                value=f"**{runtime.format_price(power)}**",
                 inline=True,
             )
         embed.add_field(
             name="Доход",
             value=(
-                f"🪙 {per_sec_coins * 3600:.2f}/час"
+                f"🪙 {runtime.format_price(per_sec_coins * 3600)}/час"
                 + (
-                    f"\n💎 {per_sec_gems * 3600:.4f}/час"
+                    f"\n💎 {runtime.format_price(per_sec_gems * 3600)}/час"
                     if per_sec_gems > 0
                     else ""
                 )
@@ -719,9 +719,13 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
         per_sec_coins, per_sec_gems = await runtime.get_income(user_id)
         parts = []
         if per_sec_coins > 0:
-            parts.append(f"{coin} {per_sec_coins * 3600:.2f}/час")
+            parts.append(
+                f"{coin} {runtime.format_price(per_sec_coins * 3600)}/час"
+            )
         if per_sec_gems > 0:
-            parts.append(f"{gem} {per_sec_gems * 3600:.4f}/час")
+            parts.append(
+                f"{gem} {runtime.format_price(per_sec_gems * 3600)}/час"
+            )
         income_str = (
             " | ".join(parts)
             if parts
@@ -1016,9 +1020,11 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
             gen_power,
         ) in chunk:
             star_str = f"{stars}★" if stars > 0 else "—"
-            inc_str = f"🪙 {eff_coins:.2f}/час"
+            inc_str = f"🪙 {runtime.format_price(eff_coins)}/час"
             if eff_gems > 0:
-                inc_str += f" | 💎 {eff_gems:.4f}/час"
+                inc_str += (
+                    f" | 💎 {runtime.format_price(eff_gems)}/час"
+                )
             embed.add_field(
                 name=(
                     f"Слот {slot}: {default_emoji} {name} "
@@ -1071,8 +1077,8 @@ def make_profile_ui_layer(runtime: ProfileUiRuntime):
         embed.add_field(
             name="💰 Итого по энергостанции",
             value=(
-                f"🪙 {total_coins:.2f}/час | "
-                f"💎 {total_gems:.4f}/час\n"
+                f"🪙 {runtime.format_price(total_coins)}/час | "
+                f"💎 {runtime.format_price(total_gems)}/час\n"
                 f"⚔️ Мощь: **{total_power}**"
             ),
             inline=False,

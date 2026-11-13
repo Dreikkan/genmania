@@ -26,6 +26,7 @@ class ClanWarRuntime:
         self.declare_cost = 500
         self.reward = 1000
         self.reward_per_level = 0
+        self.cooldown_hours = 24
         self.attack_cooldown_hours = 1
         self.damage_rate = 0.15
         self.war_duration_hours = 24
@@ -49,6 +50,7 @@ class ClanWarRuntime:
         declare_cost: int,
         reward: int,
         reward_per_level: int,
+        cooldown_hours: int,
         attack_cooldown_hours: int,
         damage_rate: float,
         war_duration_hours: int,
@@ -69,6 +71,7 @@ class ClanWarRuntime:
         self.declare_cost = declare_cost
         self.reward = reward
         self.reward_per_level = reward_per_level
+        self.cooldown_hours = cooldown_hours
         self.attack_cooldown_hours = attack_cooldown_hours
         self.damage_rate = damage_rate
         self.war_duration_hours = war_duration_hours
@@ -128,6 +131,30 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
                 raise ValueError(
                     "У этого клана уже есть активная война."
                 )
+            async with runtime.db.execute(
+                "SELECT end_time FROM clan_wars "
+                "WHERE (clan1_id = ? OR clan2_id = ?) "
+                "AND status = 'finished' "
+                "ORDER BY end_time DESC LIMIT 1",
+                (clan_id, clan_id),
+            ) as c:
+                last_war = await c.fetchone()
+            if last_war and last_war[0]:
+                last_end = runtime.parse_db_time(last_war[0])
+                if last_end:
+                    elapsed = (
+                        datetime.datetime.now() - last_end
+                    ).total_seconds()
+                    if elapsed < runtime.cooldown_hours * 3600:
+                        left = int(
+                            (
+                                runtime.cooldown_hours * 3600 - elapsed
+                            )
+                            // 60
+                        )
+                        raise ValueError(
+                            f"⏳ Новая война доступна через {left} мин."
+                        )
             async with runtime.db.execute(
                 "SELECT treasury FROM clans WHERE id = ?", (clan_id,)
             ) as c:
@@ -202,7 +229,7 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
 
                 async with runtime.db.execute(
                     """
-                    SELECT id, clan1_id, clan2_id, status,
+                    SELECT id, clan1_id, clan2_id, status, start_time,
                            clan1_hp, clan2_hp, clan1_max_hp, clan2_max_hp,
                            clan1_damage, clan2_damage
                     FROM clan_wars WHERE id = ?
@@ -217,6 +244,7 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
                     c1,
                     c2,
                     status,
+                    start_time,
                     c1_hp,
                     c2_hp,
                     c1_max,
@@ -230,6 +258,11 @@ def make_clan_war_layer(runtime: ClanWarRuntime):
                 c2_dmg = c2_dmg or 0
                 if status != "active":
                     raise ValueError("❌ Война уже завершена.")
+                start = runtime.parse_db_time(start_time)
+                if start and (
+                    datetime.datetime.now() - start
+                ).total_seconds() > runtime.war_duration_hours * 3600:
+                    raise ValueError("❌ Время войны истекло.")
                 if clan_id not in (c1, c2):
                     raise ValueError(
                         "❌ Твой клан не участвует в этой войне."

@@ -277,11 +277,15 @@ def test_content_and_settings_modal_branches():
             assert interaction.followup.sent
             assert (await _submit(m.SettingsStatusRoleModal(1), status="bad", role_id="1")).followup.sent
             assert (await _submit(m.SettingsStatusRoleModal(1), status="vip", role_id="bad")).followup.sent
-            assert (await _submit(m.SettingsAdminRoleModal(1), role_id="bad")).followup.sent
-            assert (await _submit(m.SettingsAdminRoleModal(1), role_id="999")).followup.sent
+            m.is_global_owner = owner_true
+            try:
+                assert (await _submit(m.SettingsAdminRoleModal(1), role_id="bad")).followup.sent
+                assert (await _submit(m.SettingsAdminRoleModal(1), role_id="999")).followup.sent
+                assert (await _submit(m.StarEmojiModal2(1, "missing"), e3="⚙️", e4="⚙️", e5="⚙️")).followup.sent
+            finally:
+                m.is_global_owner = original_owner
             assert (await _submit(m.EditEmojiModal(1, "_coin"), emoji="bad emoji")).followup.sent
             assert (await _submit(m.EditEmojiModal(1, "_coin"), emoji="")).followup.sent
-            assert (await _submit(m.StarEmojiModal2(1, "missing"), e3="⚙️", e4="⚙️", e5="⚙️")).followup.sent
         finally:
             await _close(db)
 
