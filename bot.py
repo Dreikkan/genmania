@@ -21041,10 +21041,6 @@ class AdminPanelView(AdminView):
         embed = BotEmbed(title="➖ Забрать валюту", description="Выбери валюту, затем нажми «Ввести ID».", color=0xe74c3c)
         await interaction.edit_original_response(embed=embed, view=AdminTakeView(self.author_id))
 
-    @discord.ui.button(label="Профиль", emoji=BOT_BTN_EMOJIS.get("_profile", "👤"), style=discord.ButtonStyle.primary, row=0)
-    async def profile(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AdminProfileModal(self.author_id))
-
     @discord.ui.button(label="Изменить", emoji=BOT_BTN_EMOJIS.get("_settings", "✏️"), style=discord.ButtonStyle.secondary, row=1)
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AdminEditModal(self.author_id))
@@ -21170,14 +21166,97 @@ class AdminPlayerCardView(AdminView):
         super().__init__(author_id, timeout=300)
         self.target_id = target_id
 
-    @discord.ui.button(label="Обновить", emoji=get_emoji("_swap"), style=discord.ButtonStyle.primary)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(
+        label="Обновить",
+        emoji=get_emoji("_swap"),
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def refresh(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         await interaction.response.defer()
         embed = await build_admin_player_card(self.target_id)
         await interaction.edit_original_response(embed=embed, view=self)
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.success)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(
+        label="Монеты +",
+        emoji=get_emoji("_coin"),
+        style=discord.ButtonStyle.success,
+        row=0,
+    )
+    async def grant_coins(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(
+            AdminGrantValuesModal(
+                self.author_id, "coins", self.target_id
+            )
+        )
+
+    @discord.ui.button(
+        label="Монеты −",
+        emoji=get_emoji("_coin"),
+        style=discord.ButtonStyle.danger,
+        row=0,
+    )
+    async def take_coins(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(
+            AdminTakeValuesModal(
+                self.author_id, "coins", self.target_id
+            )
+        )
+
+    @discord.ui.button(
+        label="Изменить",
+        emoji=get_emoji("_settings"),
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def edit(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(
+            AdminEditModal(self.author_id, self.target_id)
+        )
+
+    @discord.ui.button(
+        label="Сбросить",
+        emoji=get_emoji("_reset"),
+        style=discord.ButtonStyle.danger,
+        row=1,
+    )
+    async def reset(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(
+            AdminResetModal(self.author_id, self.target_id)
+        )
+
+    @discord.ui.button(
+        label="Предмет",
+        emoji=get_emoji("_buy"),
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
+    async def give_item(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(
+            AdminGiveItemModal(self.author_id, self.target_id)
+        )
+
+    @discord.ui.button(
+        label="Назад",
+        emoji=get_emoji("_back"),
+        style=discord.ButtonStyle.success,
+        row=2,
+    )
+    async def back(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
         await interaction.response.defer()
         embed = BotEmbed(
             title="👤 Карточка игрока",
@@ -23220,10 +23299,12 @@ class AdminGrantValuesModal(discord.ui.Modal, title="Начислить"):
     user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789", required=True)
     amount = discord.ui.TextInput(label="Количество", default="100", required=True)
 
-    def __init__(self, author_id: int, currency: str):
+    def __init__(self, author_id: int, currency: str, target_id: int | None = None):
         super().__init__()
         self.author_id = author_id
         self.currency = currency
+        if target_id is not None:
+            self.user_id.default = str(target_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -23275,10 +23356,12 @@ class AdminTakeValuesModal(discord.ui.Modal, title="Забрать"):
     user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789", required=True)
     amount = discord.ui.TextInput(label="Количество", default="100", required=True)
 
-    def __init__(self, author_id: int, currency: str):
+    def __init__(self, author_id: int, currency: str, target_id: int | None = None):
         super().__init__()
         self.author_id = author_id
         self.currency = currency
+        if target_id is not None:
+            self.user_id.default = str(target_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -23412,9 +23495,11 @@ class AdminEditModal(discord.ui.Modal, title="Изменить поле проф
     )
     value = discord.ui.TextInput(label="Новое значение", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, target_id: int | None = None):
         super().__init__()
         self.author_id = author_id
+        if target_id is not None:
+            self.user_id.default = str(target_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -23470,9 +23555,11 @@ class AdminResetModal(discord.ui.Modal, title="Сбросить прогресс
     user_id = discord.ui.TextInput(label="ID пользователя", required=True)
     confirm = discord.ui.TextInput(label="Введите ДА для подтверждения", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, target_id: int | None = None):
         super().__init__()
         self.author_id = author_id
+        if target_id is not None:
+            self.user_id.default = str(target_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -23605,9 +23692,11 @@ class AdminGiveItemModal(discord.ui.Modal, title="Выдать предмет"):
     quantity = discord.ui.TextInput(label="Количество", default="1", required=True)
     location = discord.ui.TextInput(label="Куда (profile/storage)", default="profile", required=True)
 
-    def __init__(self, author_id: int):
+    def __init__(self, author_id: int, target_id: int | None = None):
         super().__init__()
         self.author_id = author_id
+        if target_id is not None:
+            self.user_id.default = str(target_id)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)

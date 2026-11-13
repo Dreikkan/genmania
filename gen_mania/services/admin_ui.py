@@ -1,6 +1,7 @@
 """Admin panel embeds."""
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import Any, Callable
 
@@ -49,6 +50,15 @@ class AdminUiRuntime:
 
 def make_admin_ui_layer(runtime: AdminUiRuntime):
     """Возвращает admin-embed-функции, привязанные к runtime."""
+
+    def human_ts(value) -> str:
+        if not value:
+            return "—"
+        try:
+            parsed = datetime.datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return str(value)[:16]
+        return parsed.strftime("%d.%m.%Y %H:%M")
 
     async def build_admin_player_card(user_id: int):
         async with runtime.db.execute(
@@ -148,8 +158,41 @@ def make_admin_ui_layer(runtime: AdminUiRuntime):
         embed.add_field(
             name="Активность",
             value=(
-                f"Сбор: `{str(last_col)[:16]}`\n"
-                f"Налог: `{str(last_tax)[:16]}`"
+                f"Сбор: `{human_ts(last_col)}`\n"
+                f"Налог: `{human_ts(last_tax)}`"
+            ),
+            inline=False,
+        )
+
+        async with runtime.db.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM inventory "
+            " WHERE user_id = ? AND location = 'profile'), "
+            "(SELECT COUNT(*) FROM inventory "
+            " WHERE user_id = ? AND location = 'storage'), "
+            "(SELECT COUNT(*) FROM inventory "
+            " WHERE user_id = ? AND location = 'temp'), "
+            "(SELECT COUNT(*) FROM player_achievements "
+            " WHERE user_id = ?), "
+            "(SELECT COUNT(*) FROM player_upgrades "
+            " WHERE user_id = ?)",
+            (user_id, user_id, user_id, user_id, user_id),
+        ) as c:
+            (
+                profile_count,
+                storage_count,
+                temp_count,
+                ach_count,
+                upgrade_count,
+            ) = await c.fetchone()
+        embed.add_field(
+            name="Инвентарь",
+            value=(
+                f"Энергостанция: **{profile_count}** · "
+                f"Хранилище: **{storage_count}** · "
+                f"Временное: **{temp_count}**\n"
+                f"Достижения: **{ach_count}** · "
+                f"Апгрейды: **{upgrade_count}**"
             ),
             inline=False,
         )
