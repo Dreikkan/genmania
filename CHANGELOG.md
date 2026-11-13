@@ -21,6 +21,8 @@
 - P3: офлайн-лимиты вынесены в `gen_mania/economy.py`, а
   `format_cooldown` — в `gen_mania/formatting.py`.
 - P3: guard админ-модалок вынесен в `gen_mania/admin_guard.py`.
+- P3: модалки начисления/списания вынесены в
+  `gen_mania/services/admin_values.py`.
 - Все глобальные админ-вью теперь owner-only по умолчанию; локальным
   админам оставлены только `LocalAdminView` и серверные розыгрыши.
 

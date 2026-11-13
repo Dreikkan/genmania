@@ -83,6 +83,10 @@ from gen_mania.game_data import (
 )
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
+from gen_mania.services.admin_values import (
+    AdminValuesRuntime,
+    make_admin_values_layer,
+)
 from gen_mania.services.admin_ui import AdminUiRuntime, make_admin_ui_layer
 from gen_mania.services.advent import AdventRuntime, make_advent_layer
 from gen_mania.services.analytics_ui import (
@@ -4939,6 +4943,21 @@ TOP_EXCLUSION_RUNTIME.configure(
     logger=log,
 )
 enforce_top_exclusion = make_top_exclusion_layer(TOP_EXCLUSION_RUNTIME)
+
+ADMIN_VALUES_RUNTIME = AdminValuesRuntime()
+ADMIN_VALUES_RUNTIME.configure(
+    db_getter=lambda: bot.db,
+    transaction_getter=lambda: db_transaction,
+    log_getter=lambda: log_admin_action,
+    top_exclusion_getter=lambda: enforce_top_exclusion,
+    max_resource=ADMIN_MAX_RESOURCE,
+    default_start_coins=DEFAULT_START_COINS,
+    logger=log,
+)
+(
+    AdminGrantValuesModal,
+    AdminTakeValuesModal,
+) = make_admin_values_layer(ADMIN_VALUES_RUNTIME)
 
 PRESTIGE_RUNTIME = PrestigeRuntime()
 PRESTIGE_RUNTIME.configure(
@@ -23011,120 +23030,6 @@ class AdminLogsView(AdminView):
         await interaction.edit_original_response(embed=embed, view=AdminPanelView(self.author_id))
 
 # ---------- АДМИН-МОДАЛКИ ----------
-
-class AdminGrantValuesModal(discord.ui.Modal, title="Начислить"):
-    user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789", required=True)
-    amount = discord.ui.TextInput(label="Количество", default="100", required=True)
-
-    def __init__(self, author_id: int, currency: str, target_id: int | None = None):
-        super().__init__()
-        self.author_id = author_id
-        self.currency = currency
-        if target_id is not None:
-            self.user_id.default = str(target_id)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        if self.currency not in ("coins", "gems"):
-            return await interaction.followup.send(
-                "❌ Неверная валюта.", ephemeral=True
-            )
-        try:
-            uid = int(self.user_id.value)
-            amount = int(self.amount.value)
-            if amount <= 0 or amount > ADMIN_MAX_RESOURCE:
-                raise ValueError
-        except ValueError:
-            return await interaction.followup.send(
-                f"❌ ID и количество: 1–{ADMIN_MAX_RESOURCE}.",
-                ephemeral=True,
-            )
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT 1 FROM players WHERE user_id = ?", (uid,)
-            ) as c:
-                exists = await c.fetchone()
-            if not exists:
-                await bot.db.execute(
-                    "INSERT OR IGNORE INTO players "
-                    "(user_id, coins, last_gem_collected, last_tax_time) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                    (uid, DEFAULT_START_COINS),
-                )
-            await bot.db.execute(
-                f"UPDATE players SET {self.currency} = {self.currency} + ? "
-                "WHERE user_id = ?",
-                (amount, uid),
-            )
-        await log_admin_action(
-            self.author_id, uid, "grant",
-            f"{self.currency} +{amount}"
-        )
-        await enforce_top_exclusion(
-            interaction, uid, f"self_grant:{self.currency}"
-        )
-        unit = "🪙" if self.currency == "coins" else "💎"
-        await interaction.followup.send(
-            f"✅ Начислено {amount} {unit} <@{uid}>.", ephemeral=True
-        )
-
-
-class AdminTakeValuesModal(discord.ui.Modal, title="Забрать"):
-    user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789", required=True)
-    amount = discord.ui.TextInput(label="Количество", default="100", required=True)
-
-    def __init__(self, author_id: int, currency: str, target_id: int | None = None):
-        super().__init__()
-        self.author_id = author_id
-        self.currency = currency
-        if target_id is not None:
-            self.user_id.default = str(target_id)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        if self.currency not in ("coins", "gems"):
-            return await interaction.followup.send(
-                "❌ Неверная валюта.", ephemeral=True
-            )
-        try:
-            uid = int(self.user_id.value)
-            amount = int(self.amount.value)
-            if amount <= 0 or amount > ADMIN_MAX_RESOURCE:
-                raise ValueError
-        except ValueError:
-            return await interaction.followup.send(
-                f"❌ ID и количество: 1–{ADMIN_MAX_RESOURCE}.",
-                ephemeral=True,
-            )
-        try:
-            async with db_transaction():
-                async with bot.db.execute(
-                    f"SELECT {self.currency} FROM players WHERE user_id = ?",
-                    (uid,),
-                ) as c:
-                    row = await c.fetchone()
-                if not row:
-                    raise ValueError("Игрок не найден.")
-                if row[0] < amount:
-                    raise ValueError(f"У игрока только {row[0]}.")
-                cur = await bot.db.execute(
-                    f"UPDATE players SET {self.currency} = {self.currency} - ? "
-                    f"WHERE user_id = ? AND {self.currency} >= ?",
-                    (amount, uid, amount),
-                )
-                if cur.rowcount == 0:
-                    raise ValueError("Баланс изменился, попробуй снова.")
-        except ValueError as exc:
-            return await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-        await log_admin_action(
-            self.author_id, uid, "take",
-            f"{self.currency} -{amount}"
-        )
-        unit = "🪙" if self.currency == "coins" else "💎"
-        await interaction.followup.send(
-            f"✅ Забрано {amount} {unit} у <@{uid}>.", ephemeral=True
-        )
-
 
 class AdminProfileModal(discord.ui.Modal, title="Профиль игрока"):
     user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789", required=True)
