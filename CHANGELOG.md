@@ -17,6 +17,7 @@
   автосборщикам.
 - P3: игровые данные вынесены в `gen_mania/game_data.py`, а
   single-instance lock и WAL-checkpoint — в `gen_mania/runtime.py`.
+- P3: стек навигации вынесен в `gen_mania/navigation.py`.
 - Все глобальные админ-вью теперь owner-only по умолчанию; локальным
   админам оставлены только `LocalAdminView` и серверные розыгрыши.
 
