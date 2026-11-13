@@ -29,7 +29,7 @@
 - Убраны дубли `CREATE TABLE`, мёртвые настройки, no-op
   `cap_passive_income` и alias `PRESTIGE_COIN_REQUIREMENT`.
 - CI: матрица Linux/Windows × Python 3.11/3.12/3.14, lock-файл,
-  `pyproject.toml` с конфигом ruff.
+  `ruff.toml` с конфигом ruff.
 
 ### Надёжность
 

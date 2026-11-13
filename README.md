@@ -101,6 +101,11 @@ python bot.py
 
 Не включайте в архив `.git/`, `tests/`, `dev/data/`, `__pycache__/`,
 `bot_backup_*.py` и `bot_changes_*.diff`.
+
+> **Важно для Bothost:** не добавляйте в корень `pyproject.toml` —
+> платформа может выбрать его вместо `requirements.txt` и не поставить
+> зависимости. Конфиг ruff лежит в `ruff.toml`, его наличие безопасно.
+
 В Bothost задайте `DATA_DIR=/app/data` и `DISCORD_BOT_TOKEN`.
 База и бэкапы должны оставаться в `/app/data`, иначе они потеряются
 при перезапуске.
