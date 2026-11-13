@@ -35,6 +35,13 @@ from gen_mania.config import (
     SLOW_DB_TX_MS,
     UTC,
 )
+from gen_mania.navigation import (
+    NAV_STACKS,  # noqa: F401 - re-export
+    NAV_STACK_LIMIT,  # noqa: F401 - re-export
+    pop_nav,
+    push_nav,
+    reset_nav,
+)
 from gen_mania.metrics import METRICS, MetricsRegistry  # noqa: F401 - re-export
 from gen_mania.db.transaction import (
     TransactionRuntime,
@@ -5409,30 +5416,6 @@ async def deny_if_disabled(interaction: discord.Interaction, command_key: str) -
 # ============================================================
 #  🧭 НАВИГАЦИОННЫЙ СТЕК
 # ============================================================
-
-NAV_STACKS: dict[int, list[tuple[str, dict]]] = {}
-NAV_STACK_LIMIT = 20
-
-
-def reset_nav(user_id: int):
-    NAV_STACKS.pop(user_id, None)
-
-
-def push_nav(user_id: int, route: str, **params):
-    stack = NAV_STACKS.setdefault(user_id, [])
-    if stack and stack[-1][0] == route:
-        return
-    stack.append((route, params))
-    if len(stack) > NAV_STACK_LIMIT:
-        del stack[: len(stack) - NAV_STACK_LIMIT]
-
-
-def pop_nav(user_id: int, fallback: str = "main") -> tuple[str, dict]:
-    stack = NAV_STACKS.get(user_id)
-    if stack:
-        return stack.pop()
-    return fallback, {}
-
 
 async def open_nav_route(
     interaction: discord.Interaction,
