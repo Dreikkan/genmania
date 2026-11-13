@@ -67,3 +67,16 @@ async def main():
 
 def test_smoke():
     asyncio.run(main())
+
+
+def test_checkpoint_failure_is_best_effort():
+    class LockedDB:
+        async def execute(self, sql):
+            raise m.aiosqlite.OperationalError("database table is locked")
+
+    class OkDB:
+        async def execute(self, sql):
+            return None
+
+    assert asyncio.run(m.checkpoint_wal_best_effort(LockedDB())) is False
+    assert asyncio.run(m.checkpoint_wal_best_effort(OkDB())) is True

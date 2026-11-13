@@ -28,8 +28,19 @@
   констант.
 - Убраны дубли `CREATE TABLE`, мёртвые настройки, no-op
   `cap_passive_income` и alias `PRESTIGE_COIN_REQUIREMENT`.
-- CI: матрица Linux/Windows × Python 3.12/3.14, lock-файл,
+- CI: матрица Linux/Windows × Python 3.11/3.12/3.14, lock-файл,
   `pyproject.toml` с конфигом ruff.
+
+### Надёжность
+
+- Бэкап БД больше не падает из-за `PRAGMA wal_checkpoint(FULL)`:
+  checkpoint переведён в best-effort `PASSIVE`, а консистентность
+  обеспечивает SQLite backup API. Временный `database table is locked`
+  больше не отменяет бэкап.
+- Из autoresolved-эмодзи убран отсутствующий `_switch`; кнопки
+  используют штатный 🔀, ложное предупреждение при старте исчезло.
+- CI и Bothost снова официально поддерживают Python 3.11 (продовый
+  рантайм), плюс 3.12 и 3.14.
 
 ### Экономика и UI
 
