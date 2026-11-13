@@ -1778,6 +1778,83 @@ intents = discord.Intents.default()
 # В Discord Developer Portal включите Privileged Intent -> Server Members.
 intents.members = True
 
+
+class InstanceLock:
+    """Не даёт запустить два бота на одной папке data."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._handle = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = None
+        try:
+            handle = open(self.path, "a+", encoding="utf-8")
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(" ")
+                    handle.flush()
+                handle.seek(0)
+                try:
+                    msvcrt.locking(
+                        handle.fileno(), msvcrt.LK_NBLCK, 1
+                    )
+                except OSError:
+                    handle.close()
+                    return False
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(
+                        handle.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                except OSError:
+                    handle.close()
+                    return False
+
+            handle.seek(0)
+            handle.write(f"{os.getpid()}".ljust(32))
+            handle.flush()
+            self._handle = handle
+            return True
+        except OSError:
+            if handle is not None:
+                handle.close()
+            return False
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        handle = self._handle
+        self._handle = None
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                try:
+                    msvcrt.locking(
+                        handle.fileno(), msvcrt.LK_UNLCK, 1
+                    )
+                except OSError:
+                    pass
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            handle.close()
+
+
 class CastleBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
@@ -1788,11 +1865,26 @@ class CastleBot(commands.Bot):
         self.background_tasks = []
         self._closing = False
         self._guild_access_synced = False
+        self._instance_lock = None
+        self.background_restart_delay = 5.0
+        self.background_restart_max = 300.0
 
     async def setup_hook(self):
         # 1. Создаём папку data
         self.data_dir = Path(os.getenv("DATA_DIR", "/app/data"))
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        self._instance_lock = InstanceLock(self.data_dir / "bot.lock")
+        if not self._instance_lock.acquire():
+            log.error(
+                "Уже запущен другой экземпляр бота на %s",
+                self.data_dir,
+            )
+            raise RuntimeError(
+                "Другой экземпляр бота уже использует эту папку data. "
+                "Останови лишний процесс."
+            )
+
         self.backup_dir = self.data_dir / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1830,32 +1922,52 @@ class CastleBot(commands.Bot):
 
         # 4. Запускаем фоновые задачи
         self.background_tasks = [
-            self._spawn_background("auction_closer", self.auction_closer()),
-            self._spawn_background("market_updater", self.market_updater()),
-            self._spawn_background("market_order_closer", self.market_order_closer()),
-            self._spawn_background("status_expirer", self.status_expirer()),
-            self._spawn_background("giveaway_closer", self.giveaway_closer()),
-            self._spawn_background("bank_loan_closer", self.bank_loan_closer()),
-            self._spawn_background("tax_collector", self.tax_collector()),
-            self._spawn_background("autocollector_task", self.autocollector_task()),
-            self._spawn_background("notification_task", self.notification_task()),
-            self._spawn_background("war_closer", self.war_closer()),
-            self._spawn_background("backup_task", self.backup_task()),
-            self._spawn_background("retention_task", self.retention_task()),
-            self._spawn_background("health_writer", self.health_writer()),
+            self._spawn_background("auction_closer", self.auction_closer),
+            self._spawn_background("market_updater", self.market_updater),
+            self._spawn_background(
+                "market_order_closer", self.market_order_closer
+            ),
+            self._spawn_background("status_expirer", self.status_expirer),
+            self._spawn_background("giveaway_closer", self.giveaway_closer),
+            self._spawn_background("bank_loan_closer", self.bank_loan_closer),
+            self._spawn_background("tax_collector", self.tax_collector),
+            self._spawn_background(
+                "autocollector_task", self.autocollector_task
+            ),
+            self._spawn_background(
+                "notification_task", self.notification_task
+            ),
+            self._spawn_background("war_closer", self.war_closer),
+            self._spawn_background("backup_task", self.backup_task),
+            self._spawn_background("retention_task", self.retention_task),
+            self._spawn_background("health_writer", self.health_writer),
         ]
 
-    def _spawn_background(self, name: str, coro) -> asyncio.Task:
-        """Запускает фоновую задачу с именем и учётом ошибок."""
+    def _spawn_background(self, name: str, factory) -> asyncio.Task:
+        """Запускает фоновую задачу и перезапускает её после сбоя."""
 
         async def runner():
-            try:
-                await coro
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                METRICS.record_background_error(name)
-                log.exception("BACKGROUND_TASK: %s", name)
+            delay = self.background_restart_delay
+            while not self._closing:
+                try:
+                    await factory()
+                    if self._closing:
+                        break
+                    log.warning(
+                        "BACKGROUND_TASK: %s завершилась, "
+                        "перезапуск через %.0f с",
+                        name,
+                        delay,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    METRICS.record_background_error(name)
+                    log.exception("BACKGROUND_TASK: %s", name)
+                await asyncio.sleep(delay)
+                delay = min(
+                    delay * 2, self.background_restart_max
+                )
 
         return asyncio.create_task(runner(), name=f"gen_mania:{name}")
 
@@ -2013,6 +2125,7 @@ class CastleBot(commands.Bot):
 
     async def close(self):
         if self._closing:
+            self._release_instance_lock()
             return
         self._closing = True
 
@@ -2022,17 +2135,26 @@ class CastleBot(commands.Bot):
             await asyncio.gather(*self.background_tasks, return_exceptions=True)
         self.background_tasks = []
 
-        if self.db:
-            await self.backup_database("shutdown")
-            try:
-                await self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                await self.db.close()
-            except Exception:
-                log.exception("Ошибка при закрытии БД")
-            finally:
-                self.db = None
+        try:
+            if self.db:
+                await self.backup_database("shutdown")
+                try:
+                    await self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    await self.db.close()
+                except Exception:
+                    log.exception("Ошибка при закрытии БД")
+                finally:
+                    self.db = None
 
-        await super().close()
+            await super().close()
+        finally:
+            self._release_instance_lock()
+
+    def _release_instance_lock(self) -> None:
+        lock = getattr(self, "_instance_lock", None)
+        if lock is not None:
+            lock.release()
+            self._instance_lock = None
 
     async def war_closer(self):
         await self.wait_until_ready()
@@ -7224,7 +7346,7 @@ class GuideSectionView(BaseView):
         self.total_pages = total_pages
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=0,
@@ -7232,7 +7354,7 @@ class GuideSectionView(BaseView):
             prev.callback = self.btn_prev
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=0,
@@ -7459,13 +7581,13 @@ class SeasonPreviewView(BaseView):
         self.return_to = return_to
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=0,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=0,
             )
             nxt.callback = self.next_page
@@ -7839,10 +7961,10 @@ class AdventView(BaseView):
             self.add_item(btn)
 
         if self.total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.btn_prev
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.btn_next
             self.add_item(nxt)
 
@@ -7983,14 +8105,14 @@ class MarketView(BaseView):
         self.total_pages = total_pages
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=3,
                 disabled=page <= 0,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=3,
                 disabled=page >= total_pages - 1,
             )
@@ -8158,7 +8280,7 @@ class OrderBookSelectView(SafeView):
         )
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -8167,7 +8289,7 @@ class OrderBookSelectView(SafeView):
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -8439,13 +8561,13 @@ class MarketHistorySelectView(BaseView):
         self.add_item(make_select("Выбери предмет", options, self.select, row=0))
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=1,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=1,
             )
             nxt.callback = self.next_page
@@ -8612,14 +8734,14 @@ class MarketOrdersView(BaseView):
 
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=3,
                 disabled=page <= 0,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=3,
                 disabled=page >= total_pages - 1,
             )
@@ -8852,7 +8974,7 @@ class MarketMyOrdersView(BaseView):
             self.add_item(make_select("Выбери ордер", options, self.select_order, row=0))
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -8861,7 +8983,7 @@ class MarketMyOrdersView(BaseView):
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -9010,14 +9132,14 @@ class MarketOrderCreateView(BaseView):
             self.add_item(make_select("Выбери предмет", options, self.select_item, row=1))
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=2,
                 disabled=page <= 0,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=2,
                 disabled=page >= total_pages - 1,
             )
@@ -9145,10 +9267,10 @@ class MarketBuySelectView(SafeView):
         self.total_pages = total_pages
         self.add_item(make_select("Выбери предмет", options, self.select, row=0))
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
@@ -9264,10 +9386,10 @@ class MarketSellSelectView(SafeView):
         self.total_pages = total_pages
         self.add_item(make_select("Выбери предмет", options, self.select, row=0))
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
@@ -10430,13 +10552,13 @@ class ClanBrowserView(BaseView):
         self.add_item(search)
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=1,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=1,
             )
             nxt.callback = self.next_page
@@ -10940,14 +11062,14 @@ class ClanMembersView(BaseView):
         self.btn_prev.disabled = page <= 0
         self.btn_next.disabled = page >= total_pages - 1
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
     async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_clan_members(
             interaction, self.author_id, self.clan_id, self.page - 1
         )
 
-    @discord.ui.button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=0)
     async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await open_clan_members(
@@ -11706,8 +11828,8 @@ class ClanBuySelectView(SafeView):
         self.author_id, self.clan_id, self.page, self.total_pages = author_id, clan_id, page, total_pages
         self.add_item(make_select("Выбери предмет", options, self.item_select, row=0))
         if total_pages > 1:
-            p = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1); p.callback = self.prev; self.add_item(p)
-            n = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1); n.callback = self.next; self.add_item(n)
+            p = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1); p.callback = self.prev; self.add_item(p)
+            n = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1); n.callback = self.next; self.add_item(n)
         b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2); b.callback = self.back; self.add_item(b)
     async def interaction_check(self, i):
         return await self.check_owner(i)
@@ -13902,9 +14024,9 @@ class TitlesView(SafeView):
         self.return_to = return_to
         self.add_item(make_select("Выбери титул", options, self.select, row=0))
         if total_pages > 1:
-            p = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            p = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             p.callback = self.prev; self.add_item(p)
-            n = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            n = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             n.callback = self.next; self.add_item(n)
         b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
         b.callback = self.back; self.add_item(b)
@@ -15046,10 +15168,10 @@ class SellSelectView(SafeView):
         self.add_item(make_select("Выбери предмет", options, self.item_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -15921,7 +16043,7 @@ class LockSelectView(SafeView):
         )
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -15930,7 +16052,7 @@ class LockSelectView(SafeView):
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -16175,10 +16297,10 @@ class SwapFirstView(SafeView):
         self.add_item(make_select("Выбери предмет", options, self.first_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -16253,10 +16375,10 @@ class SwapSecondView(SafeView):
         self.add_item(make_select("Выбери слот для обмена", options, self.second_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -16530,14 +16652,14 @@ class StarSelectView(SafeView):
         self.add_item(make_select("Выбери генератор", options, self.item_select, row=0))
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=1,
                 disabled=page <= 0,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=1,
                 disabled=page >= total_pages - 1,
             )
@@ -17144,10 +17266,10 @@ class MoveView(SafeView):
         self.add_item(make_select("Выбери предмет", options, self.item_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -17425,10 +17547,10 @@ class CraftSelectView(SafeView):
         self.add_item(make_select("Выбери предмет для синтеза", options, self.item_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -18620,13 +18742,13 @@ class BankLoanSelectView(BaseView):
         self.add_item(make_select("Выбери залог", options, self.select_item, row=0))
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад", emoji=get_emoji("_back"),
+                label="Стр.", emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary, row=1,
             )
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд", emoji=get_emoji("_forward"),
+                label="Стр.", emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary, row=1,
             )
             nxt.callback = self.next_page
@@ -18795,10 +18917,10 @@ class AuctionSellSelectView(SafeView):
         self.add_item(make_select("Выбери предмет", options, self.select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -19161,7 +19283,7 @@ class AuctionView(BaseView):
 
         if total_pages > 1:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=3,
@@ -19170,7 +19292,7 @@ class AuctionView(BaseView):
             prev.callback = self.prev_page
             self.add_item(prev)
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=3,
@@ -19491,7 +19613,7 @@ class ShopView(BaseView):
         self.add_item(buy)
         
         prev = discord.ui.Button(
-            label="Назад", emoji=get_emoji("_back"),
+            label="Стр.", emoji=get_emoji("_back"),
             style=discord.ButtonStyle.secondary,
             row=1
         )
@@ -19499,7 +19621,7 @@ class ShopView(BaseView):
         self.add_item(prev)
 
         nxt = discord.ui.Button(
-            label="Вперёд", emoji=get_emoji("_forward"),
+            label="Стр.", emoji=get_emoji("_forward"),
             style=discord.ButtonStyle.secondary,
             row=1
         )
@@ -19579,10 +19701,10 @@ class ShopBuySelectView(SafeView):
         self.add_item(make_select("Выбери предмет...", options, self.item_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -19866,7 +19988,7 @@ class UpgradesView(BaseView):
         self.add_item(buy)
         
         prev = discord.ui.Button(
-            label="Назад", emoji=get_emoji("_back"),
+            label="Стр.", emoji=get_emoji("_back"),
             style=discord.ButtonStyle.secondary,
             row=1
         )
@@ -19874,7 +19996,7 @@ class UpgradesView(BaseView):
         self.add_item(prev)
 
         nxt = discord.ui.Button(
-            label="Вперёд", emoji=get_emoji("_forward"),
+            label="Стр.", emoji=get_emoji("_forward"),
             style=discord.ButtonStyle.secondary,
             row=1
         )
@@ -20019,10 +20141,10 @@ class UpgradesBuySelectView(SafeView):
         self.add_item(make_select("Выбери улучшение...", options, self.upgrade_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -20402,10 +20524,10 @@ class CollectionView(BaseView):
         self.total_pages = total_pages
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=0)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=0)
             nxt.callback = self.next_page
             self.add_item(nxt)
 
@@ -20702,10 +20824,10 @@ class AchievementsView(BaseView):
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=0)
         back.callback = self.back
         self.add_item(back)
-        prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+        prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         prev.callback = self.prev_page
         self.add_item(prev)
-        nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+        nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
         nxt.callback = self.next_page
         self.add_item(nxt)
 
@@ -22979,10 +23101,10 @@ class AdminLogsView(AdminView):
         self.page = page
         self.total_pages = total_pages
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary)
             nxt.callback = self.next_page
             self.add_item(nxt)
         back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger)
@@ -24142,7 +24264,7 @@ class ContentItemsView(ContentOwnerView):
             )
         if page > 0:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -24151,7 +24273,7 @@ class ContentItemsView(ContentOwnerView):
             self.add_item(prev)
         if page < total_pages - 1:
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -24438,7 +24560,7 @@ class ContentAchievementsView(ContentOwnerView):
             )
         if page > 0:
             prev = discord.ui.Button(
-                label="Назад",
+                label="Стр.",
                 emoji=get_emoji("_back"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -24447,7 +24569,7 @@ class ContentAchievementsView(ContentOwnerView):
             self.add_item(prev)
         if page < total_pages - 1:
             nxt = discord.ui.Button(
-                label="Вперёд",
+                label="Стр.",
                 emoji=get_emoji("_forward"),
                 style=discord.ButtonStyle.secondary,
                 row=1,
@@ -24917,10 +25039,10 @@ class StarEmojiPaginatedView(AdminView):
         self.add_item(make_select("Выбери генератор", options, self.item_select, row=0))
 
         if total_pages > 1:
-            prev = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
+            prev = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
             prev.callback = self.prev_page
             self.add_item(prev)
-            nxt = discord.ui.Button(label="Вперёд", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
+            nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
 

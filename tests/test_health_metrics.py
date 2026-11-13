@@ -98,8 +98,13 @@ def test_health_snapshot_and_background_errors():
             async def boom():
                 raise RuntimeError("boom")
 
-            task = m.bot._spawn_background("health_test_boom", boom())
-            await task
+            task = m.bot._spawn_background("health_test_boom", boom)
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
             assert (
                 m.METRICS.background_errors_by_task["health_test_boom"]
                 == before + 1
