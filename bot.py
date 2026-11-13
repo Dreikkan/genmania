@@ -1094,7 +1094,7 @@ BOT_BTN_EMOJIS = {
     "_stars":        discord.PartialEmoji(name="stars", id=1566419664903344159),
     "_catalyst":     discord.PartialEmoji(name="catalyst", id=1566419672067481781),
     "_echange":      discord.PartialEmoji(name="swapmoney", id=1566419670154612756),
-    "_switch":       discord.PartialEmoji(name="switch", id=1566288872185401436),
+    "_switch":       "🔀",
     "_reset":        discord.PartialEmoji(name="reset", id=1566487125497614416), # Новое
     
     # Социум и экономика
@@ -1758,6 +1758,21 @@ async def verify_columns(conn, table: str, required: list[str]) -> None:
         )
 
 
+async def checkpoint_wal_best_effort(db) -> bool:
+    """PASSIVE-checkpoint не блокирует БД и не мешает backup API.
+
+    FULL/TRUNCATE могут вернуть "database table is locked", если в этот
+    момент открыт курсор или идёт чтение. Для консистентного бэкапа
+    checkpoint не обязателен: SQLite backup API сам читает WAL.
+    """
+    try:
+        await db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        return True
+    except aiosqlite.Error as exc:
+        log.warning("WAL checkpoint пропущен: %s", exc)
+        return False
+
+
 intents = discord.Intents.default()
 # Нужен для локальных топов, налогов и корректного состава guild.members.
 # В Discord Developer Portal включите Privileged Intent -> Server Members.
@@ -1925,7 +1940,7 @@ class CastleBot(commands.Bot):
             async with _DB_WRITE_LOCK:
                 if self.db.in_transaction:
                     await self.db.commit()
-                await self.db.execute("PRAGMA wal_checkpoint(FULL)")
+                await checkpoint_wal_best_effort(self.db)
 
                 stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", reason)[:24] or "manual"

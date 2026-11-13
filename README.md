@@ -51,12 +51,12 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
 - `dev/` — локальный dev-стенд: запуск отдельного тестового бота с
   изолированной папкой `data`, проверка токена, БД и live-smoke.
 - `CHANGELOG.md` — краткая история изменений.
-- `.github/workflows/ci.yml` — матрица Linux/Windows, Python 3.12/3.14,
+- `.github/workflows/ci.yml` — матрица Linux/Windows, Python 3.11/3.12/3.14,
   pytest с branch coverage, ruff, mypy, bandit и pip-audit.
 
 ## Требования
 
-- Python **3.12+** (проверялось на 3.14).
+- Python **3.11+** (проверялось на 3.11, 3.12 и 3.14).
 - `discord.py>=2.4`
 - `aiosqlite>=0.20`
 - Для воспроизводимых сборок используйте `requirements.lock`.
