@@ -6561,6 +6561,8 @@ class NotificationCenterView(BaseView):
 class AdminView(BaseView):
     """BaseView с повторной проверкой админ-прав на каждом callback."""
 
+    owner_only = True
+
     def __init__(self, author_id: int | None = None, timeout: int = 600):
         SafeView.__init__(self, timeout=timeout)
         if author_id is not None:
@@ -6572,6 +6574,13 @@ class AdminView(BaseView):
         if not await has_admin_access(interaction):
             await interaction.response.send_message(
                 "❌ У тебя нет доступа к админ-панели.", ephemeral=True
+            )
+            return False
+        if self.owner_only and not await is_global_owner(interaction):
+            await interaction.response.send_message(
+                "❌ Глобальные админ-функции доступны только "
+                "владельцу бота.",
+                ephemeral=True,
             )
             return False
         return True
@@ -9782,6 +9791,7 @@ class AdminGiveawaysView(AdminView):
     """Создание розыгрышей сервера из админ-панели."""
 
     feature_key = "giveaways"
+    owner_only = False
 
     def __init__(self, author_id: int, timeout: int = 300):
         super().__init__(author_id, timeout)
@@ -20681,6 +20691,8 @@ class AchievementsView(BaseView):
 
 class LocalAdminView(AdminView):
     """Минимальная панель локального админа: только серверные розыгрыши."""
+
+    owner_only = False
 
     def __init__(self, author_id: int, timeout: int = 600):
         super().__init__(author_id, timeout)
