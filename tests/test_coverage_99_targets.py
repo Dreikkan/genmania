@@ -1331,7 +1331,7 @@ def test_last_bot_branches(tmp_path):
             async def cancelled():
                 raise asyncio.CancelledError
 
-            task = m.bot._spawn_background("cancelled", cancelled())
+            task = m.bot._spawn_background("cancelled", cancelled)
             try:
                 await task
             except asyncio.CancelledError:

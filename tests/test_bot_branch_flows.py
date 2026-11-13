@@ -107,9 +107,8 @@ def test_setup_hook_initializes_runtime():
 
         spawned = []
 
-        def spawn(name, coro):
+        def spawn(name, factory):
             spawned.append(name)
-            coro.close()
             return SimpleNamespace(name=name)
 
         bot._spawn_background = spawn
@@ -120,6 +119,7 @@ def test_setup_hook_initializes_runtime():
             assert bot.db is not None
             assert len(spawned) == 13
         finally:
+            bot._release_instance_lock()
             if old is None:
                 os.environ.pop("DATA_DIR", None)
             else:
