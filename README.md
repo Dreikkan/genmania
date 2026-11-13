@@ -13,6 +13,7 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
   `runtime.py` (single-instance lock и WAL-checkpoint),
   `navigation.py` (стек навигации пользователя),
   `economy.py` (офлайн-доход и его лимиты),
+  `admin_guard.py` (owner-only guard админ-модалок),
   `metrics.py` (in-process метрики), `db/transaction.py`
   (managed SQLite-транзакции), `repositories/audit.py`
   (журнал админ-действий), `repositories/settings.py`
