@@ -9,6 +9,8 @@ Discord-бот **Gen Mania** — incremental idle/management игра: гене�
 - `bot.py` — основной монолит бота (discord.py 2.x + aiosqlite).
 - `gen_mania/` — вынесенные модули: `config.py` (runtime-константы),
   `formatting.py` (короткие числа и русская плюрализация),
+  `game_data.py` (первые шаги, квесты, дейли и сезонный XP),
+  `runtime.py` (single-instance lock и WAL-checkpoint),
   `metrics.py` (in-process метрики), `db/transaction.py`
   (managed SQLite-транзакции), `repositories/audit.py`
   (журнал админ-действий), `repositories/settings.py`

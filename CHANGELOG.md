@@ -15,6 +15,8 @@
 - Добавлен `dev/economy_report.py`: read-only отчёт по монетам, гемам,
   вкладам, кредитам, бирже, аукционам, налогам, кланам, сезону и
   автосборщикам.
+- P3: игровые данные вынесены в `gen_mania/game_data.py`, а
+  single-instance lock и WAL-checkpoint — в `gen_mania/runtime.py`.
 
 ## 2026-11-13
 
