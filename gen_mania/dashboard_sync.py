@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -892,8 +893,11 @@ class DashboardSync:
             "User-Agent": "GenManiaBot/1.0",
             "X-Ingest-Token": self.token,
         }
-        timeout = aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
+        connector = aiohttp.TCPConnector(family=socket.AF_INET)
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
             async with session.post(
                 self.url, json=payload, headers=headers
             ) as response:

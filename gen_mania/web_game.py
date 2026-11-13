@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import time
 from typing import Any, Awaitable, Callable
 
@@ -70,8 +71,12 @@ class WebGameBridge:
             "User-Agent": "GenManiaBot/1.0",
             "X-Game-Token": self.token,
         }
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
+        connector = aiohttp.TCPConnector(family=socket.AF_INET)
+        failures = 0
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=connector
+        ) as session:
             while not self.bot.is_closed():
                 started = time.monotonic()
                 try:
@@ -93,10 +98,33 @@ class WebGameBridge:
                         if not isinstance(command, dict) or not command.get("id"):
                             continue
                         await self._execute(session, command, headers)
+                    failures = 0
                 except asyncio.CancelledError:
                     raise
+                except (asyncio.TimeoutError, aiohttp.ClientError) as exception:
+                    failures += 1
+                    if failures <= 3 or failures % 12 == 0:
+                        log.warning(
+                            "WEB_GAME: сеть недоступна (%s), повторов: %s",
+                            exception.__class__.__name__,
+                            failures,
+                        )
+                    delay = max(self.interval, min(30, self.interval * failures))
+                    await asyncio.sleep(delay)
+                    continue
+                except RuntimeError as exception:
+                    failures += 1
+                    if failures <= 3 or failures % 12 == 0:
+                        log.warning("WEB_GAME: %s", exception)
+                    delay = max(self.interval, min(30, self.interval * failures))
+                    await asyncio.sleep(delay)
+                    continue
                 except Exception:
+                    failures += 1
                     log.exception("WEB_GAME: ошибка опроса команд")
+                    delay = max(self.interval, min(30, self.interval * failures))
+                    await asyncio.sleep(delay)
+                    continue
 
                 elapsed = time.monotonic() - started
                 await asyncio.sleep(max(0.5, self.interval - elapsed))
