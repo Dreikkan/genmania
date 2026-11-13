@@ -96,10 +96,22 @@ def plural_ru(value, one: str, few: str, many: str) -> str:
     return many
 
 
+def format_cooldown(seconds: int) -> str:
+    """Короткий формат кулдауна: 30 -> 1 мин., 3600 -> 1 ч 0 мин."""
+    if seconds <= 0:
+        return "готово"
+    minutes = (seconds + 59) // 60
+    if minutes < 60:
+        return f"{minutes} мин."
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} ч {rest} мин."
+
+
 __all__ = [
     "SHORT_NUMBER_SUFFIXES",
     "format_short_number",
     "format_content_number",
     "format_content_input",
     "plural_ru",
+    "format_cooldown",
 ]

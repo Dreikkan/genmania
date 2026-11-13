@@ -18,6 +18,8 @@
 - P3: игровые данные вынесены в `gen_mania/game_data.py`, а
   single-instance lock и WAL-checkpoint — в `gen_mania/runtime.py`.
 - P3: стек навигации вынесен в `gen_mania/navigation.py`.
+- P3: офлайн-лимиты вынесены в `gen_mania/economy.py`, а
+  `format_cooldown` — в `gen_mania/formatting.py`.
 - Все глобальные админ-вью теперь owner-only по умолчанию; локальным
   админам оставлены только `LocalAdminView` и серверные розыгрыши.
 

@@ -61,7 +61,15 @@ from gen_mania.repositories.settings import (
     SettingsRuntime,
     make_settings_layer,
 )
-from gen_mania.formatting import format_short_number, plural_ru
+from gen_mania.economy import (
+    OFFLINE_MAX_HOURS,
+    effective_offline_seconds,
+)
+from gen_mania.formatting import (
+    format_cooldown,
+    format_short_number,
+    plural_ru,
+)
 from gen_mania.runtime import InstanceLock, checkpoint_wal_best_effort
 from gen_mania.game_data import (
     DAILY_REWARDS,
@@ -368,20 +376,6 @@ def generator_price_income(index: int) -> tuple[float, float]:
             price *= GENERATOR_LATE_PRICE_MULT
             income *= GENERATOR_LATE_INCOME_MULT
     return price, income
-
-
-OFFLINE_MAX_HOURS = 24
-OFFLINE_PENALTY_START_HOURS = 2
-OFFLINE_PENALTY_RATE = 0.7
-
-
-def effective_offline_seconds(seconds: float) -> float:
-    """Эффективные секунды накопления с потолком и офлайн-штрафом."""
-    capped = max(0.0, min(float(seconds), OFFLINE_MAX_HOURS * 3600))
-    start = OFFLINE_PENALTY_START_HOURS * 3600
-    if capped <= start:
-        return capped
-    return start + (capped - start) * OFFLINE_PENALTY_RATE
 
 
 # --- ПРЕСТИЖ ---
@@ -12656,16 +12650,6 @@ async def open_duel_setup(interaction: discord.Interaction, author_id: int):
     await interaction.edit_original_response(
         embed=embed, view=DuelTargetSelectView(author_id)
     )
-
-
-def format_cooldown(seconds: int) -> str:
-    if seconds <= 0:
-        return "готово"
-    minutes = (seconds + 59) // 60
-    if minutes < 60:
-        return f"{minutes} мин."
-    hours, rest = divmod(minutes, 60)
-    return f"{hours} ч {rest} мин."
 
 
 async def build_pvp_hub_embed(user_id: int) -> discord.Embed:
