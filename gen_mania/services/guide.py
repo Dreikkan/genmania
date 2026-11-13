@@ -75,6 +75,7 @@ def make_guide_layer(runtime: GuideRuntime):
     async def _guide_section_data(key: str) -> tuple[str, str]:
         config = runtime.constants
         AUCTION_ANTI_SNIPE_SECONDS = config["AUCTION_ANTI_SNIPE_SECONDS"]
+        ACHIEVEMENT_COUNT = config["ACHIEVEMENT_COUNT"]
         AUTOCOLLECT_LEVELS = config["AUTOCOLLECT_LEVELS"]
         AUTOCOLLECT_PRICE_GEMS = config["AUTOCOLLECT_PRICE_GEMS"]
         BANK_DAILY_RATE = config["BANK_DAILY_RATE"]
@@ -130,6 +131,9 @@ def make_guide_layer(runtime: GuideRuntime):
         PET_FEED_COST_GEMS = config["PET_FEED_COST_GEMS"]
         PET_MAX_LEVEL = config["PET_MAX_LEVEL"]
         PET_TYPES = config["PET_TYPES"]
+        PET_COUNT = config["PET_COUNT"]
+        TITLE_COUNT = config["TITLE_COUNT"]
+        TOP_COUNT = config["TOP_COUNT"]
         PRESTIGE_BASE_REQUIREMENT = config["PRESTIGE_BASE_REQUIREMENT"]
         PRESTIGE_BONUS_CAP = config["PRESTIGE_BONUS_CAP"]
         PRESTIGE_BONUS_PER_POINT = config["PRESTIGE_BONUS_PER_POINT"]
@@ -329,7 +333,7 @@ def make_guide_layer(runtime: GuideRuntime):
             ),
             "pets": (
                 "🐾 Питомцы",
-                "**5 видов (эффект за уровень):**\n"
+                f"**{PET_COUNT} видов (эффект за уровень):**\n"
                 + "\n".join(pet_lines)
                 + "\n\n"
                 f"**Soft cap:** после 10 ур. прямой рост останавливается. "
@@ -352,7 +356,7 @@ def make_guide_layer(runtime: GuideRuntime):
             ),
             "titles": (
                 "🏅 Титулы",
-                "**21 титул**, почти каждый даёт **+1–3%** к доходу/синтезу/мощи/рейдам. "
+                f"**{TITLE_COUNT} титул**, почти каждый даёт **+1–3%** к доходу/синтезу/мощи/рейдам. "
                 "Активен только один титул.\n\n"
                 "**Примеры:**\n"
                 "«Новичок» — всем.\n"
@@ -519,7 +523,7 @@ def make_guide_layer(runtime: GuideRuntime):
             ),
             "achievements": (
                 "🏆 Достижения",
-                "**14 штук:** за синтезы, звёзды, гемы, монеты, катализаторы, рейды.\n\n"
+                f"**{ACHIEVEMENT_COUNT} штук:** за синтезы, звёзды, гемы, монеты, катализаторы, рейды.\n\n"
                 "**Награда:** гемы; растёт с престижем (до ×3).\n\n"
                 "**Примеры:**\n"
                 "«Первый синтез» — +5 💎.\n"
@@ -563,7 +567,7 @@ def make_guide_layer(runtime: GuideRuntime):
             ),
             "tops": (
                 "📊 Топы",
-                "**9 типов:** монеты, гемы, мощь, синтезы, питомцы, кланы, престиж, коллекция, дуэли.\n\n"
+                f"**{TOP_COUNT} типов:** монеты, гемы, мощь, синтезы, питомцы, кланы, престиж, коллекция, дуэли.\n\n"
                 "**Режимы:** глобальный (все серверы) и локальный (только этот сервер).\n\n"
                 "**Размер:** 10 / 20 / 30.\n\n"
                 "**Кэш:** 5 минут (обновляется по кнопке «Обновить»).\n\n"

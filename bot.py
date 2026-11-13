@@ -1227,6 +1227,8 @@ STORY_QUESTS = {
 }
 
 # Титулы: id -> (название, требование для открытия)
+ACHIEVEMENTS_COUNT = 14
+
 TITLES = {
     "novice": ("Новичок", "Доступен всем"),
     "builder": ("Строитель", "Купи 10 генераторов"),
@@ -4532,6 +4534,7 @@ GUIDE_RUNTIME.configure(
     season_xp_getter=lambda: season_expected_daily_xp,
     constants={
         "AUCTION_ANTI_SNIPE_SECONDS": AUCTION_ANTI_SNIPE_SECONDS,
+        "ACHIEVEMENT_COUNT": ACHIEVEMENTS_COUNT,
         "AUTOCOLLECT_LEVELS": AUTOCOLLECT_LEVELS,
         "AUTOCOLLECT_PRICE_GEMS": AUTOCOLLECT_PRICE_GEMS,
         "BANK_DAILY_RATE": BANK_DAILY_RATE,
@@ -4581,6 +4584,9 @@ GUIDE_RUNTIME.configure(
         "PET_FEED_COST_GEMS": PET_FEED_COST_GEMS,
         "PET_MAX_LEVEL": PET_MAX_LEVEL,
         "PET_TYPES": PET_TYPES,
+        "PET_COUNT": len(PET_TYPES),
+        "TITLE_COUNT": len(TITLES),
+        "TOP_COUNT": len(TOP_TYPES),
         "PRESTIGE_BASE_REQUIREMENT": PRESTIGE_BASE_REQUIREMENT,
         "PRESTIGE_BONUS_CAP": PRESTIGE_BONUS_CAP,
         "PRESTIGE_BONUS_PER_POINT": PRESTIGE_BONUS_PER_POINT,
@@ -6686,6 +6692,35 @@ class SafeView(discord.ui.View):
             )
             home.callback = self._home_callback
             self.add_item(home)
+        self._schedule_navigation_state()
+
+    def _schedule_navigation_state(self) -> None:
+        """Обновляет disabled у «Стр.» после инициализации подкласса."""
+        try:
+            asyncio.get_running_loop().call_soon(
+                self.apply_navigation_state
+            )
+        except RuntimeError:
+            # View создаётся вне event loop (например, в unit-тесте).
+            pass
+
+    def apply_navigation_state(self) -> None:
+        page = getattr(self, "page", None)
+        total_pages = getattr(self, "total_pages", None)
+        if page is None or total_pages is None:
+            return
+        for item in self.children:
+            if not isinstance(item, discord.ui.Button):
+                continue
+            if item.label != "Стр.":
+                continue
+            callback_name = getattr(
+                getattr(item, "callback", None), "__name__", ""
+            ).lower()
+            if "prev" in callback_name:
+                item.disabled = page <= 0
+            elif "next" in callback_name:
+                item.disabled = page >= total_pages - 1
 
     async def _home_callback(self, interaction: discord.Interaction):
         await self.back_to_home(interaction)
@@ -6703,6 +6738,7 @@ class SafeView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Запоминаем сообщение, чтобы on_timeout мог его отредактировать.
         self.message = interaction.message
+        self.apply_navigation_state()
         _CURRENT_GUILD_ID.set(getattr(interaction, "guild_id", None))
         _CURRENT_ACTOR_ID.set(interaction.user.id)
         feature_key = getattr(self, "feature_key", None)
@@ -7187,8 +7223,8 @@ GUIDE_SECTIONS = {
     "collection": ("Коллекция", "Открытые генераторы и бонус к доходу"),
     "generators": ("Генераторы", "Покупка, синтез, звёзды, продажа, хранилище"),
     "sets": ("Сеты", "Синергии, соседство, этажи"),
-    "pets": ("Питомцы", "5 видов, кормление, уровни, бонусы"),
-    "titles": ("Титулы", "21 титул, условия, бонусы"),
+    "pets": (f"Питомцы", f"{len(PET_TYPES)} видов, кормление, уровни, бонусы"),
+    "titles": (f"Титулы", f"{len(TITLES)} титул, условия, бонусы"),
     "clans": ("Кланы", "Создание, роли, войны, сундук, квесты"),
     "pvp": ("PvP", "Рейды, дуэли, мощь, лимиты"),
     "power": ("Мощь", "Формула, генераторы, звёзды, бонусы"),
@@ -7197,11 +7233,11 @@ GUIDE_SECTIONS = {
     "quests": ("Квесты", "Сюжетные (10 глав), ежедневные задания"),
     "season": ("Сезон", "Battle pass, 30 уровней, XP, премиум"),
     "daily": ("Дейли и праздники", "30-дневный стрик, праздничные календари"),
-    "achievements": ("Достижения", "14 штук, награды гемами"),
+    "achievements": ("Достижения", f"{ACHIEVEMENTS_COUNT} штук, награды гемами"),
     "cosmetics": ("Кастомизация", "Цвет, фон, иконка, титулы"),
     "autocollector": ("Автосборщик", "Покупка, уровни, автодоход"),
     "notifications": ("Уведомления", "5 типов, настройка в ЛС"),
-    "tops": ("Топы", "9 типов, 10/20/30 мест"),
+    "tops": ("Топы", f"{len(TOP_TYPES)} типов, 10/20/30 мест"),
     "glossary": ("Глоссарий", "Термины игры простыми словами"),
     "analytics": ("Аналитика", "Личная статистика"),
 }
@@ -15004,7 +15040,9 @@ class MassTempMoveConfirmView(BaseView):
         target_text = "хранилище" if target == "storage" else "энергостанцию"
         if moved:
             description = (
-                f"✅ Перемещено **{moved}** предметов в {target_text}."
+                f"✅ Перемещено **{moved}** "
+                f"{plural_ru(moved, 'предмет', 'предмета', 'предметов')} "
+                f"в {target_text}."
             )
             if remaining:
                 description += (
@@ -15086,7 +15124,8 @@ class TempStorageView(BaseView):
         embed = BotEmbed(
             title="📦 Массовое перемещение",
             description=(
-                f"Во временном хранилище: **{count}** предметов.\n"
+                f"Во временном хранилище: **{count}** "
+                f"{plural_ru(count, 'предмет', 'предмета', 'предметов')}.\n"
                 "Куда переместить всё, что поместится?"
             ),
             color=0x3498db,
@@ -15446,7 +15485,9 @@ async def perform_bulk_sell(
     await check_achievements(user_id)
     return (
         True,
-        f"✅ Продано **{sold_count}** шт. за 🪙 **{format_price(total)}**.",
+        f"✅ Продано **{sold_count}** "
+        f"{plural_ru(sold_count, 'штука', 'штуки', 'штук')} "
+        f"за 🪙 **{format_price(total)}**.",
         sold_count,
         total,
     )
@@ -15467,7 +15508,9 @@ async def open_bulk_sell_view(
     for mode, label in BULK_SELL_LABELS.items():
         data = summary[mode]
         value = (
-            f"**{data['count']}** шт. · 🪙 **{format_price(data['total'])}**"
+            f"**{data['count']}** "
+            f"{plural_ru(data['count'], 'штука', 'штуки', 'штук')} · "
+            f"🪙 **{format_price(data['total'])}**"
             if data["count"]
             else "нет предметов"
         )
@@ -15497,7 +15540,8 @@ async def open_bulk_sell_confirm(
         title="🧹 Подтверждение быстрой продажи",
         description=(
             f"Категория: **{BULK_SELL_LABELS[mode]}**\n"
-            f"Будет продано: **{data['count']}** шт.\n"
+            f"Будет продано: **{data['count']}** "
+            f"{plural_ru(data['count'], 'штука', 'штуки', 'штук')}\n"
             f"Ты получишь: 🪙 **{format_price(data['total'])}**\n\n"
             "Продать эти предметы?"
         ),
