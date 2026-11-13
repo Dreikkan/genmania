@@ -173,6 +173,7 @@ def make_storage_ui_layer(runtime: StorageUiRuntime):
             )
 
         visible_items = {}
+        last_used_slot = -1
         for (
             slot,
             item_id,
@@ -187,16 +188,25 @@ def make_storage_ui_layer(runtime: StorageUiRuntime):
                 item_id, stars, emoji
             )
             visible_items[slot] = emoji
-        for start in range(0, grid_size, width):
-            row_items = [
-                visible_items.get(slot, "⬛")
-                for slot in range(
-                    start, min(start + width, grid_size)
-                )
-            ]
-            embed.add_field(
-                name="\u200b", value="  ".join(row_items), inline=False
+            last_used_slot = max(last_used_slot, slot)
+
+        # Показываем только ряды до последнего занятого слота,
+        # чтобы пустое хранилище не растягивалось на весь экран.
+        if last_used_slot >= 0:
+            rows_to_render = min(
+                grid_size,
+                ((last_used_slot // width) + 1) * width,
             )
+            for start in range(0, rows_to_render, width):
+                row_items = [
+                    visible_items.get(slot, "⬛")
+                    for slot in range(
+                        start, min(start + width, grid_size)
+                    )
+                ]
+                embed.add_field(
+                    name="\u200b", value="  ".join(row_items), inline=False
+                )
         return await runtime.fix_emojis(embed)
 
     async def build_temp_storage_embed(interaction):
@@ -217,12 +227,14 @@ def make_storage_ui_layer(runtime: StorageUiRuntime):
             rows = await c.fetchall()
 
         items = {}
+        last_used_slot = -1
         for slot, item_id, default_emoji, stars in rows:
             emoji = custom.get(item_id, default_emoji)
             emoji = await runtime.get_star_emoji(
                 item_id, stars, emoji
             )
             items[slot] = emoji
+            last_used_slot = max(last_used_slot, slot)
 
         width = 10
         embed = runtime.embed(
@@ -239,14 +251,25 @@ def make_storage_ui_layer(runtime: StorageUiRuntime):
             ),
             color=0x808080,
         )
-        for start in range(0, runtime.temp_storage_size, width):
-            row_items = [
-                items.get(slot, "⬛")
-                for slot in range(start, start + width)
-            ]
-            embed.add_field(
-                name="\u200b", value="  ".join(row_items), inline=False
+        if last_used_slot >= 0:
+            rows_to_render = min(
+                runtime.temp_storage_size,
+                ((last_used_slot // width) + 1) * width,
             )
+            for start in range(0, rows_to_render, width):
+                row_items = [
+                    items.get(slot, "⬛")
+                    for slot in range(
+                        start,
+                        min(
+                            start + width,
+                            runtime.temp_storage_size,
+                        ),
+                    )
+                ]
+                embed.add_field(
+                    name="\u200b", value="  ".join(row_items), inline=False
+                )
         return await runtime.fix_emojis(embed)
 
     return build_storage_embed, build_temp_storage_embed
