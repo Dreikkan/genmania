@@ -6408,7 +6408,14 @@ async def build_main_embed(interaction: discord.Interaction) -> discord.Embed:
         inline=False,
     )
     embed.add_field(name="Бонус", value=f"+{total_pct}%", inline=True)
-    embed.add_field(name="Сетка", value=f"{grid_size} слотов", inline=True)
+    embed.add_field(
+        name="Сетка",
+        value=(
+            f"{grid_size} "
+            f"{plural_ru(grid_size, 'слот', 'слота', 'слотов')}"
+        ),
+        inline=True,
+    )
     season_value = (
         f"Ур. **{season['level']}/{SEASON_LEVELS}** · {season['days_left']} дн."
         if settings.get("battlepass_enabled", True)
@@ -6453,7 +6460,10 @@ async def build_clan_upgrades_embed(clan_id: int) -> discord.Embed:
     )
     embed.add_field(
         name="Состав",
-        value=f"**{members}/{capacity}** участников",
+        value=(
+            f"**{members}/{capacity}** "
+            f"{plural_ru(members, 'участник', 'участника', 'участников')}"
+        ),
         inline=True,
     )
     embed.add_field(
@@ -6602,7 +6612,8 @@ async def build_daily_embed(interaction: discord.Interaction) -> discord.Embed:
     embed = BotEmbed(
         title="📅 Ежедневный вход",
         description=(
-            f"🔥 Стрик: **{streak}** / 30 дней\n"
+            f"🔥 Стрик: **{streak}** / 30 "
+            f"{plural_ru(30, 'день', 'дня', 'дней')}\n"
             f"Награда за день **{next_day}**:\n"
             f"🪙 {display_coins} | 💎 {display_gems}"
             + (f" | 🎁 {item_id}" if item_id else "")
@@ -7184,7 +7195,8 @@ class MainMenuView(BaseView):
                 "🪙 выше 2M → 15 000 монет = 1 гем\n\n"
                 f"💎 1 гем → 🪙 {GEMS_PER_COIN_RATE} монет\n"
                 f"Комиссия: **{int(EXCHANGE_FEE_RATE * 100)}%**\n"
-                f"Дневной лимит: **{EXCHANGE_DAILY_GEM_CAP} гемов**.\n\n"
+                f"Дневной лимит: **{EXCHANGE_DAILY_GEM_CAP}** "
+                f"{plural_ru(EXCHANGE_DAILY_GEM_CAP, 'гем', 'гема', 'гемов')}.\n\n"
                 "Выбери направление:"
             ),
             color=0x3498db,
@@ -12006,7 +12018,12 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
             row = await c.fetchone()
         coins = row[0] if row else 0
         if coins < cost:
-            return await interaction.followup.send(f"❌ Нужно {cost} монет для создания клана.", ephemeral=True)
+            return await interaction.followup.send(
+                f"❌ Нужно {cost} "
+                f"{plural_ru(cost, 'монета', 'монеты', 'монет')} "
+                "для создания клана.",
+                ephemeral=True,
+            )
 
         # Проверка, что не в клане
         existing = await get_clan(self.author_id)
@@ -12029,7 +12046,11 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
                     (cost, self.author_id, cost),
                 )
                 if cur.rowcount == 0:
-                    raise ValueError(f"Нужно {cost} монет для создания клана.")
+                    raise ValueError(
+                        f"Нужно {cost} "
+                        f"{plural_ru(cost, 'монета', 'монеты', 'монет')} "
+                        "для создания клана."
+                    )
                 cursor = await bot.db.execute(
                     "INSERT INTO clans (name, leader_id, treasury) "
                     "VALUES (?, ?, 0)",
@@ -12042,7 +12063,9 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
                     (self.author_id, clan_id),
                 )
             await interaction.followup.send(
-                f"✅ Клан **{clan_name}** создан за {cost} монет!", ephemeral=True
+                f"✅ Клан **{clan_name}** создан за {cost} "
+                f"{plural_ru(cost, 'монету', 'монеты', 'монет')}!",
+                ephemeral=True,
             )
             await update_story_quests(self.author_id, "clan_join", 1)
         except ValueError as e:
@@ -12659,7 +12682,8 @@ async def create_duel_challenge(
             minutes = max(1, int(cooldown // 60) + 1)
             who = "У тебя" if uid == author_id else "У противника"
             return await interaction.followup.send(
-                f"❌ {who} ещё кулдаун дуэли (~{minutes} мин.).",
+                f"❌ {who} ещё кулдаун дуэли (~{minutes} "
+                f"{plural_ru(minutes, 'минута', 'минуты', 'минут')}).",
                 ephemeral=True,
             )
 
@@ -12699,7 +12723,9 @@ async def create_duel_challenge(
             f"Ставка: 🪙 **{bet}**\n"
             f"Режим: **{mode}**\n"
             f"Лимит: {int(DUEL_MAX_BET_PCT * 100)}% баланса, "
-            f"КД после дуэли {DUEL_COOLDOWN_SECONDS // 60} мин.\n\n"
+            f"КД после дуэли "
+            f"{DUEL_COOLDOWN_SECONDS // 60} "
+            f"{plural_ru(DUEL_COOLDOWN_SECONDS // 60, 'минута', 'минуты', 'минут')}.\n\n"
             f"<@{target}>, у тебя есть 2 минуты, чтобы принять вызов."
         ),
         color=0xf1c40f,
@@ -12932,7 +12958,9 @@ async def open_duel_setup(interaction: discord.Interaction, author_id: int):
         description=(
             "Выбери противника в списке, затем укажи ставку и режим.\n\n"
             f"Ставка — не больше {int(DUEL_MAX_BET_PCT * 100)}% баланса, "
-            f"КД после дуэли {DUEL_COOLDOWN_SECONDS // 60} мин."
+            f"КД после дуэли "
+            f"{DUEL_COOLDOWN_SECONDS // 60} "
+            f"{plural_ru(DUEL_COOLDOWN_SECONDS // 60, 'минута', 'минуты', 'минут')}."
         ),
         color=0xf1c40f,
     )
@@ -13980,7 +14008,10 @@ async def open_pets_shop(
             emoji_obj = "🐾" # Фолбэк, если что-то пошло не так
 
         options.append(discord.SelectOption(
-            label=f"{pt['name']} — {pt['price_gems']} гемов",
+            label=(
+                f"{pt['name']} — {pt['price_gems']} "
+                f"{plural_ru(pt['price_gems'], 'гем', 'гема', 'гемов')}"
+            )[:100],
             value=pid, 
             description=pt["desc"][:100],
             emoji=emoji_obj
@@ -14564,7 +14595,9 @@ class CoinsToGemsModal(discord.ui.Modal, title="Обмен монет на ге�
         if capped:
             msg += (
                 f"\n⚠️ Дневной лимит: "
-                f"**{EXCHANGE_DAILY_GEM_CAP} гемов/день**."
+                f"**{EXCHANGE_DAILY_GEM_CAP}** "
+                f"{plural_ru(EXCHANGE_DAILY_GEM_CAP, 'гем', 'гема', 'гемов')}"
+                "/день."
             )
         if remainder > 0:
             msg += f"\n⚠️ Остаток 🪙 {remainder} не обменян."
@@ -15735,7 +15768,12 @@ async def mass_lock_location(
     except Exception as e:
         return False, f"❌ Не удалось изменить блокировки: {e}", 0
     action = "заблокировано" if lock_value else "разблокировано"
-    return True, f"✅ {action.capitalize()} **{len(visible)}** предметов.", len(visible)
+    return (
+        True,
+        f"✅ {action.capitalize()} **{len(visible)}** "
+        f"{plural_ru(len(visible), 'предмет', 'предмета', 'предметов')}.",
+        len(visible),
+    )
 
 
 async def mass_lock_profile(
@@ -15811,7 +15849,9 @@ async def mass_move_zero_star(
     target_text = "в хранилище" if target == "storage" else "на энергостанцию"
     return (
         True,
-        f"✅ Перенесено **{len(items)}** генераторов {target_text}.",
+        f"✅ Перенесено **{len(items)}** "
+        f"{plural_ru(len(items), 'генератор', 'генератора', 'генераторов')} "
+        f"{target_text}.",
         len(items),
     )
 

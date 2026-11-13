@@ -4,6 +4,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from ..formatting import plural_ru
+
 
 def _format_percent(value: float) -> str:
     text = f"{value * 100:.1f}"
@@ -246,7 +248,9 @@ def make_guide_layer(runtime: GuideRuntime):
                 f"(или {BANK_LOAN_INCOME_HOURS} ч дохода) под залог генератора, "
                 f"до {int(BANK_LOAN_LTV * 100)}% его стоимости, "
                 f"переплата {int(BANK_LOAN_INTEREST * 100)}% за "
-                f"{BANK_LOAN_TERM_DAYS} дней. При просрочке залог теряется.\n\n"
+                f"{BANK_LOAN_TERM_DAYS} "
+                f"{plural_ru(BANK_LOAN_TERM_DAYS, 'день', 'дня', 'дней')}. "
+                "При просрочке залог теряется.\n\n"
                 f"**Налоги:** {int(DEFAULT_TAX_RATE * 100)}% в сутки от баланса монет "
                 "(значение задаётся в настройках гильдии). Вклады не облагаются.\n\n"
                 "**Продажа:** прямая продажа — 10% цены; быстрая продажа 0★ — "

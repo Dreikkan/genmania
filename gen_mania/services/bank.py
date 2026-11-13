@@ -5,6 +5,8 @@ import datetime
 import logging
 from typing import Any, Callable
 
+from ..formatting import plural_ru
+
 
 class BankRuntime:
     """Адаптер между bot.py и банковским сервисом."""
@@ -288,7 +290,8 @@ def make_bank_layer(runtime: BankRuntime):
                 f"Кредит: до **{int(runtime.ltv * 100)}%** "
                 f"стоимости залога, переплата "
                 f"**{int(runtime.loan_interest * 100)}%** за "
-                f"{runtime.loan_term_days} дней."
+                f"{runtime.loan_term_days} "
+                f"{plural_ru(runtime.loan_term_days, 'день', 'дня', 'дней')}."
             ),
             color=0x2ECC71,
         )
@@ -336,7 +339,8 @@ def make_bank_layer(runtime: BankRuntime):
                     f"Сумма: {runtime.coin} "
                     f"**{runtime.format_price(amount)}**\n"
                     f"Срок: до `{end_dt.strftime('%d.%m %H:%M')}` "
-                    f"({days:.0f} дн.)\n{value_line}"
+                    f"({days:.0f} "
+                    f"{plural_ru(days, 'день', 'дня', 'дней')})\n{value_line}"
                 ),
                 inline=False,
             )
