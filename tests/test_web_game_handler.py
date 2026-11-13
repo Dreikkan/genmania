@@ -93,6 +93,21 @@ def test_web_game_state_collect_and_admin():
             assert state["player"]["is_admin"] is True
             assert len(state["guilds"]) == 1
 
+            await db.execute(
+                "INSERT INTO items (id, name, price, income_per_hour, "
+                "income_gems_per_hour, rarity) VALUES "
+                "('gen_test', 'Тестовый генератор', 1000, 3600, 0, 'common')"
+            )
+            await db.execute(
+                "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+                "VALUES (1, 1, 'gen_test', 'profile', 0)"
+            )
+            await db.execute(
+                "UPDATE players SET last_collected = datetime('now', '-1 hour') "
+                "WHERE user_id = 1"
+            )
+            await db.commit()
+
             collected = await m.bot.handle_web_game_command(
                 {
                     "id": "c1",
@@ -103,6 +118,7 @@ def test_web_game_state_collect_and_admin():
                 }
             )
             assert collected["ok"] is True
+            assert collected["coins"] >= 3000
             assert "state" in collected
 
             grant = {
