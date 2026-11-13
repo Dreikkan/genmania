@@ -243,7 +243,9 @@ class DashboardSync:
             "SELECT COUNT(*), COALESCE(SUM(coins), 0), "
             "COALESCE(SUM(gems), 0) FROM players"
         )
-        players = int(row[0] or 0) if row else 0
+        if row is None:
+            raise RuntimeError("DASHBOARD_SYNC: не удалось прочитать players")
+        players = int(row[0] or 0)
         coins = int(row[1] or 0) if row else 0
         gems = int(row[2] or 0) if row else 0
 
