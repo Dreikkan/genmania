@@ -7286,7 +7286,7 @@ class GuideView(BaseView):
         back = discord.ui.Button(
             label="В меню",
             emoji=get_emoji("_back"),
-            style=discord.ButtonStyle.danger,
+            style=discord.ButtonStyle.secondary,
             row=2
         )
         back.callback = self.btn_back
@@ -7874,7 +7874,7 @@ class TopView(BaseView):
         refresh.callback = self.btn_refresh
         self.add_item(refresh)
 
-        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.danger, row=4)
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=4)
         back.callback = self.btn_back
         self.add_item(back)
 
@@ -7968,7 +7968,7 @@ class AdventView(BaseView):
             nxt.callback = self.btn_next
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=BOT_BTN_EMOJIS.get("_back", "◀️"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.btn_back
         self.add_item(back)
 
@@ -9273,7 +9273,7 @@ class MarketBuySelectView(SafeView):
             nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -9392,7 +9392,7 @@ class MarketSellSelectView(SafeView):
             nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             nxt.callback = self.next_page
             self.add_item(nxt)
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -11830,7 +11830,7 @@ class ClanBuySelectView(SafeView):
         if total_pages > 1:
             p = discord.ui.Button(label="Стр.", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1); p.callback = self.prev; self.add_item(p)
             n = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1); n.callback = self.next; self.add_item(n)
-        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2); b.callback = self.back; self.add_item(b)
+        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2); b.callback = self.back; self.add_item(b)
     async def interaction_check(self, i):
         return await self.check_owner(i)
     async def item_select(self, interaction):
@@ -14028,7 +14028,7 @@ class TitlesView(SafeView):
             p.callback = self.prev; self.add_item(p)
             n = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary, row=1)
             n.callback = self.next; self.add_item(n)
-        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        b = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         b.callback = self.back; self.add_item(b)
 
     async def interaction_check(self, interaction):
@@ -14798,7 +14798,7 @@ class SortMenuView(BaseView):
     async def sort_rarity_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._do_sort(interaction, "rarity_desc")
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=3)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_profile_embed(interaction)
@@ -14837,7 +14837,7 @@ class StorageSortMenuView(BaseView):
     async def sort_rarity_desc(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._do_sort(interaction, "rarity_desc")
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = await build_storage_embed(interaction)
@@ -15175,7 +15175,7 @@ class SellSelectView(SafeView):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -17563,7 +17563,7 @@ class CraftSelectView(SafeView):
         mass.callback = self.mass_craft
         self.add_item(mass)
 
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -18924,7 +18924,7 @@ class AuctionSellSelectView(SafeView):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -19708,7 +19708,7 @@ class ShopBuySelectView(SafeView):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -20148,7 +20148,7 @@ class UpgradesBuySelectView(SafeView):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
@@ -23107,7 +23107,7 @@ class AdminLogsView(AdminView):
             nxt = discord.ui.Button(label="Стр.", emoji=get_emoji("_forward"), style=discord.ButtonStyle.secondary)
             nxt.callback = self.next_page
             self.add_item(nxt)
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary)
         back.callback = self.back
         self.add_item(back)
 
@@ -23892,7 +23892,7 @@ class SettingsEconomyView(AdminView):
             return
         await interaction.response.send_modal(EditStartCoinsModal(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="🔧 Настройки сервера", color=0x808080)
@@ -24017,7 +24017,7 @@ class SettingsCommandsView(AdminView):
             min_values=0,
             max_values=len(options),
         ))
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=1)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
         back.callback = self.back
         self.add_item(back)
 
@@ -24767,7 +24767,7 @@ class SettingsAchievementsView(AdminView):
     async def add(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddAchievementModal(self.author_id))
 
-    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         embed = BotEmbed(title="🔧 Настройки сервера", color=0x808080)
@@ -25046,7 +25046,7 @@ class StarEmojiPaginatedView(AdminView):
             nxt.callback = self.next_page
             self.add_item(nxt)
 
-        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.danger, row=2)
+        back = discord.ui.Button(label="Назад", emoji=get_emoji("_back"), style=discord.ButtonStyle.secondary, row=2)
         back.callback = self.back
         self.add_item(back)
 
