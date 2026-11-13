@@ -58,8 +58,8 @@ def test_daily_claim_is_atomic():
             async with db.execute(
                 "SELECT coins, gems FROM players WHERE user_id = 1"
             ) as c:
-                # 30/0 — дейли, ещё 50/1 — награда за шаг онбординга.
-                assert await c.fetchone() == (80, 1)
+                # 30/0 — дейли, ещё 75/1 — награда за шаг онбординга.
+                assert await c.fetchone() == (105, 1)
         finally:
             await db.close()
             m.bot.db = None

@@ -145,6 +145,7 @@ def make_guide_layer(runtime: GuideRuntime):
         ]
         RAID_TARGET_SHIELD_HOURS = config["RAID_TARGET_SHIELD_HOURS"]
         SEASON_PREMIUM_COST_GEMS = config["SEASON_PREMIUM_COST_GEMS"]
+        SEASON_LEVELS = config["SEASON_LEVELS"]
         SEASON_TOTAL_XP_TEXT = config["SEASON_TOTAL_XP_TEXT"]
         SEASON_XP_BASE = config["SEASON_XP_BASE"]
         SEASON_XP_STEP = config["SEASON_XP_STEP"]
@@ -472,8 +473,13 @@ def make_guide_layer(runtime: GuideRuntime):
                 "🎫 Сезон",
                 "**Что это:** месячный battle pass на 30 уровней.\n\n"
                 f"**Стоимость уровней:** 1-й — {SEASON_XP_BASE} XP, каждый "
-                f"следующий +{SEASON_XP_STEP} XP (100, 200, 300 … 3000).\n"
-                f"Всего до 30 уровня — **{SEASON_TOTAL_XP_TEXT} XP**.\n\n"
+                f"следующий +{SEASON_XP_STEP} XP "
+                f"({SEASON_XP_BASE}, "
+                f"{SEASON_XP_BASE + SEASON_XP_STEP}, "
+                f"{SEASON_XP_BASE + 2 * SEASON_XP_STEP} … "
+                f"{SEASON_XP_BASE + (SEASON_LEVELS - 1) * SEASON_XP_STEP}).\n"
+                f"Всего до {SEASON_LEVELS} уровня — "
+                f"**{SEASON_TOTAL_XP_TEXT} XP**.\n\n"
                 "**Сколько XP даёт действие:**\n"
                 "• Синтез: +50 за успех, +15 за провал.\n"
                 "• Рейд: +150 за победу, +40 за поражение.\n"
@@ -494,8 +500,8 @@ def make_guide_layer(runtime: GuideRuntime):
                 "начисляются по одному событию.\n\n"
                 f"**Достижимость:** активная игра даёт около "
                 f"{runtime.season_expected_daily_xp()} XP/день; за 30 дней это "
-                f"~{runtime.season_expected_daily_xp() * 30} XP, поэтому 30 уровень "
-                "достижим без хардкора.\n\n"
+                f"~{runtime.season_expected_daily_xp() * 30} XP, поэтому "
+                f"{SEASON_LEVELS} уровень достижим без хардкора.\n\n"
                 "**Выходные:** +50% к XP, но дневные лимиты не обходятся.\n\n"
                 "**Награды:** бесплатная линейка — монеты, гемы и предметы; "
                 "премиум — дополнительные гемы и катализаторы.\n\n"

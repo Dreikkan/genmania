@@ -145,18 +145,18 @@ def test_first_shop_purchase_uses_discount_once():
             first = FakeInteraction(1)
             first.data = {"values": ["1"]}
             await view.quantity_select(first)
-            # 20 - 7 (скидка 50%) + 50 (награда онбординга) = 63.
+            # 20 - 7 (скидка 50%) + 100 (награда онбординга) = 113.
             async with db.execute("SELECT coins FROM players WHERE user_id = 1") as c:
                 coins_after_first = (await c.fetchone())[0]
-            assert coins_after_first == 63, coins_after_first
+            assert coins_after_first == 113, coins_after_first
 
             second_view = m.BuyItemQuantityView(1, "basic_gen")
             second = FakeInteraction(1)
             second.data = {"values": ["1"]}
             await second_view.quantity_select(second)
-            # Вторая покупка уже полная: 63 - 15 = 48.
+            # Вторая покупка уже полная: 113 - 15 = 98.
             async with db.execute("SELECT coins FROM players WHERE user_id = 1") as c:
-                assert (await c.fetchone())[0] == 48
+                assert (await c.fetchone())[0] == 98
             async with db.execute(
                 "SELECT COUNT(*) FROM inventory WHERE user_id = 1 "
                 "AND item_id = 'basic_gen'"

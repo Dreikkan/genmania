@@ -23,8 +23,8 @@ class SeasonRuntime:
         self._emoji_fixer: Callable[[Any], Any] = lambda embed: embed
         self.month_names = ()
         self.xp_actions: dict = {}
-        self.xp_base = 100
-        self.xp_step = 100
+        self.xp_base = 300
+        self.xp_step = 90
         self.levels = 30
         self.premium_cost_gems = 500
         self.coin = "🪙"
