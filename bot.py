@@ -43,6 +43,7 @@ from gen_mania.navigation import (
     reset_nav,
 )
 from gen_mania.metrics import METRICS, MetricsRegistry  # noqa: F401 - re-export
+from gen_mania.dashboard_sync import DashboardSync
 from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
@@ -1572,6 +1573,7 @@ class CastleBot(commands.Bot):
         self._instance_lock = None
         self.background_restart_delay = 5.0
         self.background_restart_max = 300.0
+        self.dashboard_sync = None
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -1646,6 +1648,107 @@ class CastleBot(commands.Bot):
             self._spawn_background("retention_task", self.retention_task),
             self._spawn_background("health_writer", self.health_writer),
         ]
+
+        self.dashboard_sync = DashboardSync(
+            self, apply_settings=self.apply_dashboard_settings
+        )
+        if self.dashboard_sync.enabled:
+            self.background_tasks.append(
+                self._spawn_background(
+                    "dashboard_sync", self.dashboard_sync.run
+                )
+            )
+
+    async def apply_dashboard_settings(self, update: dict) -> dict:
+        """Применяет настройки гильдии, отправленные из веб-панели."""
+        if not isinstance(update, dict):
+            return {"ok": False, "error": "invalid update"}
+        try:
+            guild_id = int(update.get("guild_id") or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid guild_id"}
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            return {"ok": False, "error": "guild not found"}
+
+        settings = update.get("settings")
+        if not isinstance(settings, dict):
+            return {"ok": False, "error": "missing settings"}
+
+        actor_raw = update.get("requested_by")
+        actor_text = str(actor_raw or "").strip()
+        actor_id = int(actor_text) if actor_text.isdigit() else None
+        applied: list[str] = []
+        warnings: list[str] = []
+
+        if "start_coins" in settings:
+            try:
+                value = int(settings["start_coins"])
+            except (TypeError, ValueError):
+                warnings.append("start_coins: не число")
+            else:
+                clamped = max(0, min(MAX_START_COINS, value))
+                if clamped != value:
+                    warnings.append(
+                        f"start_coins ограничен {MAX_START_COINS}"
+                    )
+                await save_setting(
+                    guild_id, "start_coins", clamped, actor_id=actor_id
+                )
+                applied.append("start_coins")
+
+        for key, setting in (
+            ("currency_name", "currency_coins"),
+            ("premium_name", "currency_gems"),
+        ):
+            if key not in settings:
+                continue
+            value = str(settings[key] or "").strip()[:32]
+            if not value:
+                warnings.append(f"{key}: пустое значение")
+                continue
+            await save_setting(
+                guild_id, setting, value, actor_id=actor_id
+            )
+            applied.append(setting)
+
+        if "tax_rate" in settings:
+            try:
+                percent = float(settings["tax_rate"])
+            except (TypeError, ValueError):
+                warnings.append("tax_rate: не число")
+            else:
+                fraction = max(0.0, min(0.5, percent / 100.0))
+                await save_setting(
+                    guild_id, "tax_rate", fraction, actor_id=actor_id
+                )
+                applied.append("tax_rate")
+
+        if "admin_role" in settings:
+            raw = str(settings["admin_role"] or "").strip()
+            role_id = None
+            if raw in {"", "0", "нет", "none", "None"}:
+                role_id = None
+            elif raw.isdigit():
+                role_id = int(raw)
+            else:
+                role = discord.utils.get(guild.roles, name=raw)
+                if role is None:
+                    warnings.append(f"admin_role: роль «{raw}» не найдена")
+                else:
+                    role_id = role.id
+            if role_id is not None or raw in {"", "0", "нет", "none", "None"}:
+                await save_setting(
+                    guild_id, "admin_role_id", role_id, actor_id=actor_id
+                )
+                applied.append("admin_role_id")
+
+        return {
+            "ok": bool(applied),
+            "applied": applied,
+            "warnings": warnings,
+            "guild_id": guild_id,
+        }
 
     def _spawn_background(self, name: str, factory) -> asyncio.Task:
         """Запускает фоновую задачу и перезапускает её после сбоя."""
