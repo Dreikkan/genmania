@@ -55,6 +55,16 @@ from gen_mania.repositories.settings import (
     make_settings_layer,
 )
 from gen_mania.formatting import format_short_number, plural_ru
+from gen_mania.runtime import InstanceLock, checkpoint_wal_best_effort
+from gen_mania.game_data import (
+    DAILY_REWARDS,
+    ONBOARDING_STEPS,
+    QUEST_POOL,
+    SEASON_ACTIVE_DAY_PROFILE,
+    SEASON_XP_ACTIONS,
+    SEASON_XP_HELP_LINES,
+    STORY_QUESTS,
+)
 from gen_mania.services.auction import AuctionRuntime, make_auction_layer
 from gen_mania.services.bank import BankRuntime, make_bank_layer
 from gen_mania.services.admin_ui import AdminUiRuntime, make_admin_ui_layer
@@ -217,38 +227,6 @@ def status_savings_percent(status_id: str, days: int) -> int:
     return max(0, int(round((1 - price / full) * 100)))
 
 # Первые шаги: (заголовок, подсказка, монеты, гемы).
-ONBOARDING_STEPS = {
-    "buy_generator": (
-        "Купи первый генератор",
-        "Магазин → Генераторы",
-        100,
-        0,
-    ),
-    "claim_daily": (
-        "Забери ежедневную награду",
-        "Главное меню → Ежедневная награда",
-        75,
-        1,
-    ),
-    "open_quests": (
-        "Открой квесты",
-        "Главное меню → Квесты",
-        50,
-        0,
-    ),
-    "craft": (
-        "Сделай синтез",
-        "Энергостанция → Синтез",
-        125,
-        1,
-    ),
-    "social": (
-        "Загляни в Социум",
-        "Главное меню → Социум",
-        75,
-        0,
-    ),
-}
 
 RARITY_COLORS = {
     "common":    0x808080,
@@ -499,95 +477,8 @@ SEASON_WEEKEND_XP_MULT = 1.5          # событие выходного дня
 # (до выходного множителя), daily — максимум эффективного XP в сутки.
 # Баланс: активная игра даёт ~1 670 XP/день, за 30 дней — ~50 100 XP
 # при необходимых 48 150 XP на 30 уровней.
-SEASON_XP_ACTIONS = {
-    "story_quest": {
-        "label": "Сюжетный квест",
-        "amount": 200,
-        "per_tx": 400,
-        "daily": 400,
-    },
-    "achievement_unlock": {
-        "label": "Новое достижение",
-        "amount": 100,
-        "per_tx": 300,
-        "daily": 300,
-    },
-    "daily": {
-        "label": "Ежедневная награда",
-        "amount": 250,
-        "per_tx": 250,
-        "daily": 250,
-    },
-    "prestige": {
-        "label": "Перерождение",
-        "amount": 500,
-        "per_tx": 500,
-        "daily": 500,
-    },
-    "raid_win": {
-        "label": "Победа в рейде",
-        "amount": 150,
-        "per_tx": 150,
-        "daily": 300,
-    },
-    "raid_loss": {
-        "label": "Поражение в рейде",
-        "amount": 40,
-        "per_tx": 40,
-        "daily": 80,
-    },
-    "duel_win": {
-        "label": "Победа в дуэли",
-        "amount": 150,
-        "per_tx": 150,
-        "daily": 450,
-    },
-    "duel_loss": {
-        "label": "Поражение в дуэли",
-        "amount": 40,
-        "per_tx": 40,
-        "daily": 120,
-    },
-    "craft_success": {
-        "label": "Успешный синтез",
-        "amount": 50,
-        "per_tx": 50,
-        "daily": 400,
-    },
-    "craft_fail": {
-        "label": "Неудачный синтез",
-        "amount": 15,
-        "per_tx": 15,
-        "daily": 120,
-    },
-    "quest": {
-        "label": "Ежедневный квест",
-        "amount": 120,
-        "per_tx": 120,
-        "daily": 360,
-    },
-    "other": {
-        "label": "Другое",
-        "amount": 0,
-        "per_tx": 100,
-        "daily": 300,
-    },
-}
 
 # Ожидаемый профиль активного дня: не хардкор, но стабильная игра.
-SEASON_ACTIVE_DAY_PROFILE = {
-    "daily": 1,
-    "quest": 3,
-    "craft_success": 6,
-    "craft_fail": 4,
-    "raid_win": 1,
-    "raid_loss": 1,
-    "duel_win": 2,
-    "duel_loss": 1,
-    "story_quest": 0.5,
-    "achievement_unlock": 0.2,
-    "prestige": 0.1,
-}
 
 
 def season_xp_amount(action: str, multiplier: int = 1) -> int:
@@ -607,17 +498,6 @@ def season_expected_daily_xp() -> int:
     return int(total)
 
 
-SEASON_XP_HELP_LINES = (
-    "Синтез: +50 успех / +15 провал · 400 / 120 XP в день",
-    "Рейд: +150 победа / +40 поражение · 300 / 80 XP в день",
-    "Дуэль: +150 победа / +40 поражение · 450 / 120 XP в день",
-    "Дейли: +250 · 250 XP в день",
-    "Ежедневный квест: +120 · 360 XP в день",
-    "Сюжетный квест: +200 · 400 XP в день",
-    "Достижение: +100 · 300 XP в день",
-    "Перерождение: +500 · 500 XP в день",
-    "За одно начисление: сюжетный квест ≤400, достижение ≤300.",
-)
 SEASON_MONTH_NAMES = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
@@ -903,55 +783,6 @@ EXCHANGE_RATE_TIERS = (
     (None, 15_000),
 )
 
-QUEST_POOL = {
-    # --- СИНТЕЗ ---
-    "craft_1":        ("Сделай 1 синтез", 1, 2, 100),
-    "craft_3":        ("Сделай 3 синтеза", 3, 3, 180),
-    "craft_5":        ("Сделай 5 синтезов", 5, 5, 350),
-    "success_2":      ("Успешно синтезируй 2 раза", 2, 4, 200),
-    "use_catalyst":   ("Используй 1 катализатор", 1, 3, 100),
-
-    # --- ПОКУПКИ ---
-    "buy_3":          ("Купи 3 предмета в магазине", 3, 2, 50),
-    "buy_10":         ("Купи 10 предметов в магазине", 10, 4, 150),
-    "buy_25":         ("Купи 25 предметов в магазине", 25, 8, 350),
-
-    # --- ЭНЕРГОСТАНЦИЯ И ХРАНИЛИЩЕ ---
-    "move_2":         ("Перемести 2 предмета между энергостанцией и хранилищем", 2, 2, 30),
-    "move_5":         ("Перемести 5 предметов между энергостанцией и хранилищем", 5, 3, 60),
-    "sort_1":         ("Отсортируй генераторы на энергостанции 1 раз", 1, 2, 40),
-    "swap_1":         ("Поменяй местами 1 предмет", 1, 2, 40),
-    "sell_3":         ("Продай 3 предмета в хранилище", 3, 3, 80),
-
-    # --- ЗВЕЗДЫ ---
-    "star_up_1":      ("Улучши любой генератор до 1★", 1, 4, 150),
-    "star_fail_1":    ("Провали улучшение звезды 1 раз", 1, 2, 50),
-
-    # --- ПАССИВНЫЙ ДОХОД ---
-    "collect_income": ("Собери пассивный доход 1 раз", 1, 2, 80),
-    "collect_income_3":("Собери пассивный доход 3 раза", 3, 4, 200),
-
-    # --- ЕЖЕДНЕВНЫЕ НАГРАДЫ ---
-    "claim_daily":    ("Забери ежедневную награду", 1, 3, 100),
-
-    # --- АУКЦИОН ---
-    "bid_auction":    ("Сделай ставку на аукционе", 1, 2, 80),
-    "sell_auction":   ("Выстави предмет на аукцион", 1, 3, 100),
-
-    # --- БАНК ---
-    "open_deposit":   ("Открой вклад в банке", 1, 3, 100),
-    "close_deposit":  ("Забери вклад из банка", 1, 3, 100),
-
-    # --- КЛАНЫ ---
-    "donate_clan":    ("Внеси монеты в сундук клана", 1, 3, 100),
-
-    # --- ПИТОМЦЫ ---
-    "feed_pet":       ("Покорми питомца", 1, 3, 100),
-
-    # --- РЕЙДЫ И ДУЭЛИ ---
-    "raid_1":         ("Соверши 1 рейд", 1, 3, 120),
-    "duel_1":         ("Сыграй 1 дуэль", 1, 3, 120),
-}
 
 TOGGLEABLE_COMMANDS = {
     "shop":         "Магазин",
@@ -1213,18 +1044,6 @@ CASTLE = str(BOT_BTN_EMOJIS.get("_castle", "⚡"))
 STORAGE = str(BOT_BTN_EMOJIS.get("_storage", "🎒"))
 
 # Сюжетные квесты: id -> (название, описание, цель, тип действия, награда гемами)
-STORY_QUESTS = {
-    "q_first_gen": ("Первые шаги", "Купи первый генератор", 1, "buy", 10),
-    "q_synth_1": ("Алхимик", "Сделай первый синтез", 1, "synthesize", 15),
-    "q_stars_1": ("Звездочёт", "Улучши любой генератор до 1★", 1, "stars", 20),
-    "q_gold": ("Золотая лихорадка", "Накопи 1000 монет", 1000, "coins", 25),
-    "q_raid_1": ("Завоеватель", "Соверши успешный рейд", 1, "raid_win", 30),
-    "q_synth_10":  ("Мастер-алхимик", "Сделай 10 синтезов", 10, "synthesize", 40),
-    "q_duel_1":    ("Дуэлянт", "Выиграй первую дуэль", 1, "duel_win", 50),
-    "q_pet_1":     ("Питомец", "Купи любого питомца", 1, "pet_buy", 60),
-    "q_clan_1":    ("Клановый", "Вступи в клан или создай его", 1, "clan_join", 70),
-    "q_ach_5":     ("Коллекционер достижений", "Открой 5 достижений", 5, "achievements", 100),
-}
 
 # Титулы: id -> (название, требование для открытия)
 ACHIEVEMENTS_COUNT = 14
@@ -1291,38 +1110,6 @@ BTYPE_NAMES = {
 
 TITLES_PER_PAGE = 25
 
-DAILY_REWARDS = {
-    1:  (30,    0,  None),
-    2:  (40,    0,  None),
-    3:  (50,    1,  None),
-    4:  (60,    0,  None),
-    5:  (80,    1,  "daily_common"),
-    6:  (100,   0,  None),
-    7:  (120,   1,  "daily_uncommon"),
-    8:  (140,   0,  None),
-    9:  (160,   0,  None),
-    10: (200,   2,  "daily_rare"),
-    11: (220,   1,  None),
-    12: (240,   1,  None),
-    13: (260,   2,  None),
-    14: (300,   2,  "daily_epic"),
-    15: (320,   2,  None),
-    16: (340,   2,  None),
-    17: (360,   2,  None),
-    18: (380,   2,  None),
-    19: (400,   3,  None),
-    20: (500,   4,  "daily_legendary"),
-    21: (550,   3,  None),
-    22: (600,   3,  None),
-    23: (650,   3,  None),
-    24: (700,   3,  None),
-    25: (900,   5,  "daily_mythic"),
-    26: (950,   4,  None),
-    27: (1000,  4,  None),
-    28: (1050,  4,  None),
-    29: (1100,  5,  None),
-    30: (1500,  8,  "daily_mythic"),   # финальная награда цикла
-}
 
 # ============================================================
 #  🐾 ПИТОМЦЫ
@@ -1760,101 +1547,10 @@ async def verify_columns(conn, table: str, required: list[str]) -> None:
         )
 
 
-async def checkpoint_wal_best_effort(db) -> bool:
-    """PASSIVE-checkpoint не блокирует БД и не мешает backup API.
-
-    FULL/TRUNCATE могут вернуть "database table is locked", если в этот
-    момент открыт курсор или идёт чтение. Для консистентного бэкапа
-    checkpoint не обязателен: SQLite backup API сам читает WAL.
-    """
-    try:
-        await db.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        return True
-    except aiosqlite.Error as exc:
-        log.warning("WAL checkpoint пропущен: %s", exc)
-        return False
-
-
 intents = discord.Intents.default()
 # Нужен для локальных топов, налогов и корректного состава guild.members.
 # В Discord Developer Portal включите Privileged Intent -> Server Members.
 intents.members = True
-
-
-class InstanceLock:
-    """Не даёт запустить два бота на одной папке data."""
-
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self._handle = None
-
-    def acquire(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = None
-        try:
-            handle = open(self.path, "a+", encoding="utf-8")
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(" ")
-                    handle.flush()
-                handle.seek(0)
-                try:
-                    msvcrt.locking(
-                        handle.fileno(), msvcrt.LK_NBLCK, 1
-                    )
-                except OSError:
-                    handle.close()
-                    return False
-            else:
-                import fcntl
-
-                try:
-                    fcntl.flock(
-                        handle.fileno(),
-                        fcntl.LOCK_EX | fcntl.LOCK_NB,
-                    )
-                except OSError:
-                    handle.close()
-                    return False
-
-            handle.seek(0)
-            handle.write(f"{os.getpid()}".ljust(32))
-            handle.flush()
-            self._handle = handle
-            return True
-        except OSError:
-            if handle is not None:
-                handle.close()
-            return False
-
-    def release(self) -> None:
-        if self._handle is None:
-            return
-        handle = self._handle
-        self._handle = None
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0)
-                try:
-                    msvcrt.locking(
-                        handle.fileno(), msvcrt.LK_UNLCK, 1
-                    )
-                except OSError:
-                    pass
-            else:
-                import fcntl
-
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-        finally:
-            handle.close()
 
 
 class CastleBot(commands.Bot):
