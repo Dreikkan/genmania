@@ -167,16 +167,14 @@ class DashboardSync:
 
     async def collect(self) -> dict:
         member_map = self._member_map()
+        active_ids = await self._active_player_ids()
         stats = await self._collect_stats(member_map)
-        players = await self._collect_players(member_map)
-        servers = await self._collect_guilds()
+        players = await self._collect_players(member_map, active_ids)
+        servers = await self._collect_guilds(active_ids)
         market, market_volume = await self._collect_market()
         stats["market_volume"] = market_volume
-        stats["online"] = sum(
-            1
-            for member in member_map.values()
-            if member.status != discord.Status.offline
-        )
+        stats["online"] = len(active_ids)
+        stats["online_label"] = "Активны за час"
         stats["servers"] = len(getattr(self.bot, "guilds", []) or [])
 
         history = self._record_history(stats)
@@ -226,6 +224,19 @@ class DashboardSync:
             except Exception:
                 log.debug("DASHBOARD_SYNC: не удалось прочитать guild.members")
         return members
+
+    async def _active_player_ids(self) -> set[int]:
+        rows = await self._fetchall(
+            "SELECT user_id FROM players "
+            "WHERE last_collected >= datetime('now', '-1 hour') "
+            "OR last_gem_collected >= datetime('now', '-1 hour') "
+            "LIMIT 20000"
+        )
+        return {
+            int(row[0])
+            for row in rows
+            if row and row[0] is not None
+        }
 
     def _display_name(self, user_id: int, member_map: dict[int, Any]) -> tuple[str, str]:
         member = member_map.get(user_id)
@@ -314,7 +325,7 @@ class DashboardSync:
             "health": [],
         }
 
-    async def _collect_players(self, member_map: dict[int, Any]) -> list[dict]:
+    async def _collect_players(self, member_map: dict[int, Any], active_ids: set[int]) -> list[dict]:
         rows = await self._fetchall(
             """
             SELECT p.user_id, p.coins, p.gems,
@@ -349,13 +360,9 @@ class DashboardSync:
             user_id = int(row[0])
             name, handle = self._display_name(user_id, member_map)
             member = member_map.get(user_id)
-            status = "offline"
+            status = "online" if user_id in active_ids else "offline"
             joined = ""
             if member is not None:
-                status_name = getattr(member.status, "name", "offline")
-                status = "idle" if status_name == "idle" else (
-                    "offline" if status_name == "offline" else "online"
-                )
                 joined_at = getattr(member, "joined_at", None)
                 if joined_at is not None:
                     joined = joined_at.date().isoformat()
@@ -380,7 +387,7 @@ class DashboardSync:
             )
         return result
 
-    async def _collect_guilds(self) -> list[dict]:
+    async def _collect_guilds(self, active_ids: set[int]) -> list[dict]:
         guilds = sorted(
             getattr(self.bot, "guilds", []) or [],
             key=lambda guild: getattr(guild, "member_count", 0) or len(guild.members),
@@ -390,11 +397,7 @@ class DashboardSync:
         result: list[dict] = []
         for guild in guilds:
             try:
-                online = sum(
-                    1
-                    for member in guild.members
-                    if member.status != discord.Status.offline
-                )
+                online = sum(1 for member in guild.members if member.id in active_ids)
             except Exception:
                 online = 0
             members = getattr(guild, "member_count", None) or len(guild.members)

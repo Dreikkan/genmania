@@ -13,7 +13,7 @@ from gen_mania import dashboard_sync
 from gen_mania.dashboard_sync import DashboardSync
 
 SCHEMA = """
-CREATE TABLE players (user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 0, gems INTEGER DEFAULT 0, prestige_points INTEGER DEFAULT 0, last_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, lifetime_production INTEGER DEFAULT 0, top_excluded INTEGER DEFAULT 0, total_crafts INTEGER DEFAULT 0);
+CREATE TABLE players (user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 0, gems INTEGER DEFAULT 0, prestige_points INTEGER DEFAULT 0, last_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_gem_collected TIMESTAMP DEFAULT CURRENT_TIMESTAMP, lifetime_production INTEGER DEFAULT 0, top_excluded INTEGER DEFAULT 0, total_crafts INTEGER DEFAULT 0);
 CREATE TABLE inventory (user_id INTEGER, slot INTEGER, item_id TEXT, location TEXT DEFAULT 'profile', stars INTEGER DEFAULT 0, PRIMARY KEY (user_id, location, slot));
 CREATE TABLE items (id TEXT PRIMARY KEY, name TEXT, price INTEGER, rarity TEXT DEFAULT 'common');
 CREATE TABLE clans (id INTEGER PRIMARY KEY, name TEXT, treasury INTEGER DEFAULT 0, level INTEGER DEFAULT 1, capacity INTEGER DEFAULT 10);

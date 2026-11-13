@@ -167,8 +167,8 @@ python -m bandit -q -c bandit.yaml -r gen_mania bot.py -ll
 python -m pip_audit -r requirements.txt --progress-spinner off
 ```
 
-Текущий статус: **501 passed**, 138 test files.
-Coverage: **99.56% line, 95.75% branch**, минимальный порог — **95%**.
+Текущий статус: **507 passed**, 144 test files.
+Coverage: **99.51% line, 95.67% branch**, минимальный порог — **95%**.
 
 Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
 owner-only команда `/health` показывает метрики и состояние задач.
