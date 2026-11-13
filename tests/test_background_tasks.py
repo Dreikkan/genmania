@@ -94,6 +94,39 @@ def test_tax_collector_charges_daily_tax():
     asyncio.run(run())
 
 
+def test_tax_collector_batches_all_players():
+    async def run():
+        db = await _init()
+        try:
+            await db.executemany(
+                "INSERT INTO players (user_id, coins, last_tax_time) "
+                "VALUES (?, 1000, NULL)",
+                [(index,) for index in range(1, 206)],
+            )
+            await db.commit()
+
+            async def fake_rates():
+                return {}
+
+            await _run_once(
+                m.bot.tax_collector, get_tax_rate_map=fake_rates
+            )
+
+            async with db.execute(
+                "SELECT COUNT(*) FROM tax_log"
+            ) as c:
+                assert (await c.fetchone())[0] == 205
+            async with db.execute(
+                "SELECT COUNT(*) FROM players WHERE coins = 980"
+            ) as c:
+                assert (await c.fetchone())[0] == 205
+        finally:
+            await db.close()
+            m.bot.db = None
+
+    asyncio.run(run())
+
+
 def test_autocollector_task_collects_income():
     async def run():
         db = await _init()

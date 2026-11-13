@@ -3863,27 +3863,56 @@ class CastleBot(commands.Bot):
                 ) as c:
                     rows = await c.fetchall()
 
-                async with db_transaction():
-                    for item_id, base, current, demand, supply, item_price, buyable in rows:
-                        old_price = int(current or item_price or base or 1)
-                        anchor = int(item_price or base or old_price)
-                        ratio = 1.0 + (demand - supply) / max(1, demand + supply) * 0.5
-                        target = int(old_price * ratio)
-                        max_step = max(1, int(old_price * MARKET_MAX_STEP))
-                        stepped = old_price + max(
-                            -max_step, min(max_step, target - old_price)
+                for item_id, base, current, demand, supply, item_price, buyable in rows:
+                    try:
+                        async with db_transaction():
+                            old_price = int(
+                                current or item_price or base or 1
+                            )
+                            anchor = int(
+                                item_price or base or old_price
+                            )
+                            ratio = (
+                                1.0
+                                + (demand - supply)
+                                / max(1, demand + supply)
+                                * 0.5
+                            )
+                            target = int(old_price * ratio)
+                            max_step = max(
+                                1, int(old_price * MARKET_MAX_STEP)
+                            )
+                            stepped = old_price + max(
+                                -max_step,
+                                min(max_step, target - old_price),
+                            )
+                            new_price = clamp_market_price(
+                                stepped, anchor, bool(buyable)
+                            )
+                            await self.db.execute(
+                                "UPDATE market_prices SET "
+                                "current_price = ?, demand = 0, "
+                                "supply = 0, last_update = ? "
+                                "WHERE item_id = ?",
+                                (
+                                    new_price,
+                                    datetime.datetime.now().isoformat(),
+                                    item_id,
+                                ),
+                            )
+                            await record_market_price(
+                                item_id,
+                                new_price,
+                                0,
+                                0,
+                                commit=False,
+                            )
+                    except Exception:
+                        log.exception(
+                            "MARKET_UPDATER: ошибка предмета %s",
+                            item_id,
                         )
-                        new_price = clamp_market_price(
-                            stepped, anchor, bool(buyable)
-                        )
-                        await self.db.execute(
-                            "UPDATE market_prices SET current_price = ?, demand = 0, supply = 0, "
-                            "last_update = ? WHERE item_id = ?",
-                            (new_price, datetime.datetime.now().isoformat(), item_id)
-                        )
-                        await record_market_price(
-                            item_id, new_price, 0, 0, commit=False
-                        )
+                    await asyncio.sleep(0)
             except Exception as e:
                 log.exception("MARKET_UPDATER: ошибка фоновой задачи")
                 await asyncio.sleep(300)
@@ -3958,54 +3987,68 @@ class CastleBot(commands.Bot):
         await self.wait_until_ready()
         while not self.is_closed():
             try:
-                async with self.db.execute(
-                    "SELECT user_id, coins, last_tax_time FROM players"
-                ) as c:
-                    players = await c.fetchall()
-
                 now = datetime.datetime.now()
                 rate_map = await get_tax_rate_map()
-                for uid, _coins, _last_tax in players:
-                    try:
-                        rate = rate_map.get(uid, DEFAULT_TAX_RATE)
-                        async with db_transaction():
-                            async with self.db.execute(
-                                "SELECT coins, last_tax_time FROM players "
-                                "WHERE user_id = ?",
-                                (uid,),
-                            ) as c:
-                                row = await c.fetchone()
-                            if not row:
-                                continue
-                            coins, last_tax = row
-                            last = _parse_db_time(last_tax)
-                            if last and (now - last).total_seconds() < 86400:
-                                continue
-                            tax = max(0, int((coins or 0) * rate))
-                            if tax > 0:
-                                cur = await self.db.execute(
-                                    "UPDATE players SET coins = coins - ?, "
-                                    "last_tax_time = ? WHERE user_id = ? "
-                                    "AND coins >= ?",
-                                    (tax, now.isoformat(), uid, tax),
-                                )
-                                if cur.rowcount == 0:
-                                    continue
-                                await self.db.execute(
-                                    "INSERT INTO tax_log "
-                                    "(user_id, amount, tax_type) "
-                                    "VALUES (?, ?, 'daily')",
-                                    (uid, tax),
-                                )
-                            else:
-                                await self.db.execute(
-                                    "UPDATE players SET last_tax_time = ? "
+                last_user_id = 0
+                batch_size = 200
+                while True:
+                    async with self.db.execute(
+                        "SELECT user_id FROM players "
+                        "WHERE user_id > ? ORDER BY user_id LIMIT ?",
+                        (last_user_id, batch_size),
+                    ) as c:
+                        players = [row[0] for row in await c.fetchall()]
+                    if not players:
+                        break
+
+                    for uid in players:
+                        try:
+                            rate = rate_map.get(uid, DEFAULT_TAX_RATE)
+                            async with db_transaction():
+                                async with self.db.execute(
+                                    "SELECT coins, last_tax_time FROM players "
                                     "WHERE user_id = ?",
-                                    (now.isoformat(), uid),
-                                )
-                    except Exception:
-                        log.exception("TAX_COLLECTOR: ошибка игрока %s", uid)
-            except Exception as e:
+                                    (uid,),
+                                ) as c:
+                                    row = await c.fetchone()
+                                if not row:
+                                    continue
+                                coins, last_tax = row
+                                last = _parse_db_time(last_tax)
+                                if last and (
+                                    now - last
+                                ).total_seconds() < 86400:
+                                    continue
+                                tax = max(0, int((coins or 0) * rate))
+                                if tax > 0:
+                                    cur = await self.db.execute(
+                                        "UPDATE players SET coins = coins - ?, "
+                                        "last_tax_time = ? WHERE user_id = ? "
+                                        "AND coins >= ?",
+                                        (tax, now.isoformat(), uid, tax),
+                                    )
+                                    if cur.rowcount == 0:
+                                        continue
+                                    await self.db.execute(
+                                        "INSERT INTO tax_log "
+                                        "(user_id, amount, tax_type) "
+                                        "VALUES (?, ?, 'daily')",
+                                        (uid, tax),
+                                    )
+                                else:
+                                    await self.db.execute(
+                                        "UPDATE players SET last_tax_time = ? "
+                                        "WHERE user_id = ?",
+                                        (now.isoformat(), uid),
+                                    )
+                        except Exception:
+                            log.exception(
+                                "TAX_COLLECTOR: ошибка игрока %s", uid
+                            )
+
+                    last_user_id = players[-1]
+                    await asyncio.sleep(0)
+            except Exception:
                 log.exception("TAX_COLLECTOR: ошибка фоновой задачи")
                 await asyncio.sleep(600)
                 continue
