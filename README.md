@@ -167,11 +167,28 @@ python -m bandit -q -c bandit.yaml -r gen_mania bot.py -ll
 python -m pip_audit -r requirements.txt --progress-spinner off
 ```
 
-Текущий статус: **472 passed**, 137 test files.
-Coverage: **100.00% line, 99.40% branch**, минимальный порог — **95%**.
+Текущий статус: **501 passed**, 138 test files.
+Coverage: **99.56% line, 95.75% branch**, минимальный порог — **95%**.
 
 Для мониторинга: `data/health.json` обновляется раз в 60 секунд,
 owner-only команда `/health` показывает метрики и состояние задач.
+
+## Синхронизация с веб-панелью
+
+Бот может раз в несколько минут отправлять агрегированную статистику на
+сайт `genmania.tech`. Модуль: `gen_mania/dashboard_sync.py`.
+
+Переменные окружения на Bothost:
+
+```
+DASHBOARD_SYNC_URL=https://genmania.tech/api/ingest.php
+DASHBOARD_SYNC_TOKEN=<тот же токен, что ingest_token в config.php сайта>
+DASHBOARD_SYNC_INTERVAL=300
+```
+
+Если переменные не заданы, задача синхронизации не запускается и бот
+работает как обычно. Токен должен быть не короче 16 символов; сайт хранит
+снимок в `data/live_stats.json`, база бота наружу не отдаётся.
 
 ## CI
 

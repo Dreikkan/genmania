@@ -43,6 +43,7 @@ from gen_mania.navigation import (
     reset_nav,
 )
 from gen_mania.metrics import METRICS, MetricsRegistry  # noqa: F401 - re-export
+from gen_mania.dashboard_sync import DashboardSync
 from gen_mania.db.transaction import (
     TransactionRuntime,
     make_transaction_layer,
@@ -1568,6 +1569,7 @@ class CastleBot(commands.Bot):
         self._instance_lock = None
         self.background_restart_delay = 5.0
         self.background_restart_max = 300.0
+        self.dashboard_sync = None
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -1642,6 +1644,14 @@ class CastleBot(commands.Bot):
             self._spawn_background("retention_task", self.retention_task),
             self._spawn_background("health_writer", self.health_writer),
         ]
+
+        self.dashboard_sync = DashboardSync(self)
+        if self.dashboard_sync.enabled:
+            self.background_tasks.append(
+                self._spawn_background(
+                    "dashboard_sync", self.dashboard_sync.run
+                )
+            )
 
     def _spawn_background(self, name: str, factory) -> asyncio.Task:
         """Запускает фоновую задачу и перезапускает её после сбоя."""
