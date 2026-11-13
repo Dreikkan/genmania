@@ -1910,12 +1910,12 @@ class CastleBot(commands.Bot):
                     "price": price or 0,
                     "income_hour": round(
                         float(income_coins or 0)
-                        * (1 + 0.5 * float(stars or 0)),
+                        * (1 + STAR_BONUS.get(int(stars or 0), 0)),
                         2,
                     ),
                     "income_gems_hour": round(
                         float(income_gems or 0)
-                        * (1 + 0.5 * float(stars or 0)),
+                        * (1 + STAR_BONUS.get(int(stars or 0), 0)),
                         2,
                     ),
                 }
