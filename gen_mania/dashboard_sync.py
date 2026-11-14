@@ -197,6 +197,7 @@ class DashboardSync:
         activity, weekly, growth = self._history_series(history)
         stats["growth"] = growth
         stats["health"] = self._health(stats)
+        admin_user_ids = await self._collect_admin_user_ids()
 
         transactions = await self._collect_transactions(member_map)
         logs = await self._collect_logs(member_map)
@@ -219,6 +220,7 @@ class DashboardSync:
         return {
             "generated_at": dt.datetime.now(UTC).isoformat(),
             "applied_settings_revision": self._applied_settings_revision,
+            "admin_user_ids": admin_user_ids,
             "stats": stats,
             "activity": activity,
             "top_players": players[:8],
@@ -254,6 +256,43 @@ class DashboardSync:
             for row in rows
             if row and row[0] is not None
         }
+
+    async def _collect_admin_user_ids(self) -> list[int]:
+        """Собирает ID владельцев, администраторов и носителей админ-роли."""
+        rows = await self._fetchall(
+            "SELECT guild_id, admin_role_id FROM guild_settings"
+        )
+        role_map: dict[int, int | None] = {}
+        for guild_id, role_id in rows:
+            try:
+                role_map[int(guild_id)] = int(role_id) if role_id else None
+            except (TypeError, ValueError):
+                continue
+
+        admin_ids: set[int] = set()
+        for guild in getattr(self.bot, "guilds", []) or []:
+            admin_role = role_map.get(int(guild.id))
+            try:
+                for member in guild.members:
+                    if getattr(member, "bot", False):
+                        continue
+                    if (
+                        member.id == guild.owner_id
+                        or member.guild_permissions.administrator
+                    ):
+                        admin_ids.add(member.id)
+                        continue
+                    if admin_role and any(
+                        role.id == admin_role for role in member.roles
+                    ):
+                        admin_ids.add(member.id)
+            except Exception:
+                log.debug(
+                    "DASHBOARD_SYNC: не удалось собрать админов гильдии %s",
+                    guild.id,
+                    exc_info=True,
+                )
+        return sorted(admin_ids)
 
     def _display_name(self, user_id: int, member_map: dict[int, Any]) -> tuple[str, str]:
         member = member_map.get(user_id)

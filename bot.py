@@ -1682,13 +1682,25 @@ class CastleBot(commands.Bot):
         if guild is None:
             return {"ok": False, "error": "guild not found"}
 
+        actor_raw = update.get("requested_by")
+        actor_text = str(actor_raw or "").strip()
+        actor_id = int(actor_text) if actor_text.isdigit() else None
+        if actor_id is None:
+            return {"ok": False, "error": "missing actor"}
+        actor_member = guild.get_member(actor_id)
+        if actor_member is None:
+            return {"ok": False, "error": "actor is not a guild member"}
+        current_settings = await get_settings(guild_id)
+        if not self._is_web_admin(
+            guild, actor_member, current_settings.get("admin_role_id")
+        ):
+            return {"ok": False, "error": "actor is not a guild admin"}
+
         settings = update.get("settings")
         if not isinstance(settings, dict):
             return {"ok": False, "error": "missing settings"}
 
-        actor_raw = update.get("requested_by")
-        actor_text = str(actor_raw or "").strip()
-        actor_id = int(actor_text) if actor_text.isdigit() else None
+        actor_id = int(actor_text)
         applied: list[str] = []
         warnings: list[str] = []
 
