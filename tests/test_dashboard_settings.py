@@ -1,4 +1,4 @@
-"""Tests for applying dashboard settings to guild_settings."""
+﻿"""Tests for applying dashboard settings to guild_settings."""
 from __future__ import annotations
 
 import asyncio
@@ -23,11 +23,30 @@ class FakeRole:
         self.name = name
 
 
+class FakePermissions:
+    administrator = True
+
+
+class FakeMember:
+    def __init__(self, user_id: int, name: str):
+        self.id = user_id
+        self.name = name
+        self.display_name = name
+        self.guild_permissions = FakePermissions()
+        self.roles = [FakeRole(777, "Администратор")]
+        self.bot = False
+
+
 class FakeGuild:
     def __init__(self):
         self.id = 42
         self.name = "420 SQUAD"
+        self.owner_id = 1
         self.roles = [FakeRole(777, "Администратор")]
+        self.members = [FakeMember(1, "Vortex"), FakeMember(2, "Kira")]
+
+    def get_member(self, user_id: int):
+        return next((member for member in self.members if member.id == user_id), None)
 
 
 async def _prepare():
@@ -38,6 +57,11 @@ async def _prepare():
         "bot_name TEXT, custom_emojis TEXT, currency_coins TEXT, currency_gems TEXT, "
         "prefix TEXT, start_coins INTEGER, disabled_commands TEXT, status_roles TEXT, "
         "battlepass_enabled INTEGER, admin_role_id INTEGER, tax_rate REAL)"
+    )
+    await db.execute(
+        "CREATE TABLE admin_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "admin_id INTEGER, target_id INTEGER, guild_id INTEGER, action TEXT, "
+        "details TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
     await db.execute("INSERT INTO guild_settings (guild_id) VALUES (42)")
     await db.commit()
@@ -55,7 +79,7 @@ def test_apply_dashboard_settings_valid():
             result = await m.bot.apply_dashboard_settings(
                 {
                     "guild_id": 42,
-                    "requested_by": "",
+                    "requested_by": "1",
                     "settings": {
                         "start_coins": 500,
                         "currency_name": "кредиты",
@@ -100,11 +124,20 @@ def test_apply_dashboard_settings_edges():
                     {"guild_id": 42, "settings": {}}
                 )
             )["ok"] is False
+            assert (
+                await m.bot.apply_dashboard_settings(
+                    {
+                        "guild_id": 42,
+                        "requested_by": "2",
+                        "settings": {"start_coins": 1},
+                    }
+                )
+            )["ok"] is True
 
             result = await m.bot.apply_dashboard_settings(
                 {
                     "guild_id": 42,
-                    "requested_by": "",
+                    "requested_by": "1",
                     "settings": {
                         "start_coins": "bad",
                         "currency_name": "",
@@ -114,7 +147,7 @@ def test_apply_dashboard_settings_edges():
                     },
                 }
             )
-            assert result["ok"] is True  # premium_name всё равно применился
+            assert result["ok"] is True
             assert any("start_coins" in warning for warning in result["warnings"])
             assert any("tax_rate" in warning for warning in result["warnings"])
             assert any("admin_role" in warning for warning in result["warnings"])
@@ -122,6 +155,7 @@ def test_apply_dashboard_settings_edges():
             cleared = await m.bot.apply_dashboard_settings(
                 {
                     "guild_id": 42,
+                    "requested_by": "1",
                     "settings": {"admin_role": "0"},
                 }
             )
