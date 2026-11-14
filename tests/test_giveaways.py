@@ -41,7 +41,9 @@ class FakeChannel:
 
     def permissions_for(self, member):
         return SimpleNamespace(
-            send_messages=self.allow, embed_links=self.allow
+            send_messages=self.allow,
+            embed_links=self.allow,
+            mention_everyone=self.allow,
         )
 
     async def send(self, **kwargs):
@@ -485,6 +487,15 @@ def test_select_giveaway_channel_skips_denied_channels():
     guild = FakeGuild(100, denied)
     guild.text_channels = [denied, allowed]
     assert m.select_giveaway_channel(guild) is allowed
+
+
+def test_giveaway_channels_for_guild_filters_permissions():
+    denied = FakeChannel(1, allow=False)
+    allowed = FakeChannel(2, allow=True)
+    guild = FakeGuild(100, denied)
+    guild.text_channels = [denied, allowed]
+    channels = m.giveaway_channels_for_guild(guild)
+    assert [channel["id"] for channel in channels] == ["2"]
 
 
 def test_send_giveaway_message_mentions_everyone():

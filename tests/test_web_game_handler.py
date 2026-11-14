@@ -194,7 +194,7 @@ def test_web_game_giveaway_permissions_and_dispatch():
             winners,
             duration_hours,
         ):
-            calls["local"] = (guild_id, reward_type, amount, winners)
+            calls["local"] = (channel, guild_id, reward_type, amount, winners)
             return True, "✅ Локальный розыгрыш создан"
 
         async def fake_global(
@@ -211,10 +211,15 @@ def test_web_game_giveaway_permissions_and_dispatch():
         original_create = m.create_giveaway
         original_global = m.create_global_giveaway
         original_channel = m.select_giveaway_channel
+        original_resolver = m.bot._web_game_giveaway_channel
+        selected_channel = object()
         m.bot.is_owner = fake_is_owner
         m.create_giveaway = fake_create
         m.create_global_giveaway = fake_global
-        m.select_giveaway_channel = lambda _guild: object()
+        m.select_giveaway_channel = lambda _guild: selected_channel
+        m.bot._web_game_giveaway_channel = (
+            lambda _guild, _raw_channel_id: selected_channel
+        )
         try:
             local = await m.bot.handle_web_game_command(
                 {
@@ -224,6 +229,7 @@ def test_web_game_giveaway_permissions_and_dispatch():
                     "guild_id": "42",
                     "payload": {
                         "scope": "server",
+                        "channel_id": "500",
                         "reward_type": "coins",
                         "amount": 100,
                         "winners": 2,
@@ -233,7 +239,13 @@ def test_web_game_giveaway_permissions_and_dispatch():
             )
             assert local["ok"] is True
             assert local["scope"] == "server"
-            assert calls["local"] == (42, "coins", 100, 2)
+            assert calls["local"] == (
+                selected_channel,
+                42,
+                "coins",
+                100,
+                2,
+            )
 
             global_result = await m.bot.handle_web_game_command(
                 {
@@ -280,6 +292,7 @@ def test_web_game_giveaway_permissions_and_dispatch():
             m.create_giveaway = original_create
             m.create_global_giveaway = original_global
             m.select_giveaway_channel = original_channel
+            m.bot._web_game_giveaway_channel = original_resolver
             await db.close()
 
     asyncio.run(run())
