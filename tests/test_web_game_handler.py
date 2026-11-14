@@ -77,6 +77,11 @@ def test_web_game_state_collect_and_admin():
         m._settings_cache.clear()
         m._tax_rate_cache.clear()
         _guild()
+
+        async def fake_is_owner(user):
+            return getattr(user, "id", None) == 1
+
+        m.bot.is_owner = fake_is_owner
         try:
             state = await m.bot.handle_web_game_command(
                 {
@@ -91,7 +96,10 @@ def test_web_game_state_collect_and_admin():
             assert state["guild_name"] == "420 SQUAD"
             assert state["player"]["name"] == "Vortex"
             assert state["player"]["is_admin"] is True
+            assert state["is_owner"] is True
             assert len(state["guilds"]) == 1
+            assert len(state["admin_guilds"]) == 1
+            assert state["giveaway_rewards"]
 
             await db.execute(
                 "INSERT INTO items (id, name, price, income_per_hour, "
@@ -154,6 +162,124 @@ def test_web_game_state_collect_and_admin():
             assert reset["ok"] is True
             assert "removed" in reset
         finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_giveaway_permissions_and_dispatch():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        guild = _guild()
+        guild.members.append(FakeMember(4, "LocalAdmin", admin=True))
+
+        async def fake_is_owner(user):
+            return getattr(user, "id", None) == 1
+
+        calls = {}
+
+        async def fake_create(
+            creator_id,
+            guild_id,
+            channel,
+            reward_type,
+            reward_id,
+            amount,
+            winners,
+            duration_hours,
+        ):
+            calls["local"] = (guild_id, reward_type, amount, winners)
+            return True, "✅ Локальный розыгрыш создан"
+
+        async def fake_global(
+            creator_id,
+            reward_type,
+            reward_id,
+            amount,
+            winners,
+            duration_hours,
+        ):
+            calls["global"] = (reward_type, amount, winners)
+            return True, "✅ Глобальный розыгрыш создан"
+
+        original_create = m.create_giveaway
+        original_global = m.create_global_giveaway
+        original_channel = m.select_giveaway_channel
+        m.bot.is_owner = fake_is_owner
+        m.create_giveaway = fake_create
+        m.create_global_giveaway = fake_global
+        m.select_giveaway_channel = lambda _guild: object()
+        try:
+            local = await m.bot.handle_web_game_command(
+                {
+                    "id": "giveaway-local",
+                    "action": "admin_giveaway",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {
+                        "scope": "server",
+                        "reward_type": "coins",
+                        "amount": 100,
+                        "winners": 2,
+                        "duration_hours": 24,
+                    },
+                }
+            )
+            assert local["ok"] is True
+            assert local["scope"] == "server"
+            assert calls["local"] == (42, "coins", 100, 2)
+
+            global_result = await m.bot.handle_web_game_command(
+                {
+                    "id": "giveaway-global",
+                    "action": "admin_giveaway",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {
+                        "scope": "global",
+                        "reward_type": "gems",
+                        "amount": 25,
+                        "winners": 1,
+                        "duration_hours": 6,
+                    },
+                }
+            )
+            assert global_result["ok"] is True
+            assert global_result["scope"] == "global"
+            assert calls["global"] == ("gems", 25, 1)
+
+            try:
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "giveaway-global-local-admin",
+                        "action": "admin_giveaway",
+                        "user_id": "4",
+                        "guild_id": "42",
+                        "payload": {
+                            "scope": "global",
+                            "reward_type": "coins",
+                            "amount": 10,
+                            "winners": 1,
+                            "duration_hours": 1,
+                        },
+                    }
+                )
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError(
+                    "локальный админ не должен создавать глобальный розыгрыш"
+                )
+        finally:
+            m.create_giveaway = original_create
+            m.create_global_giveaway = original_global
+            m.select_giveaway_channel = original_channel
             await db.close()
 
     asyncio.run(run())
