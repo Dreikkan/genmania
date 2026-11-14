@@ -90,6 +90,11 @@ def test_web_game_state_collect_and_admin():
             return getattr(user, "id", None) == 1
 
         m.bot.is_owner = fake_is_owner
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(1, 5000, 10), (2, 0, 5)"
+        )
+        await db.commit()
         try:
             state = await m.bot.handle_web_game_command(
                 {
@@ -110,6 +115,8 @@ def test_web_game_state_collect_and_admin():
             assert state["admin_guilds"][0]["channels"] == [
                 {"id": "500", "name": "general", "position": 0}
             ]
+            assert state["admin_guilds"][0]["local_top"][0]["discord_id"] == "1"
+            assert state["admin_guilds"][0]["local_top"][0]["coins"] == 5000
             assert state["giveaway_rewards"]
 
             await db.execute(

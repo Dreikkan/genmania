@@ -1944,6 +1944,86 @@ class CastleBot(commands.Bot):
             return []
         return [self._web_game_giveaway_row(row) for row in rows]
 
+    async def _web_game_local_top(self, guild: discord.Guild) -> list[dict]:
+        try:
+            rows = await get_top_players("coins", 30, guild.id)
+        except Exception:
+            log.debug(
+                "WEB_GAME: не удалось прочитать локальный топ гильдии %s",
+                guild.id,
+                exc_info=True,
+            )
+            return []
+        if not rows:
+            return []
+
+        user_ids = []
+        coins_map: dict[int, int] = {}
+        for row in rows:
+            try:
+                user_id = int(row[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            user_ids.append(user_id)
+            coins_map[user_id] = int(row[1] or 0)
+        if not user_ids:
+            return []
+
+        details: dict[int, tuple[int, int, str]] = {}
+        placeholders = ",".join("?" for _ in user_ids)
+        try:
+            async with self.db.execute(
+                f"""
+                SELECT p.user_id, p.gems,
+                       COALESCE(p.prestige_points, 0) AS prestige,
+                       c.name AS clan
+                FROM players p
+                LEFT JOIN clan_members cm ON cm.user_id = p.user_id
+                LEFT JOIN clans c ON c.id = cm.clan_id
+                WHERE p.user_id IN ({placeholders})
+                """,
+                user_ids,
+            ) as cursor:
+                for row in await cursor.fetchall():
+                    details[int(row[0])] = (
+                        int(row[1] or 0),
+                        int(row[2] or 0),
+                        str(row[3] or "Без клана"),
+                    )
+        except Exception:
+            log.debug(
+                "WEB_GAME: не удалось прочитать детали локального топа",
+                exc_info=True,
+            )
+
+        result = []
+        for user_id in user_ids:
+            member = guild.get_member(user_id)
+            user = self.get_user(user_id)
+            if member is not None:
+                name = member.display_name
+                handle = member.name
+            elif user is not None:
+                name = getattr(user, "global_name", None) or user.name
+                handle = user.name
+            else:
+                name = f"ID {user_id}"
+                handle = str(user_id)
+            gems, prestige, clan = details.get(user_id, (0, 0, "Без клана"))
+            result.append(
+                {
+                    "id": f"u-{user_id}",
+                    "discord_id": str(user_id),
+                    "name": name,
+                    "handle": handle,
+                    "coins": coins_map.get(user_id, 0),
+                    "gems": gems,
+                    "prestige": prestige,
+                    "clan": clan,
+                }
+            )
+        return result
+
     async def _web_game_admin_guilds(
         self, user_id: int, guilds: list[dict]
     ) -> list[dict]:
@@ -1972,6 +2052,7 @@ class CastleBot(commands.Bot):
                 entry["giveaways"] = (
                     await self._web_game_guild_giveaways(guild)
                 )
+                entry["local_top"] = await self._web_game_local_top(guild)
                 result.append(entry)
         return result
 
