@@ -171,6 +171,11 @@ def test_collect_builds_live_snapshot(tmp_path, monkeypatch):
             assert payload["transactions"][0]["amount"] == -3600
             assert payload["logs"][0]["type"] == "grant"
             assert payload["settings"]["tax_rate"] == 5.0
+            assert payload["admin_user_ids"] == [1]
+            assert payload["admin_guilds"] == {"1": ["1"]}
+            assert payload["guild_settings"][0]["guild_id"] == 1
+            assert payload["guild_settings"][0]["start_coins"] == 500
+            assert payload["guild_settings"][0]["guild_name"] == "420 SQUAD"
             assert len(payload["activity"]["labels"]) == 30
             assert len(payload["economy"]["weekly"]["values"]) == 7
             assert payload["economy"]["split"][0]["value"] > 0

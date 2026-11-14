@@ -1805,6 +1805,52 @@ class CastleBot(commands.Bot):
         result.sort(key=lambda item: item["members"], reverse=True)
         return result
 
+    async def _web_game_admin_guilds(
+        self, user_id: int, guilds: list[dict]
+    ) -> list[dict]:
+        """Серверы из списка, где у пользователя есть права администратора."""
+        result: list[dict] = []
+        for item in guilds:
+            try:
+                guild_id = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            guild = self.get_guild(guild_id)
+            if guild is None:
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                continue
+            settings = await get_settings(guild_id)
+            if self._is_web_admin(
+                guild, member, settings.get("admin_role_id")
+            ):
+                result.append(item)
+        return result
+
+    async def _web_game_is_owner(self, user) -> bool:
+        if user is None:
+            return False
+        checker = getattr(self, "is_owner", None)
+        if checker is None:
+            return False
+        try:
+            return bool(await checker(user))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _giveaway_reward_options() -> list[dict]:
+        return [
+            {
+                "id": key,
+                "name": info["name"],
+                "unit": info["unit"],
+                "requires_id": bool(info["requires_id"]),
+            }
+            for key, info in GIVEAWAY_REWARDS.items()
+        ]
+
     def _is_web_admin(
         self,
         guild: discord.Guild,
@@ -1833,6 +1879,9 @@ class CastleBot(commands.Bot):
         self, user_id: int, guild_id: int
     ) -> dict:
         guilds = self._web_game_guilds(user_id)
+        admin_guilds = await self._web_game_admin_guilds(user_id, guilds)
+        user_obj = self.get_user(user_id)
+        is_owner = await self._web_game_is_owner(user_obj)
         guild = self.get_guild(guild_id) if guild_id else None
         member = guild.get_member(user_id) if guild else None
         if guild is None or member is None:
@@ -1840,10 +1889,13 @@ class CastleBot(commands.Bot):
                 return {
                     "ok": True,
                     "guilds": [],
+                    "admin_guilds": [],
                     "guild_id": None,
                     "player": None,
                     "inventory": [],
                     "settings": {},
+                    "is_owner": is_owner,
+                    "giveaway_rewards": [],
                 }
             guild_id = int(guilds[0]["id"])
             guild = self.get_guild(guild_id)
@@ -1852,12 +1904,16 @@ class CastleBot(commands.Bot):
                 return {
                     "ok": True,
                     "guilds": guilds,
+                    "admin_guilds": admin_guilds,
                     "guild_id": None,
                     "player": None,
                     "inventory": [],
                     "settings": {},
+                    "is_owner": is_owner,
+                    "giveaway_rewards": [],
                 }
 
+        is_owner = await self._web_game_is_owner(member or user_obj)
         await get_player_stats(user_id, guild_id)
         async with self.db.execute(
             "SELECT coins, gems, COALESCE(prestige_points, 0), "
@@ -1938,6 +1994,11 @@ class CastleBot(commands.Bot):
         return {
             "ok": True,
             "guilds": guilds,
+            "admin_guilds": admin_guilds,
+            "is_owner": is_owner,
+            "giveaway_rewards": (
+                self._giveaway_reward_options() if is_admin else []
+            ),
             "guild_id": str(guild.id),
             "guild_name": guild.name,
             "player": {
@@ -1976,6 +2037,10 @@ class CastleBot(commands.Bot):
         actor: discord.Member,
     ) -> dict:
         await self._require_web_admin(guild, actor)
+        if not await self._web_game_is_owner(actor):
+            raise PermissionError(
+                "Начисление монет и гемов доступно только владельцу бота."
+            )
         payload = command.get("payload") or {}
         try:
             target_id = int(payload.get("target_id"))
@@ -2110,6 +2175,121 @@ class CastleBot(commands.Bot):
             "removed": removed,
         }
 
+    async def _web_game_giveaway(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        scope = str(payload.get("scope") or GIVEAWAY_SCOPE_SERVER)
+        if scope not in {GIVEAWAY_SCOPE_SERVER, GIVEAWAY_SCOPE_GLOBAL}:
+            raise ValueError("Неизвестный тип розыгрыша.")
+        if scope == GIVEAWAY_SCOPE_GLOBAL:
+            if not await self._web_game_is_owner(actor):
+                raise PermissionError(
+                    "Глобальные розыгрыши доступны только владельцу бота."
+                )
+        else:
+            await self._require_web_admin(guild, actor)
+
+        reward_type = str(payload.get("reward_type") or "").strip()
+        reward_id = str(payload.get("reward_id") or "").strip() or None
+        amount = payload.get("amount")
+        winners = payload.get("winners")
+        duration_hours = payload.get("duration_hours")
+
+        meta, error = await giveaway_validate_reward(
+            reward_type, reward_id, amount
+        )
+        if error:
+            raise ValueError(error.replace("❌ ", ""))
+        winners_int, hours_int, error = parse_giveaway_options(
+            winners, duration_hours
+        )
+        if error:
+            raise ValueError(error.replace("❌ ", ""))
+
+        channel = None
+        if scope == GIVEAWAY_SCOPE_SERVER:
+            channel = select_giveaway_channel(guild)
+            if channel is None:
+                raise ValueError(
+                    "Не удалось найти канал для розыгрыша. "
+                    "Проверьте права бота на отправку сообщений."
+                )
+
+        await self._ensure_web_game_table()
+        command_id = str(command.get("id", "")).strip()
+        if command_id == "":
+            raise ValueError("Некорректный ID команды.")
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "INSERT OR IGNORE INTO web_game_commands (id) VALUES (?)",
+                (command_id,),
+            )
+            if cursor.rowcount == 0:
+                async with self.db.execute(
+                    "SELECT result FROM web_game_commands WHERE id = ?",
+                    (command_id,),
+                ) as read_cursor:
+                    cached = await read_cursor.fetchone()
+                if cached and cached[0]:
+                    return json.loads(cached[0])
+                return {"ok": False, "error": "Команда уже обрабатывается."}
+
+        try:
+            if scope == GIVEAWAY_SCOPE_GLOBAL:
+                ok, message = await create_global_giveaway(
+                    actor.id,
+                    reward_type,
+                    reward_id,
+                    amount,
+                    winners,
+                    duration_hours,
+                )
+            else:
+                ok, message = await create_giveaway(
+                    actor.id,
+                    guild.id,
+                    channel,
+                    reward_type,
+                    reward_id,
+                    amount,
+                    winners,
+                    duration_hours,
+                )
+        except Exception:
+            await self.db.execute(
+                "DELETE FROM web_game_commands WHERE id = ?", (command_id,)
+            )
+            await self.db.commit()
+            raise
+
+        if not ok:
+            await self.db.execute(
+                "DELETE FROM web_game_commands WHERE id = ?", (command_id,)
+            )
+            await self.db.commit()
+            raise ValueError(str(message).replace("❌ ", ""))
+
+        result = {
+            "ok": True,
+            "action": "admin_giveaway",
+            "scope": scope,
+            "reward_type": reward_type,
+            "amount": int(meta["amount"]) if meta else 0,
+            "winners": winners_int,
+            "duration_hours": hours_int,
+            "message": message,
+        }
+        await self.db.execute(
+            "UPDATE web_game_commands SET result = ? WHERE id = ?",
+            (json.dumps(result, ensure_ascii=False), command_id),
+        )
+        await self.db.commit()
+        return result
+
     async def handle_web_game_command(self, command: dict) -> dict:
         action = str(command.get("action", ""))
         try:
@@ -2150,6 +2330,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
             return await self._web_game_reset(command, guild, member)
+        if action == "admin_giveaway":
+            return await self._web_game_giveaway(command, guild, member)
         raise ValueError("Неизвестное игровое действие.")
 
     def _spawn_background(self, name: str, factory) -> asyncio.Task:

@@ -197,7 +197,7 @@ class DashboardSync:
         activity, weekly, growth = self._history_series(history)
         stats["growth"] = growth
         stats["health"] = self._health(stats)
-        admin_user_ids = await self._collect_admin_user_ids()
+        admin_user_ids, admin_guilds = await self._collect_admin_access()
 
         transactions = await self._collect_transactions(member_map)
         logs = await self._collect_logs(member_map)
@@ -221,6 +221,7 @@ class DashboardSync:
             "generated_at": dt.datetime.now(UTC).isoformat(),
             "applied_settings_revision": self._applied_settings_revision,
             "admin_user_ids": admin_user_ids,
+            "admin_guilds": admin_guilds,
             "stats": stats,
             "activity": activity,
             "top_players": players[:8],
@@ -232,6 +233,7 @@ class DashboardSync:
             "logs": logs,
             "economy": economy,
             "settings": await self._collect_settings(),
+            "guild_settings": await self._collect_guild_settings(),
         }
 
     def _member_map(self) -> dict[int, Any]:
@@ -257,8 +259,10 @@ class DashboardSync:
             if row and row[0] is not None
         }
 
-    async def _collect_admin_user_ids(self) -> list[int]:
-        """Собирает ID владельцев, администраторов и носителей админ-роли."""
+    async def _collect_admin_access(
+        self,
+    ) -> tuple[list[int], dict[str, list[str]]]:
+        """Собирает админов и карту «пользователь → серверы, где он админ»."""
         rows = await self._fetchall(
             "SELECT guild_id, admin_role_id FROM guild_settings"
         )
@@ -270,29 +274,59 @@ class DashboardSync:
                 continue
 
         admin_ids: set[int] = set()
+        admin_guilds: dict[int, set[int]] = {}
         for guild in getattr(self.bot, "guilds", []) or []:
-            admin_role = role_map.get(int(guild.id))
             try:
-                for member in guild.members:
-                    if getattr(member, "bot", False):
-                        continue
-                    if (
-                        member.id == guild.owner_id
-                        or member.guild_permissions.administrator
-                    ):
-                        admin_ids.add(member.id)
-                        continue
-                    if admin_role and any(
-                        role.id == admin_role for role in member.roles
-                    ):
-                        admin_ids.add(member.id)
+                guild_id = int(guild.id)
+            except (TypeError, ValueError):
+                continue
+            admin_role = role_map.get(guild_id)
+            owner_id = getattr(guild, "owner_id", None)
+            if owner_id is None:
+                owner_id = getattr(getattr(guild, "owner", None), "id", None)
+            if owner_id is not None:
+                try:
+                    owner_int = int(owner_id)
+                except (TypeError, ValueError):
+                    owner_int = 0
+                if owner_int > 0:
+                    admin_ids.add(owner_int)
+                    admin_guilds.setdefault(owner_int, set()).add(guild_id)
+
+            try:
+                members = list(getattr(guild, "members", []) or [])
             except Exception:
-                log.debug(
-                    "DASHBOARD_SYNC: не удалось собрать админов гильдии %s",
-                    guild.id,
-                    exc_info=True,
+                members = []
+            for member in members:
+                if getattr(member, "bot", False):
+                    continue
+                permissions = getattr(member, "guild_permissions", None)
+                is_administrator = bool(
+                    getattr(permissions, "administrator", False)
                 )
-        return sorted(admin_ids)
+                has_admin_role = bool(
+                    admin_role
+                    and any(
+                        getattr(role, "id", None) == admin_role
+                        for role in (getattr(member, "roles", []) or [])
+                    )
+                )
+                member_id = getattr(member, "id", None)
+                if member_id is None:
+                    continue
+                if is_administrator or has_admin_role:
+                    try:
+                        member_int = int(member_id)
+                    except (TypeError, ValueError):
+                        continue
+                    admin_ids.add(member_int)
+                    admin_guilds.setdefault(member_int, set()).add(guild_id)
+
+        mapping = {
+            str(user_id): [str(guild_id) for guild_id in sorted(guild_ids)]
+            for user_id, guild_ids in sorted(admin_guilds.items())
+        }
+        return sorted(admin_ids), mapping
 
     def _display_name(self, user_id: int, member_map: dict[int, Any]) -> tuple[str, str]:
         member = member_map.get(user_id)
@@ -645,10 +679,100 @@ class DashboardSync:
             )
         return result
 
+    @staticmethod
+    def _backup_interval_text() -> str:
+        hours = int(BACKUP_INTERVAL_HOURS)
+        if hours == 1:
+            return "1 час"
+        if hours in (6, 12):
+            return f"{hours} часов"
+        return "24 часа"
+
+    @staticmethod
+    def _admin_role_name(guild: Any, admin_role_id: Any) -> str:
+        if not admin_role_id:
+            return "Администратор"
+        try:
+            role_id = int(admin_role_id)
+        except (TypeError, ValueError):
+            return "Администратор"
+        for role in getattr(guild, "roles", []) or []:
+            if getattr(role, "id", None) == role_id:
+                return str(getattr(role, "name", role_id))
+        return str(role_id)
+
+    async def _collect_guild_settings(self) -> list[dict]:
+        """Настройки всех серверов бота для выбора на сайте."""
+        rows = await self._fetchall(
+            "SELECT guild_id, start_coins, currency_coins, currency_gems, "
+            "tax_rate, admin_role_id FROM guild_settings"
+        )
+        by_guild: dict[int, Any] = {}
+        for row in rows:
+            try:
+                by_guild[int(row[0])] = row
+            except (TypeError, ValueError, IndexError):
+                continue
+
+        guilds = sorted(
+            getattr(self.bot, "guilds", []) or [],
+            key=lambda guild: getattr(guild, "member_count", 0)
+            or len(getattr(guild, "members", []) or []),
+            reverse=True,
+        )
+        interval_text = self._backup_interval_text()
+        result: list[dict] = []
+        for guild in guilds:
+            try:
+                guild_id = int(guild.id)
+            except (TypeError, ValueError):
+                continue
+            row = by_guild.get(guild_id)
+            if row:
+                (
+                    start_coins,
+                    currency_coins,
+                    currency_gems,
+                    tax_rate,
+                    admin_role_id,
+                ) = (
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                )
+            else:
+                start_coins, currency_coins, currency_gems = 8, "монеты", "гемы"
+                tax_rate, admin_role_id = 0.02, None
+            result.append(
+                {
+                    "guild_id": guild_id,
+                    "guild_name": str(getattr(guild, "name", guild_id)),
+                    "members": int(
+                        getattr(guild, "member_count", 0)
+                        or len(getattr(guild, "members", []) or [])
+                    ),
+                    "start_coins": int(start_coins or 8),
+                    "currency_name": str(currency_coins or "монеты"),
+                    "premium_name": str(currency_gems or "гемы"),
+                    "tax_rate": round(float(tax_rate or 0.02) * 100.0, 1),
+                    "admin_role": self._admin_role_name(guild, admin_role_id),
+                    "welcome_channel": "#welcome",
+                    "public_stats": True,
+                    "weekly_report": True,
+                    "maintenance": False,
+                    "max_grid": 10,
+                    "backup_interval": interval_text,
+                }
+            )
+        return result[:50]
+
     async def _collect_settings(self) -> dict:
         guilds = sorted(
             getattr(self.bot, "guilds", []) or [],
-            key=lambda guild: getattr(guild, "member_count", 0) or len(guild.members),
+            key=lambda guild: getattr(guild, "member_count", 0)
+            or len(getattr(guild, "members", []) or []),
             reverse=True,
         )
         primary = guilds[0] if guilds else None
@@ -666,29 +790,26 @@ class DashboardSync:
         start_coins, currency_coins, currency_gems, tax_rate, admin_role_id = (
             row if row else (8, "монеты", "гемы", 0.02, None)
         )
-        hours = int(BACKUP_INTERVAL_HOURS)
-        if BACKUP_INTERVAL_HOURS == 1:
-            interval_text = "1 час"
-        elif hours in (6, 12):
-            interval_text = f"{hours} часов"
-        elif BACKUP_INTERVAL_HOURS == 24:
-            interval_text = "24 часа"
-        else:
-            interval_text = "24 часа"
         return {
             "guild_id": int(primary.id) if primary is not None else 0,
             "guild_name": str(primary.name) if primary is not None else "—",
+            "members": int(
+                getattr(primary, "member_count", 0)
+                or len(getattr(primary, "members", []) or [])
+            )
+            if primary is not None
+            else 0,
             "start_coins": int(start_coins or 8),
             "currency_name": str(currency_coins or "монеты"),
             "premium_name": str(currency_gems or "гемы"),
             "tax_rate": round(float(tax_rate or 0.02) * 100.0, 1),
-            "admin_role": str(admin_role_id or "Администратор"),
+            "admin_role": self._admin_role_name(primary, admin_role_id),
             "welcome_channel": "#welcome",
             "public_stats": True,
             "weekly_report": True,
             "maintenance": False,
             "max_grid": 10,
-            "backup_interval": interval_text,
+            "backup_interval": self._backup_interval_text(),
         }
 
     async def _collect_economy(self, stats: dict, weekly: dict) -> dict:
