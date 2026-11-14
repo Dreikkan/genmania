@@ -10031,7 +10031,16 @@ async def send_giveaway_message(channel, giveaway_id: int):
     giveaway = await get_giveaway(giveaway_id)
     embed = await build_giveaway_embed(giveaway)
     view = GiveawayJoinView(giveaway_id)
-    message = await channel.send(embed=embed, view=view)
+    message = await channel.send(
+        content="@everyone",
+        embed=embed,
+        view=view,
+        allowed_mentions=discord.AllowedMentions(
+            everyone=True,
+            users=False,
+            roles=False,
+        ),
+    )
     bot.add_view(view, message_id=message.id)
     return message
 
