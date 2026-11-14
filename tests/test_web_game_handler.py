@@ -42,6 +42,13 @@ class FakeMember:
         self.bot = False
 
 
+class FakeTextChannel:
+    def __init__(self, channel_id: int, name: str, position: int = 0):
+        self.id = channel_id
+        self.name = name
+        self.position = position
+
+
 class FakeGuild:
     def __init__(self):
         self.id = 42
@@ -55,6 +62,7 @@ class FakeGuild:
         ]
         self.roles = [FakeRole(777, "Администратор")]
         self.icon = None
+        self.text_channels = [FakeTextChannel(500, "general")]
 
     def get_member(self, user_id: int):
         return next((member for member in self.members if member.id == user_id), None)
@@ -99,6 +107,9 @@ def test_web_game_state_collect_and_admin():
             assert state["is_owner"] is True
             assert len(state["guilds"]) == 1
             assert len(state["admin_guilds"]) == 1
+            assert state["admin_guilds"][0]["channels"] == [
+                {"id": "500", "name": "general", "position": 0}
+            ]
             assert state["giveaway_rewards"]
 
             await db.execute(
@@ -194,7 +205,7 @@ def test_web_game_giveaway_permissions_and_dispatch():
             winners,
             duration_hours,
         ):
-            calls["local"] = (guild_id, reward_type, amount, winners)
+            calls["local"] = (channel, guild_id, reward_type, amount, winners)
             return True, "✅ Локальный розыгрыш создан"
 
         async def fake_global(
@@ -211,10 +222,15 @@ def test_web_game_giveaway_permissions_and_dispatch():
         original_create = m.create_giveaway
         original_global = m.create_global_giveaway
         original_channel = m.select_giveaway_channel
+        original_resolver = m.bot._web_game_giveaway_channel
+        selected_channel = object()
         m.bot.is_owner = fake_is_owner
         m.create_giveaway = fake_create
         m.create_global_giveaway = fake_global
-        m.select_giveaway_channel = lambda _guild: object()
+        m.select_giveaway_channel = lambda _guild: selected_channel
+        m.bot._web_game_giveaway_channel = (
+            lambda _guild, _raw_channel_id: selected_channel
+        )
         try:
             local = await m.bot.handle_web_game_command(
                 {
@@ -224,6 +240,7 @@ def test_web_game_giveaway_permissions_and_dispatch():
                     "guild_id": "42",
                     "payload": {
                         "scope": "server",
+                        "channel_id": "500",
                         "reward_type": "coins",
                         "amount": 100,
                         "winners": 2,
@@ -233,7 +250,13 @@ def test_web_game_giveaway_permissions_and_dispatch():
             )
             assert local["ok"] is True
             assert local["scope"] == "server"
-            assert calls["local"] == (42, "coins", 100, 2)
+            assert calls["local"] == (
+                selected_channel,
+                42,
+                "coins",
+                100,
+                2,
+            )
 
             global_result = await m.bot.handle_web_game_command(
                 {
@@ -280,6 +303,7 @@ def test_web_game_giveaway_permissions_and_dispatch():
             m.create_giveaway = original_create
             m.create_global_giveaway = original_global
             m.select_giveaway_channel = original_channel
+            m.bot._web_game_giveaway_channel = original_resolver
             await db.close()
 
     asyncio.run(run())

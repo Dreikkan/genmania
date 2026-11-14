@@ -41,7 +41,9 @@ class FakeChannel:
 
     def permissions_for(self, member):
         return SimpleNamespace(
-            send_messages=self.allow, embed_links=self.allow
+            send_messages=self.allow,
+            embed_links=self.allow,
+            mention_everyone=self.allow,
         )
 
     async def send(self, **kwargs):
@@ -485,6 +487,61 @@ def test_select_giveaway_channel_skips_denied_channels():
     guild = FakeGuild(100, denied)
     guild.text_channels = [denied, allowed]
     assert m.select_giveaway_channel(guild) is allowed
+
+
+def test_giveaway_channels_for_guild_filters_permissions():
+    denied = FakeChannel(1, allow=False)
+    allowed = FakeChannel(2, allow=True)
+    guild = FakeGuild(100, denied)
+    guild.text_channels = [denied, allowed]
+    channels = m.giveaway_channels_for_guild(guild)
+    assert [channel["id"] for channel in channels] == ["2"]
+
+
+def test_send_giveaway_message_mentions_everyone():
+    async def run():
+        db = await _init()
+        original_get = m.get_giveaway
+        original_build = m.build_giveaway_embed
+        original_view = m.GiveawayJoinView
+        original_add = m.bot.add_view
+        try:
+            async def fake_get(_giveaway_id):
+                return (1, 100, 500, 1, 1, "title", "coins", "", 10, 1)
+
+            async def fake_build(_giveaway):
+                return object()
+
+            class FakeView:
+                def __init__(self, giveaway_id):
+                    self.giveaway_id = giveaway_id
+
+            added = []
+
+            def fake_add_view(view, message_id=None):
+                added.append((view, message_id))
+
+            m.get_giveaway = fake_get
+            m.build_giveaway_embed = fake_build
+            m.GiveawayJoinView = FakeView
+            m.bot.add_view = fake_add_view
+            channel = FakeChannel(500)
+            message = await m.send_giveaway_message(channel, 1)
+            assert message.id
+            sent = channel.sent[-1]
+            assert sent["content"] == "@everyone"
+            assert sent["allowed_mentions"].everyone is True
+            assert sent["allowed_mentions"].users is False
+            assert sent["allowed_mentions"].roles is False
+            assert added and added[0][1] == message.id
+        finally:
+            m.get_giveaway = original_get
+            m.build_giveaway_embed = original_build
+            m.GiveawayJoinView = original_view
+            m.bot.add_view = original_add
+            await _close(db)
+
+    asyncio.run(run())
 
 
 def test_old_giveaways_table_gets_scope_column():

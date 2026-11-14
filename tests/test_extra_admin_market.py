@@ -317,13 +317,17 @@ def test_modal_error_handler_and_giveaway_channel():
         class GoodChannel:
             def permissions_for(self, me):
                 return SimpleNamespace(
-                    send_messages=True, embed_links=True
+                    send_messages=True,
+                    embed_links=True,
+                    mention_everyone=True,
                 )
 
         class NoPermChannel:
             def permissions_for(self, me):
                 return SimpleNamespace(
-                    send_messages=False, embed_links=False
+                    send_messages=False,
+                    embed_links=False,
+                    mention_everyone=False,
                 )
 
         guild = SimpleNamespace(

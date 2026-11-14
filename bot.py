@@ -1825,7 +1825,9 @@ class CastleBot(commands.Bot):
             if self._is_web_admin(
                 guild, member, settings.get("admin_role_id")
             ):
-                result.append(item)
+                entry = dict(item)
+                entry["channels"] = giveaway_channels_for_guild(guild)
+                result.append(entry)
         return result
 
     async def _web_game_is_owner(self, user) -> bool:
@@ -2175,6 +2177,36 @@ class CastleBot(commands.Bot):
             "removed": removed,
         }
 
+    def _web_game_giveaway_channel(
+        self, guild: discord.Guild, raw_channel_id: str
+    ) -> discord.TextChannel:
+        try:
+            channel_id = int(raw_channel_id)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный канал розыгрыша.")
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            raise ValueError("Выберите текстовый канал для розыгрыша.")
+        me = getattr(guild, "me", None)
+        if me is not None:
+            try:
+                permissions = channel.permissions_for(me)
+            except Exception:
+                permissions = None
+            if permissions is not None and not all(
+                getattr(permissions, name, False)
+                for name in (
+                    "send_messages",
+                    "embed_links",
+                    "mention_everyone",
+                )
+            ):
+                raise ValueError(
+                    "В канале нет прав на отправку, embed или "
+                    "упоминание @everyone."
+                )
+        return channel
+
     async def _web_game_giveaway(
         self,
         command: dict,
@@ -2212,11 +2244,18 @@ class CastleBot(commands.Bot):
 
         channel = None
         if scope == GIVEAWAY_SCOPE_SERVER:
-            channel = select_giveaway_channel(guild)
+            raw_channel_id = str(payload.get("channel_id") or "").strip()
+            if raw_channel_id:
+                channel = self._web_game_giveaway_channel(
+                    guild, raw_channel_id
+                )
+            else:
+                channel = select_giveaway_channel(guild)
             if channel is None:
                 raise ValueError(
                     "Не удалось найти канал для розыгрыша. "
-                    "Проверьте права бота на отправку сообщений."
+                    "Проверьте права бота на отправку сообщений, "
+                    "embed и упоминание @everyone."
                 )
 
         await self._ensure_web_game_table()
@@ -10028,10 +10067,33 @@ async def _insert_giveaway_record(
 
 
 async def send_giveaway_message(channel, giveaway_id: int):
+    guild = getattr(channel, "guild", None)
+    me = getattr(guild, "me", None)
+    if me is not None:
+        try:
+            permissions = channel.permissions_for(me)
+        except Exception:
+            permissions = None
+        if permissions is not None and not all(
+            getattr(permissions, name, False)
+            for name in ("send_messages", "embed_links", "mention_everyone")
+        ):
+            raise RuntimeError(
+                "В канале нет прав на отправку, embed или упоминание @everyone."
+            )
     giveaway = await get_giveaway(giveaway_id)
     embed = await build_giveaway_embed(giveaway)
     view = GiveawayJoinView(giveaway_id)
-    message = await channel.send(embed=embed, view=view)
+    message = await channel.send(
+        content="@everyone",
+        embed=embed,
+        view=view,
+        allowed_mentions=discord.AllowedMentions(
+            everyone=True,
+            users=False,
+            roles=False,
+        ),
+    )
     bot.add_view(view, message_id=message.id)
     return message
 
@@ -10039,6 +10101,36 @@ async def send_giveaway_message(channel, giveaway_id: int):
 def global_giveaway_guilds():
     """Список серверов для глобальной рассылки (точка для тестов)."""
     return list(getattr(bot, "guilds", []) or [])
+
+
+def giveaway_channels_for_guild(guild) -> list[dict]:
+    """Каналы, где бот может отправить розыгрыш с упоминанием @everyone."""
+    me = getattr(guild, "me", None)
+    result: list[dict] = []
+    for channel in getattr(guild, "text_channels", ()) or ():
+        permissions = None
+        try:
+            if me is not None:
+                permissions = channel.permissions_for(me)
+        except Exception:
+            permissions = None
+        if permissions is not None:
+            allowed = bool(
+                getattr(permissions, "send_messages", False)
+                and getattr(permissions, "embed_links", False)
+                and getattr(permissions, "mention_everyone", False)
+            )
+            if not allowed:
+                continue
+        result.append(
+            {
+                "id": str(getattr(channel, "id", "")),
+                "name": str(getattr(channel, "name", "канал")),
+                "position": int(getattr(channel, "position", 0) or 0),
+            }
+        )
+    result.sort(key=lambda item: (item["position"], item["name"].lower()))
+    return [item for item in result if item["id"]][:100]
 
 
 def select_giveaway_channel(guild):
@@ -10059,6 +10151,7 @@ def select_giveaway_channel(guild):
         return bool(
             getattr(permissions, "send_messages", False)
             and getattr(permissions, "embed_links", False)
+            and getattr(permissions, "mention_everyone", False)
         )
 
     system_channel = getattr(guild, "system_channel", None)
