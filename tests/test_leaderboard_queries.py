@@ -97,6 +97,17 @@ def test_all_leaderboard_types_and_cache():
                 assert await m.get_top_players("coins", 10, guild_id=99) == [
                     (2, 500)
                 ]
+                await db.execute(
+                    "INSERT INTO guild_top_exclusions (guild_id, user_id) "
+                    "VALUES (99, 2)"
+                )
+                await db.commit()
+                assert await m.get_top_players("coins", 10, guild_id=99) == []
+                assert await m.get_top_players("coins") == [
+                    (1, 1000),
+                    (2, 500),
+                    (3, 100),
+                ]
                 m.bot.get_guild = lambda guild_id: None
                 assert await m.get_top_players("coins", 10, guild_id=99) == []
             finally:
