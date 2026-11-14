@@ -42,6 +42,13 @@ class FakeMember:
         self.bot = False
 
 
+class FakeTextChannel:
+    def __init__(self, channel_id: int, name: str, position: int = 0):
+        self.id = channel_id
+        self.name = name
+        self.position = position
+
+
 class FakeGuild:
     def __init__(self):
         self.id = 42
@@ -55,6 +62,7 @@ class FakeGuild:
         ]
         self.roles = [FakeRole(777, "Администратор")]
         self.icon = None
+        self.text_channels = [FakeTextChannel(500, "general")]
 
     def get_member(self, user_id: int):
         return next((member for member in self.members if member.id == user_id), None)
@@ -99,6 +107,9 @@ def test_web_game_state_collect_and_admin():
             assert state["is_owner"] is True
             assert len(state["guilds"]) == 1
             assert len(state["admin_guilds"]) == 1
+            assert state["admin_guilds"][0]["channels"] == [
+                {"id": "500", "name": "general", "position": 0}
+            ]
             assert state["giveaway_rewards"]
 
             await db.execute(
