@@ -447,6 +447,111 @@ def test_web_game_top_exclusions_local_and_global():
     asyncio.run(run())
 
 
+def test_web_game_giveaway_list_and_cancel():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        guild = _guild()
+        guild.members.append(FakeMember(4, "LocalAdmin", admin=True))
+
+        async def fake_is_owner(user):
+            return getattr(user, "id", None) == 1
+
+        m.bot.is_owner = fake_is_owner
+        await db.execute(
+            "INSERT INTO giveaways (guild_id, channel_id, message_id, "
+            "creator_id, title, reward_type, reward_id, amount, "
+            "winners_count, status, ends_at, scope) VALUES "
+            "(42, 500, 900, 1, 'Локальный', 'coins', '', 10, 1, "
+            "'active', '2099-01-01T00:00:00', 'server')"
+        )
+        await db.execute(
+            "INSERT INTO giveaways (guild_id, channel_id, message_id, "
+            "creator_id, title, reward_type, reward_id, amount, "
+            "winners_count, status, ends_at, scope) VALUES "
+            "(NULL, NULL, NULL, 1, 'Глобальный', 'gems', '', 10, 1, "
+            "'active', '2099-01-01T00:00:00', 'global')"
+        )
+        await db.commit()
+
+        updates = []
+        original_update = m.update_giveaway_message
+
+        async def fake_update(giveaway_id):
+            updates.append(giveaway_id)
+
+        m.update_giveaway_message = fake_update
+        try:
+            local_list = await m.bot._web_game_guild_giveaways(guild)
+            assert local_list[0]["title"] == "Локальный"
+            assert local_list[0]["status"] == "active"
+            global_list = await m.bot._web_game_global_giveaways()
+            assert global_list[0]["title"] == "Глобальный"
+
+            cancelled = await m.bot.handle_web_game_command(
+                {
+                    "id": "giveaway-cancel",
+                    "action": "admin_giveaway_cancel",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"giveaway_id": "1"},
+                }
+            )
+            assert cancelled["ok"] is True
+            assert cancelled["status"] == "cancelled"
+            assert updates == [1]
+
+            again = await m.bot.handle_web_game_command(
+                {
+                    "id": "giveaway-cancel-again",
+                    "action": "admin_giveaway_cancel",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"giveaway_id": "1"},
+                }
+            )
+            assert again["changed"] is False
+
+            try:
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "giveaway-cancel-global-denied",
+                        "action": "admin_giveaway_cancel",
+                        "user_id": "4",
+                        "guild_id": "42",
+                        "payload": {"giveaway_id": "2"},
+                    }
+                )
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError(
+                    "локальный админ не должен отменять глобальный розыгрыш"
+                )
+
+            global_cancelled = await m.bot.handle_web_game_command(
+                {
+                    "id": "giveaway-cancel-global",
+                    "action": "admin_giveaway_cancel",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"giveaway_id": "2"},
+                }
+            )
+            assert global_cancelled["scope"] == "global"
+            assert updates == [1, 2]
+        finally:
+            m.update_giveaway_message = original_update
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")

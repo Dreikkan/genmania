@@ -1879,6 +1879,71 @@ class CastleBot(commands.Bot):
             result.append(self._web_game_exclusion_entry(guild, user_id))
         return result
 
+    @staticmethod
+    def _web_game_giveaway_row(row) -> dict:
+        return {
+            "id": str(row[0]),
+            "title": str(row[1] or "Розыгрыш"),
+            "status": str(row[2] or "active"),
+            "ends_at": str(row[3] or ""),
+            "scope": str(row[4] or "server"),
+            "winners": int(row[5] or 0),
+            "entries": int(row[6] or 0),
+        }
+
+    async def _web_game_guild_giveaways(
+        self, guild: discord.Guild
+    ) -> list[dict]:
+        try:
+            async with self.db.execute(
+                """
+                SELECT g.id, g.title, g.status, g.ends_at, g.scope,
+                       g.winners_count,
+                       (SELECT COUNT(*) FROM giveaway_entries e
+                        WHERE e.giveaway_id = g.id)
+                FROM giveaways g
+                WHERE g.guild_id = ?
+                  AND COALESCE(g.scope, 'server') = 'server'
+                ORDER BY CASE WHEN g.status = 'active' THEN 0 ELSE 1 END,
+                         g.id DESC
+                LIMIT 20
+                """,
+                (guild.id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            log.debug(
+                "WEB_GAME: не удалось прочитать розыгрыши гильдии %s",
+                guild.id,
+                exc_info=True,
+            )
+            return []
+        return [self._web_game_giveaway_row(row) for row in rows]
+
+    async def _web_game_global_giveaways(self) -> list[dict]:
+        try:
+            async with self.db.execute(
+                """
+                SELECT g.id, g.title, g.status, g.ends_at, g.scope,
+                       g.winners_count,
+                       (SELECT COUNT(*) FROM giveaway_entries e
+                        WHERE e.giveaway_id = g.id)
+                FROM giveaways g
+                WHERE COALESCE(g.scope, 'server') = 'global'
+                ORDER BY CASE WHEN g.status = 'active' THEN 0 ELSE 1 END,
+                         g.id DESC
+                LIMIT 20
+                """
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            log.debug(
+                "WEB_GAME: не удалось прочитать глобальные розыгрыши",
+                exc_info=True,
+            )
+            return []
+        return [self._web_game_giveaway_row(row) for row in rows]
+
     async def _web_game_admin_guilds(
         self, user_id: int, guilds: list[dict]
     ) -> list[dict]:
@@ -1903,6 +1968,9 @@ class CastleBot(commands.Bot):
                 entry["channels"] = giveaway_channels_for_guild(guild)
                 entry["top_exclusions"] = (
                     await self._web_game_guild_top_exclusions(guild)
+                )
+                entry["giveaways"] = (
+                    await self._web_game_guild_giveaways(guild)
                 )
                 result.append(entry)
         return result
@@ -1976,6 +2044,7 @@ class CastleBot(commands.Bot):
                     "is_owner": is_owner,
                     "giveaway_rewards": [],
                     "top_exclusions_global": [],
+                    "global_giveaways": [],
                 }
             guild_id = int(guilds[0]["id"])
             guild = self.get_guild(guild_id)
@@ -1992,6 +2061,7 @@ class CastleBot(commands.Bot):
                     "is_owner": is_owner,
                     "giveaway_rewards": [],
                     "top_exclusions_global": [],
+                    "global_giveaways": [],
                 }
 
         is_owner = await self._web_game_is_owner(member or user_obj)
@@ -1999,6 +2069,9 @@ class CastleBot(commands.Bot):
             await self._web_game_global_top_exclusions(guild)
             if is_owner
             else []
+        )
+        global_giveaways = (
+            await self._web_game_global_giveaways() if is_owner else []
         )
         await get_player_stats(user_id, guild_id)
         async with self.db.execute(
@@ -2086,6 +2159,7 @@ class CastleBot(commands.Bot):
                 self._giveaway_reward_options() if is_admin else []
             ),
             "top_exclusions_global": global_top_exclusions,
+            "global_giveaways": global_giveaways,
             "guild_id": str(guild.id),
             "guild_name": guild.name,
             "player": {
@@ -2500,6 +2574,79 @@ class CastleBot(commands.Bot):
             "changed": changed,
         }
 
+    async def _web_game_giveaway_cancel(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            giveaway_id = int(payload.get("giveaway_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный розыгрыш.")
+        async with self.db.execute(
+            "SELECT guild_id, scope, status FROM giveaways WHERE id = ?",
+            (giveaway_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise ValueError("Розыгрыш не найден.")
+        giveaway_guild_id, scope, status = row
+        scope = str(scope or "server")
+        if scope == "global":
+            if not await self._web_game_is_owner(actor):
+                raise PermissionError(
+                    "Глобальные розыгрыши может отменять только владелец."
+                )
+        else:
+            await self._require_web_admin(guild, actor)
+            try:
+                owns_guild = int(giveaway_guild_id or 0) == guild.id
+            except (TypeError, ValueError):
+                owns_guild = False
+            if not owns_guild:
+                raise ValueError("Этот розыгрыш принадлежит другому серверу.")
+
+        if status == "cancelled":
+            return {
+                "ok": True,
+                "action": "admin_giveaway_cancel",
+                "id": str(giveaway_id),
+                "scope": scope,
+                "status": "cancelled",
+                "changed": False,
+            }
+        if status != "active":
+            raise ValueError("Розыгрыш уже завершён.")
+
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "UPDATE giveaways SET status = 'cancelled' "
+                "WHERE id = ? AND status = 'active'",
+                (giveaway_id,),
+            )
+            changed = cursor.rowcount > 0
+
+        if not changed:
+            raise ValueError("Не удалось отменить розыгрыш.")
+        await update_giveaway_message(giveaway_id)
+        await log_admin_action(
+            actor.id,
+            0,
+            "giveaway_cancel",
+            f"{scope}:{giveaway_id}",
+            guild_id=guild.id,
+        )
+        return {
+            "ok": True,
+            "action": "admin_giveaway_cancel",
+            "id": str(giveaway_id),
+            "scope": scope,
+            "status": "cancelled",
+            "changed": True,
+        }
+
     async def handle_web_game_command(self, command: dict) -> dict:
         action = str(command.get("action", ""))
         try:
@@ -2544,6 +2691,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_giveaway(command, guild, member)
         if action == "admin_top_exclude":
             return await self._web_game_top_exclude(command, guild, member)
+        if action == "admin_giveaway_cancel":
+            return await self._web_game_giveaway_cancel(command, guild, member)
         raise ValueError("Неизвестное игровое действие.")
 
     def _spawn_background(self, name: str, factory) -> asyncio.Task:
