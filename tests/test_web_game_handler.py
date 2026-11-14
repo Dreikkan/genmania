@@ -319,6 +319,8 @@ def test_web_game_top_exclusions_local_and_global():
         m._settings_cache.clear()
         m._tax_rate_cache.clear()
         m._top_cache.clear()
+        await db.execute("INSERT INTO players (user_id) VALUES (2)")
+        await db.commit()
         guild = _guild()
         guild.members.append(FakeMember(4, "LocalAdmin", admin=True))
 

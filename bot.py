@@ -2443,10 +2443,6 @@ class CastleBot(commands.Bot):
         changed = False
         async with db_transaction():
             if scope == "global":
-                await self.db.execute(
-                    "INSERT OR IGNORE INTO players (user_id) VALUES (?)",
-                    (target_id,),
-                )
                 if exclude:
                     cursor = await self.db.execute(
                         "UPDATE players SET top_excluded = 1 "
@@ -2474,6 +2470,15 @@ class CastleBot(commands.Bot):
                     (guild.id, target_id),
                 )
             changed = cursor.rowcount > 0
+
+        if scope == "global" and exclude and not changed:
+            async with self.db.execute(
+                "SELECT 1 FROM players WHERE user_id = ?",
+                (target_id,),
+            ) as cursor:
+                exists = await cursor.fetchone()
+            if not exists:
+                raise ValueError("Игрок не найден в игровой базе.")
 
         _top_cache.clear()
         if changed:
