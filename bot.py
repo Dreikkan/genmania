@@ -1805,6 +1805,80 @@ class CastleBot(commands.Bot):
         result.sort(key=lambda item: item["members"], reverse=True)
         return result
 
+    def _web_game_exclusion_entry(
+        self, guild: discord.Guild | None, user_id: int
+    ) -> dict:
+        member = guild.get_member(user_id) if guild is not None else None
+        if member is not None:
+            return {
+                "id": str(user_id),
+                "name": member.display_name,
+                "handle": member.name,
+            }
+        user = self.get_user(user_id)
+        if user is not None:
+            return {
+                "id": str(user_id),
+                "name": getattr(user, "global_name", None) or user.name,
+                "handle": user.name,
+            }
+        return {
+            "id": str(user_id),
+            "name": f"ID {user_id}",
+            "handle": str(user_id),
+        }
+
+    async def _web_game_guild_top_exclusions(
+        self, guild: discord.Guild
+    ) -> list[dict]:
+        try:
+            async with self.db.execute(
+                "SELECT user_id FROM guild_top_exclusions "
+                "WHERE guild_id = ? ORDER BY created_at DESC LIMIT 100",
+                (guild.id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            log.debug(
+                "WEB_GAME: не удалось прочитать исключения топа гильдии %s",
+                guild.id,
+                exc_info=True,
+            )
+            return []
+        result = []
+        for row in rows:
+            try:
+                user_id = int(row[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            result.append(self._web_game_exclusion_entry(guild, user_id))
+        return result
+
+    async def _web_game_global_top_exclusions(
+        self, guild: discord.Guild | None
+    ) -> list[dict]:
+        try:
+            async with self.db.execute(
+                "SELECT user_id FROM players "
+                "WHERE COALESCE(top_excluded, 0) = 1 "
+                "ORDER BY coins DESC LIMIT 100"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            log.debug(
+                "WEB_GAME: не удалось прочитать глобальные исключения топа",
+                exc_info=True,
+            )
+            return []
+        result = []
+        for row in rows:
+            try:
+                user_id = int(row[0])
+            except (TypeError, ValueError, IndexError):
+                continue
+            result.append(self._web_game_exclusion_entry(guild, user_id))
+        return result
+
     async def _web_game_admin_guilds(
         self, user_id: int, guilds: list[dict]
     ) -> list[dict]:
@@ -1827,6 +1901,9 @@ class CastleBot(commands.Bot):
             ):
                 entry = dict(item)
                 entry["channels"] = giveaway_channels_for_guild(guild)
+                entry["top_exclusions"] = (
+                    await self._web_game_guild_top_exclusions(guild)
+                )
                 result.append(entry)
         return result
 
@@ -1898,6 +1975,7 @@ class CastleBot(commands.Bot):
                     "settings": {},
                     "is_owner": is_owner,
                     "giveaway_rewards": [],
+                    "top_exclusions_global": [],
                 }
             guild_id = int(guilds[0]["id"])
             guild = self.get_guild(guild_id)
@@ -1913,9 +1991,15 @@ class CastleBot(commands.Bot):
                     "settings": {},
                     "is_owner": is_owner,
                     "giveaway_rewards": [],
+                    "top_exclusions_global": [],
                 }
 
         is_owner = await self._web_game_is_owner(member or user_obj)
+        global_top_exclusions = (
+            await self._web_game_global_top_exclusions(guild)
+            if is_owner
+            else []
+        )
         await get_player_stats(user_id, guild_id)
         async with self.db.execute(
             "SELECT coins, gems, COALESCE(prestige_points, 0), "
@@ -2001,6 +2085,7 @@ class CastleBot(commands.Bot):
             "giveaway_rewards": (
                 self._giveaway_reward_options() if is_admin else []
             ),
+            "top_exclusions_global": global_top_exclusions,
             "guild_id": str(guild.id),
             "guild_name": guild.name,
             "player": {
@@ -2329,6 +2414,87 @@ class CastleBot(commands.Bot):
         await self.db.commit()
         return result
 
+    async def _web_game_top_exclude(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный игрок.")
+        scope = str(payload.get("scope") or "server")
+        if scope not in {"server", "global"}:
+            raise ValueError("Неизвестная область исключения из топа.")
+        exclude = bool(payload.get("exclude", True))
+
+        if scope == "global":
+            if not await self._web_game_is_owner(actor):
+                raise PermissionError(
+                    "Глобальное исключение из топа доступно только владельцу."
+                )
+        else:
+            await self._require_web_admin(guild, actor)
+            if guild.get_member(target_id) is None:
+                raise ValueError("Игрок не состоит в этом сервере.")
+
+        changed = False
+        async with db_transaction():
+            if scope == "global":
+                await self.db.execute(
+                    "INSERT OR IGNORE INTO players (user_id) VALUES (?)",
+                    (target_id,),
+                )
+                if exclude:
+                    cursor = await self.db.execute(
+                        "UPDATE players SET top_excluded = 1 "
+                        "WHERE user_id = ? "
+                        "AND COALESCE(top_excluded, 0) = 0",
+                        (target_id,),
+                    )
+                else:
+                    cursor = await self.db.execute(
+                        "UPDATE players SET top_excluded = 0 "
+                        "WHERE user_id = ? "
+                        "AND COALESCE(top_excluded, 0) = 1",
+                        (target_id,),
+                    )
+            elif exclude:
+                cursor = await self.db.execute(
+                    "INSERT OR IGNORE INTO guild_top_exclusions "
+                    "(guild_id, user_id, created_by) VALUES (?, ?, ?)",
+                    (guild.id, target_id, actor.id),
+                )
+            else:
+                cursor = await self.db.execute(
+                    "DELETE FROM guild_top_exclusions "
+                    "WHERE guild_id = ? AND user_id = ?",
+                    (guild.id, target_id),
+                )
+            changed = cursor.rowcount > 0
+
+        _top_cache.clear()
+        if changed:
+            await log_admin_action(
+                actor.id,
+                target_id,
+                "web_top_exclude" if exclude else "web_top_include",
+                scope,
+                guild_id=guild.id,
+            )
+        entry = self._web_game_exclusion_entry(guild, target_id)
+        return {
+            "ok": True,
+            "action": "admin_top_exclude",
+            "scope": scope,
+            "exclude": exclude,
+            "target_id": str(target_id),
+            "target_name": entry["name"],
+            "changed": changed,
+        }
+
     async def handle_web_game_command(self, command: dict) -> dict:
         action = str(command.get("action", ""))
         try:
@@ -2371,6 +2537,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_reset(command, guild, member)
         if action == "admin_giveaway":
             return await self._web_game_giveaway(command, guild, member)
+        if action == "admin_top_exclude":
+            return await self._web_game_top_exclude(command, guild, member)
         raise ValueError("Неизвестное игровое действие.")
 
     def _spawn_background(self, name: str, factory) -> asyncio.Task:
@@ -2693,6 +2861,16 @@ class CastleBot(commands.Bot):
                 exchange_day TEXT DEFAULT NULL,
                 exchange_coins_today INTEGER DEFAULT 0,
                 exchange_gems_today INTEGER DEFAULT 0
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_top_exclusions (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_by INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
             )
         """)
 

@@ -112,8 +112,11 @@ def make_leaderboard_layer(runtime: LeaderboardRuntime):
                 return " AND 0", []
             placeholders = ",".join("?" for _ in member_ids)
             return (
-                f" AND {column} IN ({placeholders})",
-                list(member_ids),
+                f" AND {column} IN ({placeholders}) "
+                f"AND {column} NOT IN ("
+                f"SELECT user_id FROM guild_top_exclusions "
+                f"WHERE guild_id = ?)",
+                [*member_ids, guild_id],
             )
 
         if top_type == "coins":
@@ -200,6 +203,13 @@ def make_leaderboard_layer(runtime: LeaderboardRuntime):
                 "(SELECT user_id FROM players "
                 "WHERE COALESCE(top_excluded, 0) = 1))"
             )
+            if guild_id:
+                clan_where += (
+                    " AND (c.leader_id IS NULL OR c.leader_id NOT IN "
+                    "(SELECT user_id FROM guild_top_exclusions "
+                    "WHERE guild_id = ?))"
+                )
+                clan_params.append(guild_id)
             async with runtime.db.execute(
                 f"""
                 SELECT c.id, c.name,

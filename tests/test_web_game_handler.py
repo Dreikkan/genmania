@@ -309,6 +309,142 @@ def test_web_game_giveaway_permissions_and_dispatch():
     asyncio.run(run())
 
 
+def test_web_game_top_exclusions_local_and_global():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        m._top_cache.clear()
+        guild = _guild()
+        guild.members.append(FakeMember(4, "LocalAdmin", admin=True))
+
+        async def fake_is_owner(user):
+            return getattr(user, "id", None) == 1
+
+        m.bot.is_owner = fake_is_owner
+        try:
+            local = await m.bot.handle_web_game_command(
+                {
+                    "id": "top-local-exclude",
+                    "action": "admin_top_exclude",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {
+                        "target_id": "2",
+                        "scope": "server",
+                        "exclude": True,
+                    },
+                }
+            )
+            assert local["ok"] is True
+            assert local["scope"] == "server"
+            assert local["changed"] is True
+            exclusions = await m.bot._web_game_guild_top_exclusions(guild)
+            assert exclusions == [
+                {"id": "2", "name": "Kira", "handle": "Kira"}
+            ]
+            assert await m.bot._web_game_global_top_exclusions(guild) == []
+
+            again = await m.bot.handle_web_game_command(
+                {
+                    "id": "top-local-exclude-again",
+                    "action": "admin_top_exclude",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {
+                        "target_id": "2",
+                        "scope": "server",
+                        "exclude": True,
+                    },
+                }
+            )
+            assert again["changed"] is False
+
+            local_admin = await m.bot.handle_web_game_command(
+                {
+                    "id": "top-local-admin",
+                    "action": "admin_top_exclude",
+                    "user_id": "4",
+                    "guild_id": "42",
+                    "payload": {
+                        "target_id": "2",
+                        "scope": "server",
+                        "exclude": False,
+                    },
+                }
+            )
+            assert local_admin["ok"] is True
+            assert local_admin["changed"] is True
+            assert await m.bot._web_game_guild_top_exclusions(guild) == []
+
+            try:
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "top-global-denied",
+                        "action": "admin_top_exclude",
+                        "user_id": "4",
+                        "guild_id": "42",
+                        "payload": {
+                            "target_id": "2",
+                            "scope": "global",
+                            "exclude": True,
+                        },
+                    }
+                )
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError(
+                    "локальный админ не должен исключать из глобального топа"
+                )
+
+            global_exclude = await m.bot.handle_web_game_command(
+                {
+                    "id": "top-global-exclude",
+                    "action": "admin_top_exclude",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {
+                        "target_id": "2",
+                        "scope": "global",
+                        "exclude": True,
+                    },
+                }
+            )
+            assert global_exclude["ok"] is True
+            assert global_exclude["changed"] is True
+            global_exclusions = await m.bot._web_game_global_top_exclusions(
+                guild
+            )
+            assert global_exclusions == [
+                {"id": "2", "name": "Kira", "handle": "Kira"}
+            ]
+
+            global_include = await m.bot.handle_web_game_command(
+                {
+                    "id": "top-global-include",
+                    "action": "admin_top_exclude",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {
+                        "target_id": "2",
+                        "scope": "global",
+                        "exclude": False,
+                    },
+                }
+            )
+            assert global_include["changed"] is True
+            assert await m.bot._web_game_global_top_exclusions(guild) == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
