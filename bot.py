@@ -2127,6 +2127,7 @@ class CastleBot(commands.Bot):
                     "top_exclusions_global": [],
                     "global_giveaways": [],
                     "shop": [],
+                    "craft_recipes": [],
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2147,6 +2148,7 @@ class CastleBot(commands.Bot):
                     "top_exclusions_global": [],
                     "global_giveaways": [],
                     "shop": [],
+                    "craft_recipes": [],
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2162,7 +2164,8 @@ class CastleBot(commands.Bot):
         )
         await get_player_stats(user_id, guild_id)
         async with self.db.execute(
-            "SELECT coins, gems, COALESCE(prestige_points, 0), "
+            "SELECT coins, gems, COALESCE(catalysts, 0), "
+            "COALESCE(prestige_points, 0), "
             "COALESCE(grid_size, 9), COALESCE(storage_size, 36), "
             "COALESCE(title, ''), last_collected "
             "FROM players WHERE user_id = ?",
@@ -2173,7 +2176,16 @@ class CastleBot(commands.Bot):
         if not row:
             raise RuntimeError("Игрок не найден в базе.")
 
-        coins, gems, prestige, grid_size, storage_size, title, last_collected = row
+        (
+            coins,
+            gems,
+            catalysts,
+            prestige,
+            grid_size,
+            storage_size,
+            title,
+            last_collected,
+        ) = row
         grid_cells = max(1, int(grid_size or 9))
         grid_side = max(1, math.isqrt(grid_cells))
         per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
@@ -2318,6 +2330,52 @@ class CastleBot(commands.Bot):
         except Exception:
             starter_discount = False
 
+        item_names: dict[str, str] = {}
+        async with self.db.execute(
+            "SELECT id, name FROM items WHERE id LIKE '%_gen'"
+        ) as cursor:
+            for row in await cursor.fetchall():
+                item_names[str(row[0])] = str(row[1] or row[0])
+
+        craft_recipes = []
+        for (recipe_item_id, recipe_stars), copies in copy_counts.items():
+            if recipe_stars != 0:
+                continue
+            next_id = CRAFT_CHAIN.get(recipe_item_id)
+            if not next_id:
+                continue
+            settings = CRAFT_SETTINGS.get(
+                recipe_item_id, {"chance": 1.0, "gems": 0}
+            )
+            copies_needed = craft_cost_for_item(recipe_item_id)
+            gem_cost = int(settings.get("gems", 0))
+            base_chance = float(settings.get("chance", 1.0))
+            craft_recipes.append(
+                {
+                    "item_id": recipe_item_id,
+                    "name": item_names.get(recipe_item_id, recipe_item_id),
+                    "next_id": next_id,
+                    "next_name": item_names.get(next_id, next_id),
+                    "copies_available": copies,
+                    "copies_needed": copies_needed,
+                    "gems": gem_cost,
+                    "chance": round(base_chance * 100.0, 1),
+                    "catalyst_chance": round(
+                        min(1.0, base_chance + CATALYST_BONUS) * 100.0,
+                        1,
+                    ),
+                    "can_craft": bool(
+                        copies >= copies_needed
+                        and int(gems or 0) >= gem_cost
+                    ),
+                }
+            )
+        craft_recipes.sort(
+            key=lambda recipe: GENERATOR_TIER_BY_ID.get(
+                recipe["item_id"], 0
+            )
+        )
+
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
         return {
@@ -2339,6 +2397,7 @@ class CastleBot(commands.Bot):
                 "avatar": avatar,
                 "coins": int(coins or 0),
                 "gems": int(gems or 0),
+                "catalysts": int(catalysts or 0),
                 "prestige": int(prestige or 0),
                 "grid_size": grid_cells,
                 "grid_side": grid_side,
@@ -2356,6 +2415,7 @@ class CastleBot(commands.Bot):
             },
             "inventory": inventory,
             "shop": shop,
+            "craft_recipes": craft_recipes,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -2764,6 +2824,86 @@ class CastleBot(commands.Bot):
             "stars": int(stars or 0),
             "sell_price": sell_price,
             "message": f"Продано {name} за {format_price(sell_price)} монет.",
+            "state": state,
+        }
+
+    async def _web_game_craft(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        item_id = str(payload.get("item_id") or "").strip()
+        use_catalyst = bool(payload.get("use_catalyst", False))
+        if not item_id:
+            raise ValueError("Выберите генератор для синтеза.")
+        result = await craft_attempt(
+            actor.id, item_id, use_catalyst, use_starred=False
+        )
+        if not result.get("ok"):
+            raise ValueError(
+                str(result.get("message") or "Не удалось выполнить синтез.")
+            )
+        await sort_inventory(actor.id, "profile")
+        await sort_inventory(actor.id, "storage")
+
+        success = bool(result["success"])
+        try:
+            await update_story_quests(actor.id, "synthesize", 1)
+            await update_quest_progress(actor.id, "craft_1")
+            await update_quest_progress(actor.id, "craft_3")
+            await update_quest_progress(actor.id, "craft_5")
+            if success:
+                await update_quest_progress(actor.id, "success_2")
+            if result.get("catalyst_used"):
+                await update_quest_progress(actor.id, "use_catalyst")
+            clan = await get_clan(actor.id)
+            if clan:
+                await update_clan_quest(clan[0], "synthesize", 1)
+            await check_achievements(actor.id)
+            await add_season_xp(
+                actor.id,
+                season_xp_amount(
+                    "craft_success" if success else "craft_fail"
+                ),
+                guild.id,
+                action="craft_success" if success else "craft_fail",
+            )
+            await complete_onboarding_step(actor.id, "craft")
+        except Exception:
+            log.exception("WEB_GAME: ошибка побочных эффектов синтеза")
+
+        chance = float(result["final_chance"]) * 100.0
+        if success:
+            message = (
+                f"Синтез успешен: {result['src_name']} → "
+                f"{result['dst_name']} (0★)."
+            )
+        else:
+            message = (
+                f"Синтез не удался: {result['src_name']}. "
+                f"Шанс был {chance:.0f}%, pity "
+                f"{int(result.get('pity', 0))}."
+            )
+        if result.get("catalyst_used"):
+            message += " Использован катализатор."
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "craft_generator",
+            "item_id": item_id,
+            "src_name": str(result["src_name"]),
+            "dst_id": str(result["dst_id"]),
+            "dst_name": str(result["dst_name"]),
+            "success": success,
+            "gem_cost": int(result.get("gem_cost", 0)),
+            "craft_cost": int(result.get("craft_cost", 0)),
+            "catalyst_used": bool(result.get("catalyst_used", False)),
+            "final_chance": round(chance, 1),
+            "pity": int(result.get("pity", 0)),
+            "guaranteed": bool(result.get("guaranteed", False)),
+            "message": message,
             "state": state,
         }
 
@@ -3191,6 +3331,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_move(command, guild, member)
         if action == "sell_generator":
             return await self._web_game_sell(command, guild, member)
+        if action == "craft_generator":
+            return await self._web_game_craft(command, guild, member)
         if action == "upgrade_star":
             return await self._web_game_star_upgrade(command, guild, member)
         if action == "admin_grant":
@@ -19099,6 +19241,7 @@ async def craft_attempt(
                 "SELECT location, slot, stars FROM inventory "
                 "WHERE user_id = ? AND item_id = ? "
                 "AND location IN ('profile', 'storage') "
+                "AND COALESCE(is_locked, 0) = 0 "
                 "ORDER BY stars ASC, "
                 "CASE location WHEN 'profile' THEN 0 ELSE 1 END, "
                 "slot ASC",

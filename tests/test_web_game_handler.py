@@ -729,6 +729,56 @@ def test_web_game_star_upgrade():
     asyncio.run(run())
 
 
+def test_web_game_craft_generator():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems, catalysts, "
+            "grid_size, storage_size) VALUES (1, 1000, 10, 1, 9, 36)"
+        )
+        await db.executemany(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES (?, ?, ?, ?, 0, 'common', 1)",
+            [
+                ("basic_gen", "Базовый генератор", 1000, 1),
+                ("copper_gen", "Медный генератор", 2000, 2),
+            ],
+        )
+        await db.executemany(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (1, ?, 'basic_gen', 'profile', 0)",
+            [(0,), (1,)],
+        )
+        await db.commit()
+        try:
+            result = await m.bot.handle_web_game_command(
+                {
+                    "id": "craft-1",
+                    "action": "craft_generator",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"item_id": "basic_gen"},
+                }
+            )
+            assert result["ok"] is True
+            assert result["success"] is True
+            assert result["dst_id"] == "copper_gen"
+            assert result["state"]["inventory"][0]["item_id"] == "copper_gen"
+            assert len(result["state"]["inventory"]) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
