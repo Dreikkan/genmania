@@ -1627,6 +1627,221 @@ def test_web_game_auction_cancel_refunds_bidder():
     asyncio.run(run())
 
 
+def test_web_game_clan_roles_transfer_and_kick():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 1000, 0), (3, 1000, 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-create",
+                    "action": "clan_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"name": "Ролевой клан"},
+                }
+            )
+            clan_id = created["clan_id"]
+            applied = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-apply",
+                    "action": "clan_apply",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"clan_id": clan_id},
+                }
+            )
+            app_id = applied["state"]["clan"]["pending_application"]
+            leader_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-state",
+                    "action": "state",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            application_id = leader_state["clan"]["details"]["applications"][0]["id"]
+            await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-approve",
+                    "action": "clan_application_decide",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "application_id": application_id,
+                        "approve": True,
+                    },
+                }
+            )
+
+            promoted = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-promote",
+                    "action": "clan_promote",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"target_id": "3"},
+                }
+            )
+            member = next(
+                item
+                for item in promoted["state"]["clan"]["details"]["members"]
+                if item["user_id"] == "3"
+            )
+            assert member["role"] == "veteran"
+
+            demoted = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-demote",
+                    "action": "clan_demote",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"target_id": "3"},
+                }
+            )
+            member = next(
+                item
+                for item in demoted["state"]["clan"]["details"]["members"]
+                if item["user_id"] == "3"
+            )
+            assert member["role"] == "member"
+
+            transferred = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-transfer",
+                    "action": "clan_transfer",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"target_id": "3"},
+                }
+            )
+            assert transferred["state"]["clan"]["details"]["role"] == "member"
+
+            kicked = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-roles-kick",
+                    "action": "clan_kick",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"target_id": "2"},
+                }
+            )
+            assert kicked["state"]["clan"]["details"]["members_count"] == 1
+            assert app_id is not None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_raid_party_invite_and_start():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(1, 10000, 0), (2, 1000, 0), (3, 1000, 0)"
+        )
+        await db.executemany(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (?, 0, 'basic_gen', 'profile', 0)",
+            [(1,), (2,), (3,)],
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "party-create-1",
+                    "action": "raid_party_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert created["ok"] is True
+            party_id = created["party_id"]
+            invited = await m.bot.handle_web_game_command(
+                {
+                    "id": "party-invite-1",
+                    "action": "raid_party_invite",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"target_id": "3"},
+                }
+            )
+            assert invited["ok"] is True
+            target_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "party-state-1",
+                    "action": "state",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            invites = target_state["raid_party"]["invites"]
+            assert len(invites) == 1
+            invite_id = invites[0]["id"]
+
+            accepted = await m.bot.handle_web_game_command(
+                {
+                    "id": "party-accept-1",
+                    "action": "raid_party_accept",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"invite_id": invite_id},
+                }
+            )
+            assert accepted["ok"] is True
+            assert accepted["state"]["raid_party"]["party"]["members_count"] == 2
+
+            with mock.patch.object(
+                m.random, "randint", side_effect=[1000, 1]
+            ):
+                raided = await m.bot.handle_web_game_command(
+                    {
+                        "id": "party-raid-1",
+                        "action": "raid_party_start",
+                        "user_id": "2",
+                        "guild_id": "42",
+                        "payload": {"target_id": "1"},
+                    }
+                )
+            assert raided["ok"] is True
+            assert raided["success"] is True
+            assert raided["total_loot"] > 0
+            assert raided["state"]["raid_party"]["party"]["members_count"] == 2
+            assert party_id == raided["state"]["raid_party"]["party"]["id"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
