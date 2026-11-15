@@ -2532,6 +2532,178 @@ class CastleBot(commands.Bot):
             "details": details,
         }
 
+    async def _web_game_market_state(
+        self, user_id: int, guild: discord.Guild | None = None
+    ) -> dict:
+        def display_name(raw_user_id: int) -> str:
+            uid = int(raw_user_id or 0)
+            member = guild.get_member(uid) if guild is not None else None
+            user = member or self.get_user(uid)
+            if user is None:
+                return f"ID {uid}"
+            return (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or f"ID {uid}"
+            )
+
+        owned: dict[str, int] = {}
+        async with self.db.execute(
+            "SELECT item_id, COUNT(*) FROM inventory "
+            "WHERE user_id = ? AND location = 'storage' AND stars = 0 "
+            "AND COALESCE(is_locked, 0) = 0 GROUP BY item_id",
+            (user_id,),
+        ) as cursor:
+            for item_id, count in await cursor.fetchall():
+                owned[str(item_id)] = int(count or 0)
+
+        hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+        placeholders = ",".join("?" for _ in hidden)
+        where = (
+            f"WHERE mp.item_id NOT IN ({placeholders})"
+            if hidden
+            else ""
+        )
+        async with self.db.execute(
+            "SELECT mp.item_id, i.name, i.rarity, i.price, i.buyable, "
+            "mp.base_price, mp.current_price, mp.demand, mp.supply "
+            "FROM market_prices mp "
+            "JOIN items i ON i.id = mp.item_id "
+            f"{where}",
+            hidden,
+        ) as cursor:
+            price_rows = await cursor.fetchall()
+
+        prices = []
+        for (
+            item_id,
+            name,
+            rarity,
+            item_price,
+            buyable,
+            base_price,
+            current_price,
+            demand,
+            supply,
+        ) in price_rows:
+            base = int(item_price or base_price or 1)
+            price = clamp_market_price(
+                current_price or base,
+                base,
+                bool(buyable),
+            )
+            low, high = market_order_price_bounds(base, bool(buyable))
+            change = ((price - base) / base * 100) if base else 0.0
+            owned_count = owned.get(str(item_id), 0)
+            prices.append(
+                {
+                    "item_id": str(item_id),
+                    "name": str(name or item_id),
+                    "rarity": str(rarity or "common"),
+                    "price": int(price),
+                    "base_price": int(base),
+                    "change_percent": round(change, 1),
+                    "demand": int(demand or 0),
+                    "supply": int(supply or 0),
+                    "owned": owned_count,
+                    "sell_unit": max(
+                        1, int(price * MARKET_SELL_RATE)
+                    ),
+                    "min_order_price": int(low),
+                    "max_order_price": int(high),
+                    "can_sell": bool(
+                        owned_count > 0
+                        and rarity in SELL_ALLOWED_RARITIES
+                    ),
+                }
+            )
+        prices.sort(
+            key=lambda entry: abs(entry["change_percent"]),
+            reverse=True,
+        )
+
+        now = datetime.datetime.now().isoformat()
+
+        def order_payload(row) -> dict | None:
+            (
+                order_id,
+                owner_id,
+                side,
+                item_id,
+                stars,
+                price,
+                quantity,
+                filled,
+                expires_at,
+                name,
+            ) = row
+            if str(item_id) in GEN_SYNTHESIS_ONLY:
+                return None
+            remaining = int(quantity or 0) - int(filled or 0)
+            if remaining <= 0:
+                return None
+            owner_int = int(owner_id or 0)
+            return {
+                "id": str(order_id),
+                "user_id": str(owner_int),
+                "owner_name": display_name(owner_int),
+                "side": str(side or "sell"),
+                "item_id": str(item_id),
+                "name": str(name or item_id),
+                "stars": int(stars or 0),
+                "price": int(price or 0),
+                "remaining": remaining,
+                "expires_at": str(expires_at or ""),
+                "is_mine": owner_int == user_id,
+                "can_fill": owner_int != user_id,
+            }
+
+        orders = []
+        async with self.db.execute(
+            "SELECT o.id, o.user_id, o.side, o.item_id, o.stars, "
+            "o.price, o.quantity, o.filled, o.expires_at, i.name "
+            "FROM market_orders o "
+            "LEFT JOIN items i ON i.id = o.item_id "
+            "WHERE o.status = 'active' AND o.expires_at > ? "
+            "ORDER BY o.price ASC, o.id DESC LIMIT 50",
+            (now,),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                payload = order_payload(row)
+                if payload is not None:
+                    orders.append(payload)
+
+        my_orders = []
+        async with self.db.execute(
+            "SELECT o.id, o.user_id, o.side, o.item_id, o.stars, "
+            "o.price, o.quantity, o.filled, o.expires_at, i.name "
+            "FROM market_orders o "
+            "LEFT JOIN items i ON i.id = o.item_id "
+            "WHERE o.user_id = ? AND o.status = 'active' "
+            "AND o.expires_at > ? "
+            "ORDER BY o.id DESC LIMIT 10",
+            (user_id, now),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                payload = order_payload(row)
+                if payload is not None:
+                    my_orders.append(payload)
+
+        return {
+            "prices": prices,
+            "orders": orders,
+            "my_orders": my_orders,
+            "limits": {
+                "sell_rate": round(MARKET_SELL_RATE * 100, 1),
+                "fee_rate": round(MARKET_ORDER_FEE_RATE * 100, 1),
+                "order_duration_hours": int(
+                    MARKET_ORDER_DURATION_HOURS
+                ),
+                "max_order_qty": int(MARKET_MAX_ORDER_QTY),
+                "max_active_orders": int(MARKET_MAX_ACTIVE_ORDERS),
+            },
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -2559,6 +2731,7 @@ class CastleBot(commands.Bot):
                     "craft_recipes": [],
                     "bank": None,
                     "clan": None,
+                    "market": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2582,6 +2755,7 @@ class CastleBot(commands.Bot):
                     "craft_recipes": [],
                     "bank": None,
                     "clan": None,
+                    "market": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2810,6 +2984,7 @@ class CastleBot(commands.Bot):
         )
         bank = await self._web_game_bank_state(user_id)
         clan_state = await self._web_game_clan_state(user_id, guild)
+        market_state = await self._web_game_market_state(user_id, guild)
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -2853,6 +3028,7 @@ class CastleBot(commands.Bot):
             "craft_recipes": craft_recipes,
             "bank": bank,
             "clan": clan_state,
+            "market": market_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -3422,7 +3598,9 @@ class CastleBot(commands.Bot):
             if text.startswith(prefix):
                 text = text[len(prefix):].strip()
                 break
-        return text or "Не удалось выполнить операцию."
+        return text.replace("**", "").strip() or (
+            "Не удалось выполнить операцию."
+        )
 
     async def _web_game_bank_deposit(
         self,
@@ -4050,6 +4228,159 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    async def _web_game_market_buy(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        item_id = str(payload.get("item_id") or "").strip()
+        try:
+            quantity = int(payload.get("quantity") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное количество.")
+        if not item_id or len(item_id) > 64:
+            raise ValueError("Выберите предмет.")
+        if not 1 <= quantity <= MARKET_MAX_ORDER_QTY:
+            raise ValueError(
+                f"Количество — от 1 до {MARKET_MAX_ORDER_QTY}."
+            )
+        ok, message = await buy_market_item(
+            actor.id, item_id, quantity
+        )
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "market_buy",
+            "item_id": item_id,
+            "quantity": quantity,
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
+    async def _web_game_market_sell(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        item_id = str(payload.get("item_id") or "").strip()
+        try:
+            quantity = int(payload.get("quantity") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное количество.")
+        if not item_id or len(item_id) > 64:
+            raise ValueError("Выберите предмет.")
+        if not 1 <= quantity <= MARKET_MAX_ORDER_QTY:
+            raise ValueError(
+                f"Количество — от 1 до {MARKET_MAX_ORDER_QTY}."
+            )
+        ok, message = await sell_market_item(
+            actor.id, item_id, quantity
+        )
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "market_sell",
+            "item_id": item_id,
+            "quantity": quantity,
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
+    async def _web_game_market_order_create(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        side = str(payload.get("side") or "").strip()
+        item_id = str(payload.get("item_id") or "").strip()
+        try:
+            quantity = int(payload.get("quantity") or 0)
+            price = int(payload.get("price") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректные параметры ордера.")
+        if side not in {"buy", "sell"}:
+            raise ValueError("Неизвестная сторона ордера.")
+        if not item_id or len(item_id) > 64:
+            raise ValueError("Выберите предмет.")
+        if quantity <= 0 or price <= 0:
+            raise ValueError("Количество и цена должны быть больше нуля.")
+        ok, message = await create_market_order(
+            actor.id, side, item_id, quantity, price
+        )
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "market_order_create",
+            "side": side,
+            "item_id": item_id,
+            "quantity": quantity,
+            "price": price,
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
+    async def _web_game_market_order_fill(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            order_id = int(payload.get("order_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный ордер.")
+        if order_id <= 0:
+            raise ValueError("Выберите ордер.")
+        ok, message = await fill_market_order(order_id, actor.id)
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "market_order_fill",
+            "order_id": str(order_id),
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
+    async def _web_game_market_order_cancel(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            order_id = int(payload.get("order_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный ордер.")
+        if order_id <= 0:
+            raise ValueError("Выберите ордер.")
+        ok, message = await cancel_market_order(order_id, actor.id)
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "market_order_cancel",
+            "order_id": str(order_id),
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
     def _web_game_giveaway_channel(
         self, guild: discord.Guild, raw_channel_id: str
     ) -> discord.TextChannel:
@@ -4431,6 +4762,22 @@ class CastleBot(commands.Bot):
             return await self._web_game_clan_expand(command, guild, member)
         if action == "clan_application_decide":
             return await self._web_game_clan_application_decide(
+                command, guild, member
+            )
+        if action == "market_buy":
+            return await self._web_game_market_buy(command, guild, member)
+        if action == "market_sell":
+            return await self._web_game_market_sell(command, guild, member)
+        if action == "market_order_create":
+            return await self._web_game_market_order_create(
+                command, guild, member
+            )
+        if action == "market_order_fill":
+            return await self._web_game_market_order_fill(
+                command, guild, member
+            )
+        if action == "market_order_cancel":
+            return await self._web_game_market_order_cancel(
                 command, guild, member
             )
         if action == "admin_grant":

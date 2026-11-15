@@ -1172,6 +1172,164 @@ def test_web_game_clan_invite_accept():
     asyncio.run(run())
 
 
+def test_web_game_market_buy_and_sell():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (2, 10000, 0)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.execute(
+            "INSERT INTO market_prices (item_id, base_price, "
+            "current_price, demand, supply) "
+            "VALUES ('basic_gen', 1000, 1000, 0, 0) "
+            "ON CONFLICT(item_id) DO UPDATE SET "
+            "base_price = 1000, current_price = 1000, "
+            "demand = 0, supply = 0"
+        )
+        await db.commit()
+        try:
+            bought = await m.bot.handle_web_game_command(
+                {
+                    "id": "market-buy-1",
+                    "action": "market_buy",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "item_id": "basic_gen",
+                        "quantity": 2,
+                    },
+                }
+            )
+            assert bought["ok"] is True
+            assert bought["state"]["player"]["coins"] < 10000
+            assert len(bought["state"]["inventory"]) == 2
+
+            await db.execute(
+                "UPDATE inventory SET location = 'storage' "
+                "WHERE user_id = 2 AND item_id = 'basic_gen'"
+            )
+            await db.commit()
+            coins_before = bought["state"]["player"]["coins"]
+            sold = await m.bot.handle_web_game_command(
+                {
+                    "id": "market-sell-1",
+                    "action": "market_sell",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "item_id": "basic_gen",
+                        "quantity": 1,
+                    },
+                }
+            )
+            assert sold["ok"] is True
+            assert sold["state"]["player"]["coins"] > coins_before
+            assert len(sold["state"]["inventory"]) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_market_order_create_and_fill():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 10000, 0), (3, 10000, 0)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.execute(
+            "INSERT INTO market_prices (item_id, base_price, "
+            "current_price, demand, supply) "
+            "VALUES ('basic_gen', 1000, 1000, 0, 0) "
+            "ON CONFLICT(item_id) DO UPDATE SET "
+            "base_price = 1000, current_price = 1000, "
+            "demand = 0, supply = 0"
+        )
+        await db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (2, 0, 'basic_gen', 'storage', 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "market-order-create-1",
+                    "action": "market_order_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "side": "sell",
+                        "item_id": "basic_gen",
+                        "quantity": 1,
+                        "price": 1000,
+                    },
+                }
+            )
+            assert created["ok"] is True
+            assert len(created["state"]["market"]["my_orders"]) == 1
+            assert created["state"]["inventory"] == []
+            order_id = created["state"]["market"]["my_orders"][0]["id"]
+
+            filled = await m.bot.handle_web_game_command(
+                {
+                    "id": "market-order-fill-1",
+                    "action": "market_order_fill",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"order_id": order_id},
+                }
+            )
+            assert filled["ok"] is True
+            assert any(
+                item["item_id"] == "basic_gen"
+                for item in filled["state"]["inventory"]
+            )
+            assert filled["state"]["market"]["my_orders"] == []
+
+            seller_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "market-state-1",
+                    "action": "state",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert seller_state["market"]["my_orders"] == []
+            assert seller_state["player"]["coins"] > 10000
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
