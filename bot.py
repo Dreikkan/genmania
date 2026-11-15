@@ -2589,6 +2589,7 @@ class CastleBot(commands.Bot):
                 if row is None:
                     raise ValueError("Предмета уже нет.")
                 item_id, stars, is_locked = row
+                stars_int = int(stars or 0)
                 if is_locked:
                     raise ValueError("Предмет заблокирован.")
                 target_size = await (
@@ -2624,7 +2625,7 @@ class CastleBot(commands.Bot):
                     "INSERT INTO inventory "
                     "(user_id, slot, item_id, location, stars, is_locked) "
                     "VALUES (?, ?, ?, ?, ?, 0)",
-                    (actor.id, new_slot, item_id, target, stars),
+                    (actor.id, new_slot, item_id, target, stars_int),
                 )
         except ValueError as exc:
             raise ValueError(str(exc))
@@ -2675,18 +2676,21 @@ class CastleBot(commands.Bot):
                 if row is None:
                     raise ValueError("Предмет не найден в хранилище.")
                 item_id, stars, name, price, rarity = row
+                stars_int = int(stars or 0)
                 if rarity not in SELL_ALLOWED_RARITIES:
                     raise ValueError(
                         f"Предметы редкости "
                         f"{RARITY_NAMES.get(rarity, rarity)} не продаются."
                     )
-                sell_price = calculate_sell_price(int(price or 0), int(stars or 0))
+                sell_price = calculate_sell_price(
+                    int(price or 0), stars_int
+                )
                 cursor = await self.db.execute(
                     "DELETE FROM inventory WHERE user_id = ? "
                     "AND location = 'storage' AND slot = ? "
-                    "AND item_id = ? AND stars = ? "
+                    "AND item_id = ? AND COALESCE(stars, 0) = ? "
                     "AND COALESCE(is_locked, 0) = 0",
-                    (actor.id, slot, item_id, stars),
+                    (actor.id, slot, item_id, stars_int),
                 )
                 if cursor.rowcount == 0:
                     raise ValueError("Предмета уже нет.")
