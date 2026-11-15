@@ -2174,6 +2174,8 @@ class CastleBot(commands.Bot):
             raise RuntimeError("Игрок не найден в базе.")
 
         coins, gems, prestige, grid_size, storage_size, title, last_collected = row
+        grid_cells = max(1, int(grid_size or 9))
+        grid_side = max(1, math.isqrt(grid_cells))
         per_sec_coins, per_sec_gems = await get_per_second_income(user_id)
         pending_coins, pending_gems = await calculate_passive_income(
             user_id, guild_id
@@ -2237,12 +2239,14 @@ class CastleBot(commands.Bot):
                     ),
                     "income_hour": round(
                         float(income_coins or 0)
-                        * (1 + STAR_BONUS.get(stars_int, 0)),
+                        * (1 + STAR_BONUS.get(stars_int, 0))
+                        * 3600,
                         2,
                     ),
                     "income_gems_hour": round(
                         float(income_gems or 0)
-                        * (1 + STAR_BONUS.get(stars_int, 0)),
+                        * (1 + STAR_BONUS.get(stars_int, 0))
+                        * 3600,
                         2,
                     ),
                 }
@@ -2261,8 +2265,12 @@ class CastleBot(commands.Bot):
                         "id": str(row[0]),
                         "name": str(row[1] or row[0]),
                         "price": int(row[2] or 0),
-                        "income_hour": int(row[3] or 0),
-                        "income_gems_hour": float(row[4] or 0),
+                        "income_hour": round(
+                            float(row[3] or 0) * 3600, 2
+                        ),
+                        "income_gems_hour": round(
+                            float(row[4] or 0) * 3600, 2
+                        ),
                         "rarity": str(row[5] or "common"),
                     }
                 )
@@ -2295,7 +2303,8 @@ class CastleBot(commands.Bot):
                 "coins": int(coins or 0),
                 "gems": int(gems or 0),
                 "prestige": int(prestige or 0),
-                "grid_size": int(grid_size or 9),
+                "grid_size": grid_cells,
+                "grid_side": grid_side,
                 "storage_size": int(storage_size or 36),
                 "title": str(title or ""),
                 "income_hour_coins": round(per_sec_coins * 3600, 2),
