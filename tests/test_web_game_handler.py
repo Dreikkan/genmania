@@ -779,6 +779,128 @@ def test_web_game_craft_generator():
     asyncio.run(run())
 
 
+def test_web_game_bank_deposit_and_withdraw():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (2, 10000, 0)"
+        )
+        await db.commit()
+        try:
+            result = await m.bot.handle_web_game_command(
+                {
+                    "id": "bank-deposit-1",
+                    "action": "bank_deposit",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"amount": 1000, "days": 7},
+                }
+            )
+            assert result["ok"] is True
+            assert result["amount"] == 1000
+            assert result["payout"] > 1000
+            assert result["state"]["bank"]["deposit"]["amount"] == 1000
+            assert result["state"]["player"]["coins"] == 9000
+
+            withdraw = await m.bot.handle_web_game_command(
+                {
+                    "id": "bank-withdraw-1",
+                    "action": "bank_withdraw",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert withdraw["ok"] is True
+            assert withdraw["matured"] is False
+            assert withdraw["payout"] == 1000
+            assert withdraw["state"]["bank"]["deposit"] is None
+            assert withdraw["state"]["player"]["coins"] == 10000
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_bank_loan_and_repay():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (2, 1000, 0)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (2, 0, 'basic_gen', 'profile', 0)"
+        )
+        await db.commit()
+        try:
+            result = await m.bot.handle_web_game_command(
+                {
+                    "id": "bank-loan-1",
+                    "action": "bank_take_loan",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "item_id": "basic_gen",
+                        "stars": 0,
+                        "amount": 500,
+                    },
+                }
+            )
+            assert result["ok"] is True
+            assert result["amount"] == 500
+            assert result["total_due"] == 625
+            assert result["state"]["player"]["coins"] == 1500
+            assert result["state"]["bank"]["loan"]["amount"] == 500
+            assert result["state"]["bank"]["loan"]["total_due"] == 625
+            assert not any(
+                item["item_id"] == "basic_gen"
+                for item in result["state"]["inventory"]
+            )
+
+            repay = await m.bot.handle_web_game_command(
+                {
+                    "id": "bank-repay-1",
+                    "action": "bank_repay_loan",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert repay["ok"] is True
+            assert repay["total_due"] == 625
+            assert repay["state"]["player"]["coins"] == 875
+            assert repay["state"]["bank"]["loan"] is None
+            assert any(
+                item["item_id"] == "basic_gen"
+                for item in repay["state"]["inventory"]
+            )
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
