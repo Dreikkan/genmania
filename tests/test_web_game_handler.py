@@ -559,6 +559,116 @@ def test_web_game_giveaway_list_and_cancel():
     asyncio.run(run())
 
 
+def test_web_game_buy_move_sell_generator():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems, grid_size, "
+            "storage_size) VALUES (1, 10000, 0, 9, 36)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, income_per_hour, "
+            "income_gems_per_hour, rarity, buyable) VALUES "
+            "('basic_gen', 'Базовый генератор', 1000, 3600, 0, "
+            "'common', 1)"
+        )
+        await db.commit()
+
+        async def noop(*_args, **_kwargs):
+            return None
+
+        async def noop_achievements(*_args, **_kwargs):
+            return []
+
+        originals = {
+            name: getattr(m, name)
+            for name in (
+                "update_quest_progress",
+                "check_achievements",
+                "complete_onboarding_step",
+                "get_clan",
+                "update_clan_quest",
+                "update_story_quests",
+            )
+        }
+        m.update_quest_progress = noop
+        m.check_achievements = noop_achievements
+        m.complete_onboarding_step = noop
+        m.get_clan = noop
+        m.update_clan_quest = noop
+        m.update_story_quests = noop
+        try:
+            bought = await m.bot.handle_web_game_command(
+                {
+                    "id": "buy-1",
+                    "action": "buy_generator",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"item_id": "basic_gen", "quantity": 2},
+                }
+            )
+            assert bought["ok"] is True
+            assert bought["cost"] == 1500
+            assert bought["discount"] == 500
+            assert bought["placement"] == {
+                "profile": 2,
+                "storage": 0,
+                "temp": 0,
+            }
+            async with db.execute(
+                "SELECT coins FROM players WHERE user_id = 1"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] == 8500
+            assert len(bought["state"]["inventory"]) == 2
+
+            moved = await m.bot.handle_web_game_command(
+                {
+                    "id": "move-1",
+                    "action": "move_generator",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"location": "profile", "slot": 0},
+                }
+            )
+            assert moved["ok"] is True
+            assert moved["target"] == "storage"
+            storage_items = [
+                item for item in moved["state"]["inventory"]
+                if item["location"] == "storage"
+            ]
+            assert len(storage_items) == 1
+            assert storage_items[0]["can_sell"] is True
+
+            sold = await m.bot.handle_web_game_command(
+                {
+                    "id": "sell-1",
+                    "action": "sell_generator",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"slot": storage_items[0]["slot"]},
+                }
+            )
+            assert sold["ok"] is True
+            assert sold["sell_price"] == 100
+            async with db.execute(
+                "SELECT coins FROM players WHERE user_id = 1"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] == 8600
+        finally:
+            for name, value in originals.items():
+                setattr(m, name, value)
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
