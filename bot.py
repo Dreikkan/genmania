@@ -2914,6 +2914,144 @@ class CastleBot(commands.Bot):
             },
         }
 
+    async def _web_game_auction_state(
+        self, user_id: int, guild: discord.Guild | None = None
+    ) -> dict:
+        def display_name(raw_user_id: int) -> str:
+            uid = int(raw_user_id or 0)
+            member = guild.get_member(uid) if guild is not None else None
+            user = member or self.get_user(uid)
+            if user is None:
+                return f"ID {uid}"
+            return (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or f"ID {uid}"
+            )
+
+        now = datetime.datetime.now()
+        now_iso = now.isoformat()
+        hidden = tuple(sorted(GEN_SYNTHESIS_ONLY))
+        placeholders = ",".join("?" for _ in hidden)
+
+        eligible_items = []
+        async with self.db.execute(
+            "SELECT inv.slot, inv.item_id, inv.stars, i.name, "
+            "i.price, i.buyable "
+            "FROM inventory inv JOIN items i ON i.id = inv.item_id "
+            "WHERE inv.user_id = ? AND inv.location = 'profile' "
+            "AND COALESCE(inv.is_locked, 0) = 0 "
+            f"AND inv.item_id NOT IN ({placeholders}) "
+            "AND (i.buyable = 0 OR inv.stars > 0) "
+            "ORDER BY inv.slot ASC",
+            (user_id, *hidden),
+        ) as cursor:
+            for slot, item_id, stars, name, price, buyable in (
+                await cursor.fetchall()
+            ):
+                eligible_items.append(
+                    {
+                        "slot": int(slot or 0),
+                        "item_id": str(item_id),
+                        "name": str(name or item_id),
+                        "stars": int(stars or 0),
+                        "price": int(price or 0),
+                        "buyable": bool(buyable),
+                    }
+                )
+
+        def lot_payload(row) -> dict | None:
+            (
+                auction_id,
+                seller_id,
+                item_id,
+                stars,
+                current_bid,
+                current_bidder,
+                buyout_price,
+                end_time,
+                name,
+            ) = row
+            end_dt = _parse_db_time(end_time)
+            if end_dt is None or end_dt <= now:
+                return None
+            seller_int = int(seller_id or 0)
+            bidder_int = (
+                int(current_bidder) if current_bidder else None
+            )
+            current = int(current_bid or 0)
+            buyout = int(buyout_price or 0)
+            return {
+                "id": str(auction_id),
+                "seller_id": str(seller_int),
+                "seller_name": display_name(seller_int),
+                "item_id": str(item_id),
+                "name": str(name or item_id),
+                "stars": int(stars or 0),
+                "current_bid": current,
+                "current_bidder": (
+                    str(bidder_int) if bidder_int else None
+                ),
+                "current_bidder_name": (
+                    display_name(bidder_int) if bidder_int else None
+                ),
+                "buyout_price": buyout,
+                "end_time": str(end_time),
+                "time_left": max(
+                    0, int((end_dt - now).total_seconds())
+                ),
+                "is_mine": seller_int == user_id,
+                "can_bid": seller_int != user_id,
+                "can_buyout": bool(
+                    seller_int != user_id
+                    and buyout > 0
+                    and buyout > current
+                ),
+                "min_bid": current + 1,
+            }
+
+        lots = []
+        async with self.db.execute(
+            "SELECT a.id, a.seller_id, a.item_id, a.stars, "
+            "a.current_bid, a.current_bidder, a.buyout_price, "
+            "a.end_time, i.name "
+            "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+            "WHERE a.status = 'active' AND a.end_time > ? "
+            "ORDER BY a.end_time ASC LIMIT 30",
+            (now_iso,),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                payload = lot_payload(row)
+                if payload is not None:
+                    lots.append(payload)
+
+        my_lots = []
+        async with self.db.execute(
+            "SELECT a.id, a.seller_id, a.item_id, a.stars, "
+            "a.current_bid, a.current_bidder, a.buyout_price, "
+            "a.end_time, i.name "
+            "FROM auctions a LEFT JOIN items i ON i.id = a.item_id "
+            "WHERE a.seller_id = ? AND a.status = 'active' "
+            "AND a.end_time > ? ORDER BY a.end_time ASC LIMIT 10",
+            (user_id, now_iso),
+        ) as cursor:
+            for row in await cursor.fetchall():
+                payload = lot_payload(row)
+                if payload is not None:
+                    my_lots.append(payload)
+
+        return {
+            "eligible_items": eligible_items,
+            "lots": lots,
+            "my_lots": my_lots,
+            "limits": {
+                "fee_rate": round(AUCTION_FEE_RATE * 100, 1),
+                "anti_snipe_seconds": int(AUCTION_ANTI_SNIPE_SECONDS),
+                "min_hours": 1,
+                "max_hours": 72,
+            },
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -2943,6 +3081,7 @@ class CastleBot(commands.Bot):
                     "clan": None,
                     "market": None,
                     "pvp": None,
+                    "auction": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2968,6 +3107,7 @@ class CastleBot(commands.Bot):
                     "clan": None,
                     "market": None,
                     "pvp": None,
+                    "auction": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3198,6 +3338,7 @@ class CastleBot(commands.Bot):
         clan_state = await self._web_game_clan_state(user_id, guild)
         market_state = await self._web_game_market_state(user_id, guild)
         pvp_state = await self._web_game_pvp_state(user_id, guild)
+        auction_state = await self._web_game_auction_state(user_id, guild)
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -3243,6 +3384,7 @@ class CastleBot(commands.Bot):
             "clan": clan_state,
             "market": market_state,
             "pvp": pvp_state,
+            "auction": auction_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -4732,6 +4874,234 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    async def _web_game_auction_create(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        item_id = str(payload.get("item_id") or "").strip()
+        raw_slot = payload.get("slot")
+        try:
+            slot = int(raw_slot if raw_slot is not None else -1)
+            stars = int(payload.get("stars") or 0)
+            start_price = int(payload.get("start_price") or 0)
+            buyout_price = int(payload.get("buyout_price") or 0)
+            hours = int(payload.get("hours") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректные данные лота.")
+        if not item_id or len(item_id) > 64:
+            raise ValueError("Выберите предмет для лота.")
+        if slot < 0:
+            raise ValueError("Выберите предмет для лота.")
+        if not 0 <= stars <= 10:
+            raise ValueError("Некорректные звёзды предмета.")
+        if start_price <= 0:
+            raise ValueError("Стартовая цена должна быть больше нуля.")
+        if buyout_price < 0:
+            raise ValueError("Buyout не может быть отрицательным.")
+        if buyout_price and buyout_price <= start_price:
+            raise ValueError("Buyout должен быть больше стартовой цены.")
+        if not 1 <= hours <= 72:
+            raise ValueError("Длительность лота — от 1 до 72 часов.")
+        if item_id in GEN_SYNTHESIS_ONLY:
+            raise ValueError(
+                "Этот генератор нельзя продавать: только синтез."
+            )
+
+        async with self.db.execute(
+            "SELECT buyable FROM items WHERE id = ?", (item_id,)
+        ) as cursor:
+            item_row = await cursor.fetchone()
+        if not item_row:
+            raise ValueError("Предмет не найден.")
+        if item_row[0] and stars == 0:
+            raise ValueError(
+                "Магазинные генераторы 0★ продаются в магазине, "
+                "а не на аукционе."
+            )
+
+        end = datetime.datetime.now() + datetime.timedelta(hours=hours)
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT slot FROM inventory "
+                    "WHERE user_id = ? AND location = 'profile' "
+                    "AND slot = ? AND item_id = ? AND stars = ? "
+                    "AND COALESCE(is_locked, 0) = 0",
+                    (actor.id, slot, item_id, stars),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if not row:
+                    raise ValueError(
+                        "Предмет уже продан или перемещён."
+                    )
+                cursor = await self.db.execute(
+                    "DELETE FROM inventory "
+                    "WHERE user_id = ? AND location = 'profile' "
+                    "AND slot = ? AND item_id = ? AND stars = ? "
+                    "AND COALESCE(is_locked, 0) = 0",
+                    (actor.id, slot, item_id, stars),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        "Предмет уже продан или перемещён."
+                    )
+                await self.db.execute(
+                    "INSERT INTO auctions "
+                    "(seller_id, item_id, stars, start_price, "
+                    "current_bid, buyout_price, end_time, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'active')",
+                    (
+                        actor.id,
+                        item_id,
+                        stars,
+                        start_price,
+                        start_price,
+                        buyout_price or None,
+                        end.isoformat(),
+                    ),
+                )
+        except ValueError:
+            raise
+        await update_quest_progress(actor.id, "sell_auction")
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "auction_create",
+            "item_id": item_id,
+            "stars": stars,
+            "start_price": start_price,
+            "buyout_price": buyout_price,
+            "hours": hours,
+            "message": (
+                f"Лот выставлен: старт {format_price(start_price)}"
+                + (
+                    f", buyout {format_price(buyout_price)}"
+                    if buyout_price
+                    else ""
+                )
+                + f", на {hours} ч."
+            ),
+            "state": state,
+        }
+
+    async def _web_game_auction_bid(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            auction_id = int(payload.get("auction_id") or 0)
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная ставка.")
+        if auction_id <= 0:
+            raise ValueError("Выберите лот.")
+        if amount <= 0:
+            raise ValueError("Ставка должна быть больше нуля.")
+        ok, message, _previous, extended = await place_auction_bid(
+            actor.id, auction_id, amount
+        )
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "auction_bid",
+            "auction_id": str(auction_id),
+            "amount": amount,
+            "extended": bool(extended),
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
+    async def _web_game_auction_buyout(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            auction_id = int(payload.get("auction_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный лот.")
+        if auction_id <= 0:
+            raise ValueError("Выберите лот.")
+        ok, message, _compensation = await buyout_auction(
+            actor.id, auction_id
+        )
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "auction_buyout",
+            "auction_id": str(auction_id),
+            "message": self._web_action_error(message),
+            "state": state,
+        }
+
+    async def _web_game_auction_cancel(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            auction_id = int(payload.get("auction_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный лот.")
+        if auction_id <= 0:
+            raise ValueError("Выберите лот.")
+        item_id = ""
+        stars = 0
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT seller_id, item_id, stars, current_bidder, "
+                    "current_bid FROM auctions "
+                    "WHERE id = ? AND status = 'active'",
+                    (auction_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if not row:
+                    raise ValueError("Лот уже закрыт.")
+                seller_id, item_id, stars, bidder, bid = row
+                if int(seller_id) != actor.id:
+                    raise ValueError("Это не ваш лот.")
+                if bidder and bid:
+                    await self.db.execute(
+                        "UPDATE players SET coins = coins + ? "
+                        "WHERE user_id = ?",
+                        (int(bid), int(bidder)),
+                    )
+                await self.db.execute(
+                    "DELETE FROM auction_bids WHERE auction_id = ?",
+                    (auction_id,),
+                )
+                await self.db.execute(
+                    "DELETE FROM auctions WHERE id = ?", (auction_id,)
+                )
+        except ValueError:
+            raise
+        grant_message, _compensation = await grant_item_or_compensation(
+            actor.id, str(item_id), 1, int(stars or 0)
+        )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "auction_cancel",
+            "auction_id": str(auction_id),
+            "message": f"Лот отменён. {grant_message}",
+            "state": state,
+        }
+
     def _web_game_giveaway_channel(
         self, guild: discord.Guild, raw_channel_id: str
     ) -> discord.TextChannel:
@@ -5135,6 +5505,22 @@ class CastleBot(commands.Bot):
             return await self._web_game_pvp_raid(command, guild, member)
         if action == "pvp_espionage":
             return await self._web_game_pvp_espionage(
+                command, guild, member
+            )
+        if action == "auction_create":
+            return await self._web_game_auction_create(
+                command, guild, member
+            )
+        if action == "auction_bid":
+            return await self._web_game_auction_bid(
+                command, guild, member
+            )
+        if action == "auction_buyout":
+            return await self._web_game_auction_buyout(
+                command, guild, member
+            )
+        if action == "auction_cancel":
+            return await self._web_game_auction_cancel(
                 command, guild, member
             )
         if action == "admin_grant":

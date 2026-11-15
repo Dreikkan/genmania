@@ -1440,6 +1440,193 @@ def test_web_game_pvp_espionage():
     asyncio.run(run())
 
 
+def test_web_game_auction_create_bid_and_buyout():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 10000, 0), (3, 10000, 0)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('epic_gen', 'Эпический генератор', 5000, 5, 0, "
+            "'epic', 0)"
+        )
+        await db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (2, 0, 'epic_gen', 'profile', 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-create-1",
+                    "action": "auction_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "slot": 0,
+                        "item_id": "epic_gen",
+                        "stars": 0,
+                        "start_price": 1000,
+                        "buyout_price": 2000,
+                        "hours": 24,
+                    },
+                }
+            )
+            assert created["ok"] is True
+            assert len(created["state"]["auction"]["my_lots"]) == 1
+            assert created["state"]["inventory"] == []
+            lot_id = created["state"]["auction"]["my_lots"][0]["id"]
+
+            bid = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-bid-1",
+                    "action": "auction_bid",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {
+                        "auction_id": lot_id,
+                        "amount": 1200,
+                    },
+                }
+            )
+            assert bid["ok"] is True
+            lot = next(
+                item
+                for item in bid["state"]["auction"]["lots"]
+                if item["id"] == lot_id
+            )
+            assert lot["current_bid"] == 1200
+            assert lot["current_bidder"] == "3"
+
+            bought = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-buyout-1",
+                    "action": "auction_buyout",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"auction_id": lot_id},
+                }
+            )
+            assert bought["ok"] is True
+            assert bought["state"]["auction"]["my_lots"] == []
+            assert any(
+                item["item_id"] == "epic_gen"
+                for item in bought["state"]["inventory"]
+            )
+
+            seller_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-state-1",
+                    "action": "state",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert seller_state["player"]["coins"] > 10000
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_auction_cancel_refunds_bidder():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 10000, 0), (3, 10000, 0)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('epic_gen', 'Эпический генератор', 5000, 5, 0, "
+            "'epic', 0)"
+        )
+        await db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (2, 0, 'epic_gen', 'profile', 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-create-2",
+                    "action": "auction_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "slot": 0,
+                        "item_id": "epic_gen",
+                        "stars": 0,
+                        "start_price": 1000,
+                        "buyout_price": 0,
+                        "hours": 12,
+                    },
+                }
+            )
+            lot_id = created["state"]["auction"]["my_lots"][0]["id"]
+            await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-bid-2",
+                    "action": "auction_bid",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {
+                        "auction_id": lot_id,
+                        "amount": 1100,
+                    },
+                }
+            )
+            cancelled = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-cancel-1",
+                    "action": "auction_cancel",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"auction_id": lot_id},
+                }
+            )
+            assert cancelled["ok"] is True
+            assert cancelled["state"]["auction"]["my_lots"] == []
+            assert any(
+                item["item_id"] == "epic_gen"
+                for item in cancelled["state"]["inventory"]
+            )
+
+            bidder_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "auction-state-2",
+                    "action": "state",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert bidder_state["player"]["coins"] == 10000
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
