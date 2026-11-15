@@ -2404,9 +2404,14 @@ class CastleBot(commands.Bot):
                         int(item[0]),
                     ),
                 )
+                role_chain = ["member", "veteran", "officer", "deputy"]
+                can_promote = has_clan_permission(role, "promote")
+                can_kick = has_clan_permission(role, "kick")
                 members_payload = []
                 for raw_uid, member_role in member_rows:
                     member_role = str(member_role or "member")
+                    member_is_leader = member_role == "leader"
+                    is_self = int(raw_uid) == user_id
                     members_payload.append(
                         {
                             "user_id": str(raw_uid),
@@ -2415,7 +2420,32 @@ class CastleBot(commands.Bot):
                             "role_label": role_labels.get(
                                 member_role, member_role
                             ),
-                            "is_leader": member_role == "leader",
+                            "is_leader": member_is_leader,
+                            "is_self": is_self,
+                            "can_promote": bool(
+                                can_promote
+                                and not is_self
+                                and not member_is_leader
+                                and member_role in role_chain
+                                and member_role != "deputy"
+                            ),
+                            "can_demote": bool(
+                                can_promote
+                                and not is_self
+                                and not member_is_leader
+                                and member_role in role_chain
+                                and member_role != "member"
+                            ),
+                            "can_kick": bool(
+                                can_kick
+                                and not is_self
+                                and not member_is_leader
+                            ),
+                            "can_transfer": bool(
+                                role == "leader"
+                                and not is_self
+                                and not member_is_leader
+                            ),
                         }
                     )
 
@@ -2914,6 +2944,155 @@ class CastleBot(commands.Bot):
             },
         }
 
+    async def _web_game_raid_party_state(
+        self, user_id: int, guild: discord.Guild | None = None
+    ) -> dict:
+        def display_name(raw_user_id: int) -> str:
+            uid = int(raw_user_id or 0)
+            member = guild.get_member(uid) if guild is not None else None
+            user = member or self.get_user(uid)
+            if user is None:
+                return f"ID {uid}"
+            return (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or f"ID {uid}"
+            )
+
+        await cleanup_expired_raid_parties()
+        party = await get_raid_party(user_id)
+        party_payload = None
+        party_members: set[int] = set()
+        if party is not None:
+            party_id = int(party[0])
+            member_ids = party_member_ids(party)
+            party_members = {int(uid) for uid in member_ids}
+            members = []
+            all_ready = True
+            for uid in member_ids:
+                power = await get_combat_power(int(uid))
+                raid_cd = await get_raid_cooldown_seconds(int(uid))
+                ready = power > 0 and raid_cd == 0
+                all_ready = all_ready and ready
+                members.append(
+                    {
+                        "user_id": str(uid),
+                        "name": display_name(int(uid)),
+                        "power": int(power),
+                        "raid_cd": int(raid_cd),
+                        "ready": ready,
+                        "is_leader": int(uid) == int(party[1]),
+                        "is_self": int(uid) == user_id,
+                    }
+                )
+            async with self.db.execute(
+                "SELECT COUNT(*) FROM raid_party_invites "
+                "WHERE party_id = ?",
+                (party_id,),
+            ) as cursor:
+                pending_invites = int(
+                    (await cursor.fetchone())[0] or 0
+                )
+            is_leader = int(party[1]) == user_id
+            party_payload = {
+                "id": str(party_id),
+                "leader_id": str(party[1]),
+                "leader_name": display_name(int(party[1])),
+                "is_leader": is_leader,
+                "members": members,
+                "members_count": len(members),
+                "max_members": int(RAID_PARTY_MAX),
+                "pending_invites": pending_invites,
+                "all_ready": bool(all_ready),
+                "can_invite": bool(
+                    is_leader and len(members) < RAID_PARTY_MAX
+                ),
+                "can_start": bool(
+                    is_leader
+                    and len(members) > 0
+                    and all_ready
+                ),
+            }
+
+        invites = []
+        async with self.db.execute(
+            "SELECT i.id, i.party_id, i.inviter_id, i.created_at, "
+            "p.leader_id, p.member2_id, p.member3_id "
+            "FROM raid_party_invites i "
+            "JOIN raid_parties p ON p.id = i.party_id "
+            "WHERE i.target_id = ? ORDER BY i.id DESC LIMIT 10",
+            (user_id,),
+        ) as cursor:
+            invite_rows = await cursor.fetchall()
+        for (
+            invite_id,
+            party_id,
+            inviter_id,
+            created_at,
+            leader_id,
+            member2_id,
+            member3_id,
+        ) in invite_rows:
+            created = _parse_db_time(created_at)
+            expires_in = 0
+            if created is not None:
+                expires_in = max(
+                    0,
+                    int(
+                        RAID_INVITE_TIMEOUT
+                        - (
+                            datetime.datetime.now() - created
+                        ).total_seconds()
+                    ),
+                )
+            member_count = 1 + int(member2_id is not None) + int(
+                member3_id is not None
+            )
+            invites.append(
+                {
+                    "id": str(invite_id),
+                    "party_id": str(party_id),
+                    "leader_id": str(leader_id),
+                    "leader_name": display_name(int(leader_id or 0)),
+                    "inviter_id": str(inviter_id),
+                    "inviter_name": display_name(int(inviter_id or 0)),
+                    "members_count": member_count,
+                    "max_members": int(RAID_PARTY_MAX),
+                    "expires_in": expires_in,
+                }
+            )
+
+        candidates = []
+        if guild is not None and party_payload is not None:
+            for entry in await self._web_game_local_top(guild):
+                try:
+                    uid = int(entry.get("discord_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if uid <= 0 or uid == user_id or uid in party_members:
+                    continue
+                candidates.append(
+                    {
+                        "user_id": str(uid),
+                        "name": str(entry.get("name") or f"ID {uid}"),
+                    }
+                )
+                if len(candidates) >= 20:
+                    break
+
+        return {
+            "party": party_payload,
+            "invites": invites,
+            "candidates": candidates,
+            "limits": {
+                "max_members": int(RAID_PARTY_MAX),
+                "invite_timeout_seconds": int(RAID_INVITE_TIMEOUT),
+                "max_pending_invites": int(RAID_MAX_PENDING_INVITES),
+                "party_ttl_minutes": int(RAID_PARTY_TTL_MINUTES),
+                "cooldown_minutes": 60,
+            },
+        }
+
     async def _web_game_auction_state(
         self, user_id: int, guild: discord.Guild | None = None
     ) -> dict:
@@ -3082,6 +3261,7 @@ class CastleBot(commands.Bot):
                     "market": None,
                     "pvp": None,
                     "auction": None,
+                    "raid_party": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3108,6 +3288,7 @@ class CastleBot(commands.Bot):
                     "market": None,
                     "pvp": None,
                     "auction": None,
+                    "raid_party": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3339,6 +3520,9 @@ class CastleBot(commands.Bot):
         market_state = await self._web_game_market_state(user_id, guild)
         pvp_state = await self._web_game_pvp_state(user_id, guild)
         auction_state = await self._web_game_auction_state(user_id, guild)
+        raid_party_state = await self._web_game_raid_party_state(
+            user_id, guild
+        )
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -3385,6 +3569,7 @@ class CastleBot(commands.Bot):
             "market": market_state,
             "pvp": pvp_state,
             "auction": auction_state,
+            "raid_party": raid_party_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -4584,6 +4769,173 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    async def _web_game_clan_role_change(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+        promote: bool,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный участник.")
+        clan_id = await self._web_game_require_clan_id(actor.id)
+        if target_id <= 0 or target_id == actor.id:
+            raise ValueError("Выберите другого участника клана.")
+        role = await get_clan_role(actor.id, clan_id)
+        if not has_clan_permission(role, "promote"):
+            raise PermissionError("Недостаточно прав для смены ролей.")
+        target_role = await get_clan_role(target_id, clan_id)
+        if target_role == "none":
+            raise ValueError("Игрок не состоит в клане.")
+        if target_role == "leader":
+            raise ValueError("Нельзя менять роль лидера.")
+        order = ["member", "veteran", "officer", "deputy"]
+        if promote:
+            if target_role not in order or target_role == "deputy":
+                raise ValueError("Этого участника нельзя повысить.")
+            new_role = order[order.index(target_role) + 1]
+        else:
+            if target_role not in order or target_role == "member":
+                raise ValueError("Этого участника нельзя понизить.")
+            new_role = order[order.index(target_role) - 1]
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "UPDATE clan_members SET role = ? "
+                "WHERE user_id = ? AND clan_id = ? AND role = ?",
+                (new_role, target_id, clan_id, target_role),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Роль участника уже изменилась.")
+        await log_clan(
+            clan_id,
+            "promote" if promote else "demote",
+            f"<@{target_id}>: {target_role} → {new_role}",
+        )
+        label = "повышен" if promote else "понижен"
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_promote" if promote else "clan_demote",
+            "target_id": str(target_id),
+            "new_role": new_role,
+            "message": f"Участник {label}: {new_role}.",
+            "state": state,
+        }
+
+    async def _web_game_clan_promote(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        return await self._web_game_clan_role_change(
+            command, guild, actor, True
+        )
+
+    async def _web_game_clan_demote(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        return await self._web_game_clan_role_change(
+            command, guild, actor, False
+        )
+
+    async def _web_game_clan_kick(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный участник.")
+        clan_id = await self._web_game_require_clan_id(actor.id)
+        if target_id <= 0 or target_id == actor.id:
+            raise ValueError("Выберите другого участника клана.")
+        role = await get_clan_role(actor.id, clan_id)
+        if not has_clan_permission(role, "kick"):
+            raise PermissionError("Недостаточно прав для исключения.")
+        target_role = await get_clan_role(target_id, clan_id)
+        if target_role == "none":
+            raise ValueError("Игрок не состоит в клане.")
+        if target_role == "leader":
+            raise ValueError("Нельзя исключить лидера.")
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "DELETE FROM clan_members "
+                "WHERE user_id = ? AND clan_id = ?",
+                (target_id, clan_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Участник уже не в клане.")
+        await log_clan(clan_id, "kick", f"<@{target_id}>")
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_kick",
+            "target_id": str(target_id),
+            "message": "Участник исключён из клана.",
+            "state": state,
+        }
+
+    async def _web_game_clan_transfer(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный участник.")
+        clan_id = await self._web_game_require_clan_id(actor.id)
+        if target_id <= 0 or target_id == actor.id:
+            raise ValueError("Выберите другого участника клана.")
+        role = await get_clan_role(actor.id, clan_id)
+        if role != "leader":
+            raise PermissionError("Только лидер может передать лидерство.")
+        target_role = await get_clan_role(target_id, clan_id)
+        if target_role == "none":
+            raise ValueError("Игрок не состоит в клане.")
+        if target_role == "leader":
+            raise ValueError("Игрок уже лидер.")
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "UPDATE clan_members SET role = 'member' "
+                "WHERE user_id = ? AND clan_id = ? AND role = 'leader'",
+                (actor.id, clan_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Вы уже не лидер клана.")
+            cursor = await self.db.execute(
+                "UPDATE clan_members SET role = 'leader' "
+                "WHERE user_id = ? AND clan_id = ? AND role = ?",
+                (target_id, clan_id, target_role),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Роль участника уже изменилась.")
+            await self.db.execute(
+                "UPDATE clans SET leader_id = ? WHERE id = ?",
+                (target_id, clan_id),
+            )
+        await log_clan(clan_id, "transfer", f"<@{target_id}>")
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_transfer",
+            "target_id": str(target_id),
+            "message": "Лидерство передано участнику.",
+            "state": state,
+        }
+
     async def _web_game_market_buy(
         self,
         command: dict,
@@ -4871,6 +5223,221 @@ class CastleBot(commands.Bot):
                 f"Разведка: {target_member.display_name}, мощь "
                 f"{power}, {format_price(int(coins or 0))} монет."
             ),
+            "state": state,
+        }
+
+    async def _web_game_raid_party_create(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        if await get_raid_party(actor.id):
+            raise ValueError("Вы уже состоите в отряде.")
+        party_id = await create_raid_party(actor.id)
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "raid_party_create",
+            "party_id": str(party_id),
+            "message": "Отряд создан. Пригласите участников.",
+            "state": state,
+        }
+
+    async def _web_game_raid_party_invite(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный участник.")
+        if target_id <= 0 or target_id == actor.id:
+            raise ValueError("Выберите другого игрока.")
+        target_member = guild.get_member(target_id)
+        if target_member is None:
+            raise ValueError("Игрок должен быть на этом сервере.")
+        party = await get_raid_party(actor.id)
+        if not party:
+            raise ValueError("Сначала создайте отряд.")
+        if int(party[1]) != actor.id:
+            raise PermissionError("Только лидер отряда может приглашать.")
+        member_ids = party_member_ids(party)
+        if target_id in member_ids:
+            raise ValueError("Игрок уже в отряде.")
+        if len(member_ids) >= RAID_PARTY_MAX:
+            raise ValueError("В отряде нет свободных мест.")
+        async with self.db.execute(
+            "SELECT 1 FROM players WHERE user_id = ?", (target_id,)
+        ) as cursor:
+            if not await cursor.fetchone():
+                raise ValueError("Игрок не найден.")
+        if await get_raid_party(target_id):
+            raise ValueError("Игрок уже состоит в отряде.")
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM raid_party_invites WHERE party_id = ?",
+            (int(party[0]),),
+        ) as cursor:
+            pending = int((await cursor.fetchone())[0] or 0)
+        if pending >= RAID_MAX_PENDING_INVITES:
+            raise ValueError("Слишком много активных приглашений.")
+        await self.db.execute(
+            "DELETE FROM raid_party_invites "
+            "WHERE party_id = ? AND target_id = ?",
+            (int(party[0]), target_id),
+        )
+        await self.db.execute(
+            "INSERT INTO raid_party_invites "
+            "(party_id, inviter_id, target_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                int(party[0]),
+                actor.id,
+                target_id,
+                datetime.datetime.now().isoformat(),
+            ),
+        )
+        await commit_if_needed()
+        await touch_raid_party(int(party[0]))
+        await commit_if_needed()
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "raid_party_invite",
+            "target_id": str(target_id),
+            "message": f"Приглашение отправлено: {target_member.display_name}.",
+            "state": state,
+        }
+
+    async def _web_game_raid_party_accept(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            invite_id = int(payload.get("invite_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное приглашение.")
+        if invite_id <= 0:
+            raise ValueError("Выберите приглашение.")
+        await cleanup_expired_raid_invites()
+        async with self.db.execute(
+            "SELECT party_id FROM raid_party_invites "
+            "WHERE id = ? AND target_id = ?",
+            (invite_id, actor.id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            raise ValueError("Приглашение уже недействительно.")
+        if await get_raid_party(actor.id):
+            raise ValueError("Вы уже состоите в отряде.")
+        party_id = int(row[0])
+        await join_raid_party(party_id, actor.id)
+        await commit_if_needed()
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "raid_party_accept",
+            "party_id": str(party_id),
+            "message": "Вы вступили в отряд.",
+            "state": state,
+        }
+
+    async def _web_game_raid_party_leave(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        status = await leave_raid_party(actor.id)
+        messages = {
+            "transferred": (
+                "Вы покинули отряд. Лидерство передано "
+                "следующему участнику."
+            ),
+            "disbanded": "Вы покинули отряд. Отряд распущен.",
+            "left": "Вы покинули отряд.",
+            "none": "Отряд уже распался.",
+        }
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "raid_party_leave",
+            "status": status,
+            "message": messages.get(status, "Вы покинули отряд."),
+            "state": state,
+        }
+
+    async def _web_game_raid_party_start(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная цель.")
+        if target_id <= 0:
+            raise ValueError("Выберите цель для рейда.")
+        party = await get_raid_party(actor.id)
+        if not party:
+            raise ValueError("Сначала создайте отряд.")
+        if int(party[1]) != actor.id:
+            raise PermissionError("Только лидер отряда может начать рейд.")
+        member_ids = [int(uid) for uid in party_member_ids(party)]
+        if target_id in member_ids:
+            raise ValueError("Нельзя атаковать участника отряда.")
+        target_member = guild.get_member(target_id)
+        if target_member is None:
+            raise ValueError("Цель должна быть участником этого сервера.")
+        for uid in member_ids:
+            if guild.get_member(uid) is None:
+                raise ValueError(
+                    "В отряде есть игроки не с этого сервера."
+                )
+        result, error = await perform_raid(member_ids, target_id)
+        if error:
+            raise ValueError(self._web_action_error(error))
+        await finalize_raid(result)
+        loot = {
+            str(uid): int(amount)
+            for uid, amount in (result.get("loot") or {}).items()
+        }
+        total_loot = sum(loot.values())
+        my_loot = int(loot.get(str(actor.id), 0))
+        if result.get("success"):
+            message = (
+                f"Отряд провёл рейд: добыча {format_price(total_loot)} "
+                f"монет. Ваша доля: {format_price(my_loot)}."
+            )
+        else:
+            message = (
+                "Рейд отряда провален: атака "
+                f"{result.get('roll_atk', 0)} против защиты "
+                f"{result.get('roll_def', 0)}."
+            )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "raid_party_start",
+            "target_id": str(target_id),
+            "target_name": target_member.display_name,
+            "success": bool(result.get("success")),
+            "loot": loot,
+            "total_loot": total_loot,
+            "my_loot": my_loot,
+            "team_power": int(result.get("team_power", 0)),
+            "def_power": int(result.get("def_power", 0)),
+            "roll_atk": int(result.get("roll_atk", 0)),
+            "roll_def": int(result.get("roll_def", 0)),
+            "message": message,
             "state": state,
         }
 
@@ -5485,6 +6052,20 @@ class CastleBot(commands.Bot):
             return await self._web_game_clan_application_decide(
                 command, guild, member
             )
+        if action == "clan_promote":
+            return await self._web_game_clan_promote(
+                command, guild, member
+            )
+        if action == "clan_demote":
+            return await self._web_game_clan_demote(
+                command, guild, member
+            )
+        if action == "clan_kick":
+            return await self._web_game_clan_kick(command, guild, member)
+        if action == "clan_transfer":
+            return await self._web_game_clan_transfer(
+                command, guild, member
+            )
         if action == "market_buy":
             return await self._web_game_market_buy(command, guild, member)
         if action == "market_sell":
@@ -5505,6 +6086,26 @@ class CastleBot(commands.Bot):
             return await self._web_game_pvp_raid(command, guild, member)
         if action == "pvp_espionage":
             return await self._web_game_pvp_espionage(
+                command, guild, member
+            )
+        if action == "raid_party_create":
+            return await self._web_game_raid_party_create(
+                command, guild, member
+            )
+        if action == "raid_party_invite":
+            return await self._web_game_raid_party_invite(
+                command, guild, member
+            )
+        if action == "raid_party_accept":
+            return await self._web_game_raid_party_accept(
+                command, guild, member
+            )
+        if action == "raid_party_leave":
+            return await self._web_game_raid_party_leave(
+                command, guild, member
+            )
+        if action == "raid_party_start":
+            return await self._web_game_raid_party_start(
                 command, guild, member
             )
         if action == "auction_create":
