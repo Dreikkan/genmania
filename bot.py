@@ -406,6 +406,7 @@ CLAN_BASE_CAPACITY = 10               # базовый размер клана
 CLAN_CAPACITY_STEP = 5                # +5 мест за улучшение
 CLAN_MAX_CAPACITY = 50                # максимум участников
 CLAN_CAPACITY_COST = 1000             # базовая цена расширения
+CLAN_CREATE_COST = 500                # стоимость создания клана
 
 # --- РОЗЫГРЫШИ ---
 GIVEAWAY_SCOPE_SERVER = "server"
@@ -2250,6 +2251,287 @@ class CastleBot(commands.Bot):
             "history": history,
         }
 
+    async def _web_game_clan_state(
+        self, user_id: int, guild: discord.Guild | None = None
+    ) -> dict:
+        def display_name(raw_user_id: int) -> str:
+            uid = int(raw_user_id or 0)
+            member = guild.get_member(uid) if guild is not None else None
+            user = member or self.get_user(uid)
+            if user is None:
+                return f"ID {uid}"
+            return (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or f"ID {uid}"
+            )
+
+        role_labels = {
+            "leader": "Лидер",
+            "deputy": "Заместитель",
+            "officer": "Офицер",
+            "veteran": "Ветеран",
+            "member": "Участник",
+        }
+        role_order = {
+            "leader": 0,
+            "deputy": 1,
+            "officer": 2,
+            "veteran": 3,
+            "member": 4,
+        }
+
+        clan = await get_clan(user_id)
+        invites = []
+        async with self.db.execute(
+            "SELECT ci.id, c.id, c.name "
+            "FROM clan_invites ci JOIN clans c ON c.id = ci.clan_id "
+            "WHERE ci.target_id = ? ORDER BY ci.created_at DESC LIMIT 10",
+            (user_id,),
+        ) as cursor:
+            for invite_id, clan_id, name in await cursor.fetchall():
+                invites.append(
+                    {
+                        "id": str(invite_id),
+                        "clan_id": str(clan_id),
+                        "name": str(name or ""),
+                    }
+                )
+
+        pending_application = None
+        async with self.db.execute(
+            "SELECT ca.clan_id, c.name, ca.status "
+            "FROM clan_applications ca "
+            "JOIN clans c ON c.id = ca.clan_id "
+            "WHERE ca.user_id = ? AND ca.status = 'pending' "
+            "ORDER BY ca.id DESC LIMIT 1",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row:
+            pending_application = {
+                "clan_id": str(row[0]),
+                "clan_name": str(row[1] or ""),
+                "status": str(row[2] or "pending"),
+            }
+
+        browser = []
+        if clan is None:
+            application_status: dict[int, str] = {}
+            async with self.db.execute(
+                "SELECT clan_id, status FROM clan_applications "
+                "WHERE user_id = ?",
+                (user_id,),
+            ) as cursor:
+                for clan_id, status in await cursor.fetchall():
+                    application_status[int(clan_id)] = str(status or "")
+            async with self.db.execute(
+                "SELECT c.id, c.name, c.leader_id, c.treasury, "
+                "COALESCE(c.level, 1), COALESCE(c.capacity, ?), "
+                "COALESCE(c.bonus, 0), COUNT(cm.user_id) "
+                "FROM clans c "
+                "LEFT JOIN clan_members cm ON cm.clan_id = c.id "
+                "GROUP BY c.id "
+                "ORDER BY COUNT(cm.user_id) DESC, c.name ASC LIMIT 24",
+                (CLAN_BASE_CAPACITY,),
+            ) as cursor:
+                for (
+                    clan_id,
+                    name,
+                    leader_id,
+                    treasury,
+                    level,
+                    capacity,
+                    bonus,
+                    members,
+                ) in await cursor.fetchall():
+                    capacity_int = int(capacity or CLAN_BASE_CAPACITY)
+                    members_int = int(members or 0)
+                    status = application_status.get(int(clan_id), "")
+                    browser.append(
+                        {
+                            "id": str(clan_id),
+                            "name": str(name or ""),
+                            "leader_id": str(leader_id or ""),
+                            "leader_name": display_name(
+                                int(leader_id or 0)
+                            ),
+                            "treasury": int(treasury or 0),
+                            "level": int(level or 1),
+                            "members": members_int,
+                            "capacity": capacity_int,
+                            "bonus_percent": round(
+                                float(bonus or 0) * 100, 1
+                            ),
+                            "application": status or None,
+                            "full": members_int >= capacity_int,
+                            "can_apply": bool(
+                                status != "pending"
+                                and members_int < capacity_int
+                            ),
+                        }
+                    )
+
+        details = None
+        if clan is not None:
+            clan_id = int(clan[0])
+            async with self.db.execute(
+                "SELECT name, leader_id, treasury, COALESCE(level, 1), "
+                "COALESCE(xp, 0), COALESCE(capacity, ?), "
+                "COALESCE(bonus, 0) FROM clans WHERE id = ?",
+                (CLAN_BASE_CAPACITY, clan_id),
+            ) as cursor:
+                clan_row = await cursor.fetchone()
+            if clan_row:
+                (
+                    name,
+                    leader_id,
+                    treasury,
+                    level,
+                    xp,
+                    capacity,
+                    bonus,
+                ) = clan_row
+                capacity_int = int(capacity or CLAN_BASE_CAPACITY)
+                level_int = int(level or 1)
+                xp_int = int(xp or 0)
+                role = await get_clan_role(user_id, clan_id)
+                member_rows = await get_clan_members(clan_id)
+                member_rows = sorted(
+                    member_rows,
+                    key=lambda item: (
+                        role_order.get(str(item[1]), 9),
+                        int(item[0]),
+                    ),
+                )
+                members_payload = []
+                for raw_uid, member_role in member_rows:
+                    member_role = str(member_role or "member")
+                    members_payload.append(
+                        {
+                            "user_id": str(raw_uid),
+                            "name": display_name(int(raw_uid)),
+                            "role": member_role,
+                            "role_label": role_labels.get(
+                                member_role, member_role
+                            ),
+                            "is_leader": member_role == "leader",
+                        }
+                    )
+
+                quests = []
+                try:
+                    quest_rows = await get_or_create_clan_quests(clan_id)
+                except Exception:
+                    log.exception("WEB_GAME: не удалось получить квесты клана")
+                    quest_rows = []
+                quest_labels = {
+                    quest_type: label
+                    for quest_type, label, _target, _reward in CLAN_QUESTS
+                }
+                for (
+                    _quest_id,
+                    quest_type,
+                    progress,
+                    target,
+                    reward,
+                    completed,
+                ) in quest_rows:
+                    quests.append(
+                        {
+                            "type": str(quest_type),
+                            "label": quest_labels.get(
+                                str(quest_type), str(quest_type)
+                            ),
+                            "progress": int(progress or 0),
+                            "target": int(target or 0),
+                            "reward": int(reward or 0),
+                            "completed": bool(completed),
+                        }
+                    )
+
+                applications = []
+                if has_clan_permission(role, "invite"):
+                    async with self.db.execute(
+                        "SELECT id, user_id, created_at "
+                        "FROM clan_applications "
+                        "WHERE clan_id = ? AND status = 'pending' "
+                        "ORDER BY id ASC LIMIT 25",
+                        (clan_id,),
+                    ) as cursor:
+                        for app_id, target_id, created_at in (
+                            await cursor.fetchall()
+                        ):
+                            applications.append(
+                                {
+                                    "id": str(app_id),
+                                    "user_id": str(target_id),
+                                    "name": display_name(int(target_id)),
+                                    "created_at": str(created_at or ""),
+                                }
+                            )
+
+                next_cost = (
+                    clan_capacity_cost(capacity_int)
+                    if capacity_int < CLAN_MAX_CAPACITY
+                    else 0
+                )
+                can_buy = has_clan_permission(role, "buy")
+                details = {
+                    "id": str(clan_id),
+                    "name": str(name or ""),
+                    "leader_id": str(leader_id or ""),
+                    "leader_name": display_name(int(leader_id or 0)),
+                    "treasury": int(treasury or 0),
+                    "level": level_int,
+                    "xp": xp_int,
+                    "xp_need": int(CLAN_XP_PER_LEVEL * level_int),
+                    "max_level": int(CLAN_MAX_LEVEL),
+                    "bonus_percent": round(float(bonus or 0) * 100, 1),
+                    "power": int(await get_clan_power(clan_id)),
+                    "members_count": len(member_rows),
+                    "capacity": capacity_int,
+                    "role": role,
+                    "role_label": role_labels.get(role, role),
+                    "can_manage": has_clan_permission(role, "kick"),
+                    "can_buy": can_buy,
+                    "can_invite": has_clan_permission(role, "invite"),
+                    "can_leave": bool(
+                        not (
+                            role == "leader"
+                            and len(member_rows) > 1
+                        )
+                    ),
+                    "members": members_payload,
+                    "applications": applications,
+                    "quests": quests,
+                    "upgrade": {
+                        "capacity": capacity_int,
+                        "max_capacity": int(CLAN_MAX_CAPACITY),
+                        "step": int(CLAN_CAPACITY_STEP),
+                        "next_capacity": min(
+                            CLAN_MAX_CAPACITY,
+                            capacity_int + CLAN_CAPACITY_STEP,
+                        ),
+                        "cost": int(next_cost),
+                        "can_expand": bool(
+                            can_buy
+                            and next_cost > 0
+                            and int(treasury or 0) >= next_cost
+                        ),
+                        "maxed": capacity_int >= CLAN_MAX_CAPACITY,
+                    },
+                }
+
+        return {
+            "in_clan": bool(details),
+            "create_cost": int(CLAN_CREATE_COST),
+            "browser": browser,
+            "invites": invites,
+            "pending_application": pending_application,
+            "details": details,
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -2276,6 +2558,7 @@ class CastleBot(commands.Bot):
                     "shop": [],
                     "craft_recipes": [],
                     "bank": None,
+                    "clan": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2298,6 +2581,7 @@ class CastleBot(commands.Bot):
                     "shop": [],
                     "craft_recipes": [],
                     "bank": None,
+                    "clan": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2525,6 +2809,7 @@ class CastleBot(commands.Bot):
             )
         )
         bank = await self._web_game_bank_state(user_id)
+        clan_state = await self._web_game_clan_state(user_id, guild)
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -2567,6 +2852,7 @@ class CastleBot(commands.Bot):
             "shop": shop,
             "craft_recipes": craft_recipes,
             "bank": bank,
+            "clan": clan_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -3130,7 +3416,7 @@ class CastleBot(commands.Bot):
         }
 
     @staticmethod
-    def _bank_action_error(message: str) -> str:
+    def _web_action_error(message: str) -> str:
         text = str(message or "").strip()
         for prefix in ("❌", "✅"):
             if text.startswith(prefix):
@@ -3330,7 +3616,7 @@ class CastleBot(commands.Bot):
             actor.id, item_id, stars, amount
         )
         if not ok:
-            raise ValueError(self._bank_action_error(raw_message))
+            raise ValueError(self._web_action_error(raw_message))
         await sort_inventory(actor.id, "profile")
         loan = await get_loan(actor.id)
         total_due = loan_total_due(loan) if loan else 0
@@ -3363,7 +3649,7 @@ class CastleBot(commands.Bot):
         total_due = loan_total_due(loan) if loan else 0
         ok, raw_message = await repay_bank_loan(actor.id)
         if not ok:
-            raise ValueError(self._bank_action_error(raw_message))
+            raise ValueError(self._web_action_error(raw_message))
         await sort_inventory(actor.id, "profile")
         message = (
             f"Кредит погашен: {format_price(int(total_due))}. "
@@ -3375,6 +3661,392 @@ class CastleBot(commands.Bot):
             "action": "bank_repay_loan",
             "total_due": int(total_due),
             "message": message,
+            "state": state,
+        }
+
+    async def _web_game_require_clan_id(self, user_id: int) -> int:
+        clan = await get_clan(user_id)
+        if not clan:
+            raise ValueError("Вы не состоите в клане.")
+        return int(clan[0])
+
+    async def _web_game_clan_create(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        name = str(payload.get("name") or "").strip()
+        if not 3 <= len(name) <= 32:
+            raise ValueError(
+                "Название клана должно быть от 3 до 32 символов."
+            )
+        if await get_clan(actor.id):
+            raise ValueError("Вы уже состоите в клане.")
+        cost = int(CLAN_CREATE_COST)
+        clan_id = 0
+        try:
+            async with db_transaction():
+                if await get_clan(actor.id):
+                    raise ValueError("Вы уже состоите в клане.")
+                cursor = await self.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (cost, actor.id, cost),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        f"Нужно {format_price(cost)} монет "
+                        "для создания клана."
+                    )
+                cursor = await self.db.execute(
+                    "INSERT INTO clans (name, leader_id, treasury) "
+                    "VALUES (?, ?, 0)",
+                    (name, actor.id),
+                )
+                clan_id = int(cursor.lastrowid or 0)
+                await self.db.execute(
+                    "INSERT INTO clan_members (user_id, clan_id, role) "
+                    "VALUES (?, ?, 'leader')",
+                    (actor.id, clan_id),
+                )
+        except aiosqlite.IntegrityError:
+            raise ValueError("Клан с таким названием уже существует.")
+        await log_clan(clan_id, "create", f"<@{actor.id}>")
+        await update_story_quests(actor.id, "clan_join", 1)
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_create",
+            "clan_id": str(clan_id),
+            "name": name,
+            "cost": cost,
+            "message": f"Клан «{name}» создан за {format_price(cost)} монет.",
+            "state": state,
+        }
+
+    async def _web_game_clan_apply(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            clan_id = int(payload.get("clan_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный клан.")
+        if clan_id <= 0:
+            raise ValueError("Выберите клан для заявки.")
+        ok, message = await apply_to_clan(actor.id, clan_id)
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_apply",
+            "clan_id": str(clan_id),
+            "message": self._web_action_error(message).replace("**", ""),
+            "state": state,
+        }
+
+    async def _web_game_clan_invite_accept(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            invite_id = int(payload.get("invite_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное приглашение.")
+        if invite_id <= 0:
+            raise ValueError("Выберите приглашение.")
+        if await get_clan(actor.id):
+            raise ValueError("Вы уже состоите в клане.")
+        async with self.db.execute(
+            "SELECT clan_id FROM clan_invites "
+            "WHERE id = ? AND target_id = ?",
+            (invite_id, actor.id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            raise ValueError("Приглашение уже недействительно.")
+        clan_id = int(row[0])
+        capacity = await get_clan_capacity(clan_id)
+        members = await get_clan_member_count(clan_id)
+        if members >= capacity:
+            raise ValueError("Клан заполнен. Нужно расширить состав.")
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT 1 FROM clan_invites "
+                    "WHERE id = ? AND target_id = ?",
+                    (invite_id, actor.id),
+                ) as cursor:
+                    if not await cursor.fetchone():
+                        raise ValueError(
+                            "Приглашение уже недействительно."
+                        )
+                await self.db.execute(
+                    "INSERT INTO clan_members (user_id, clan_id, role) "
+                    "VALUES (?, ?, 'member')",
+                    (actor.id, clan_id),
+                )
+                await self.db.execute(
+                    "DELETE FROM clan_invites WHERE target_id = ?",
+                    (actor.id,),
+                )
+        except aiosqlite.IntegrityError:
+            raise ValueError("Вы уже состоите в клане.")
+        await log_clan(clan_id, "join", f"<@{actor.id}>")
+        await update_story_quests(actor.id, "clan_join", 1)
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_invite_accept",
+            "clan_id": str(clan_id),
+            "message": "Вы вступили в клан.",
+            "state": state,
+        }
+
+    async def _web_game_clan_leave(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        clan_id = await self._web_game_require_clan_id(actor.id)
+        members = await get_clan_members(clan_id)
+        is_leader = any(
+            uid == actor.id and role == "leader"
+            for uid, role in members
+        )
+        if is_leader and len(members) > 1:
+            raise ValueError(
+                "Сначала передайте лидерство другому участнику."
+            )
+        async with self.db.execute(
+            "SELECT treasury FROM clans WHERE id = ?", (clan_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            raise ValueError("Клан уже не существует.")
+        treasury = int(row[0] or 0)
+        async with db_transaction():
+            if is_leader:
+                if treasury > 0:
+                    await self.db.execute(
+                        "UPDATE players SET coins = coins + ? "
+                        "WHERE user_id = ?",
+                        (treasury, actor.id),
+                    )
+                for table in (
+                    "clan_inventory",
+                    "clan_members",
+                    "clan_invites",
+                    "clan_quests",
+                    "clan_applications",
+                ):
+                    await self.db.execute(
+                        f"DELETE FROM {table} WHERE clan_id = ?",
+                        (clan_id,),
+                    )
+                await self.db.execute(
+                    "DELETE FROM clan_wars "
+                    "WHERE clan1_id = ? OR clan2_id = ?",
+                    (clan_id, clan_id),
+                )
+                await self.db.execute(
+                    "DELETE FROM clans WHERE id = ?", (clan_id,)
+                )
+            else:
+                await self.db.execute(
+                    "DELETE FROM clan_members "
+                    "WHERE user_id = ? AND clan_id = ?",
+                    (actor.id, clan_id),
+                )
+                await self.db.execute(
+                    "DELETE FROM clan_invites "
+                    "WHERE target_id = ? OR inviter_id = ?",
+                    (actor.id, actor.id),
+                )
+        if is_leader:
+            await log_clan(clan_id, "disband", "leader left")
+            message = "Клан распущен, сундук возвращён."
+        else:
+            await log_clan(clan_id, "leave", f"<@{actor.id}>")
+            message = "Вы покинули клан."
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_leave",
+            "disbanded": is_leader,
+            "treasury_returned": treasury if is_leader else 0,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_clan_donate(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная сумма.")
+        if amount <= 0:
+            raise ValueError("Сумма должна быть больше нуля.")
+        clan_id = await self._web_game_require_clan_id(actor.id)
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT coins FROM players WHERE user_id = ?",
+                    (actor.id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                coins = int(row[0] or 0) if row else 0
+                if coins < amount:
+                    raise ValueError("Недостаточно монет.")
+                cursor = await self.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (amount, actor.id, amount),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        "Недостаточно монет (баланс изменился)."
+                    )
+                await self.db.execute(
+                    "UPDATE clans SET treasury = treasury + ? "
+                    "WHERE id = ?",
+                    (amount, clan_id),
+                )
+        except ValueError:
+            raise
+        await update_quest_progress(actor.id, "donate_clan")
+        await add_clan_xp(clan_id, max(1, amount // 100))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_donate",
+            "amount": amount,
+            "message": (
+                f"В сундук клана внесено {format_price(amount)} монет."
+            ),
+            "state": state,
+        }
+
+    async def _web_game_clan_expand(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        clan_id = await self._web_game_require_clan_id(actor.id)
+        role = await get_clan_role(actor.id, clan_id)
+        if not has_clan_permission(role, "buy"):
+            raise PermissionError(
+                "Недостаточно прав для улучшения клана."
+            )
+        capacity = await get_clan_capacity(clan_id)
+        if capacity >= CLAN_MAX_CAPACITY:
+            raise ValueError(
+                f"Достигнут максимум {CLAN_MAX_CAPACITY} мест."
+            )
+        cost = clan_capacity_cost(capacity)
+        async with self.db.execute(
+            "SELECT treasury FROM clans WHERE id = ?", (clan_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        treasury = int(row[0] or 0) if row else 0
+        if treasury < cost:
+            raise ValueError(
+                f"В сундуке {format_price(treasury)}, нужно "
+                f"{format_price(cost)}."
+            )
+        new_capacity = min(
+            CLAN_MAX_CAPACITY, capacity + CLAN_CAPACITY_STEP
+        )
+        try:
+            async with db_transaction():
+                cursor = await self.db.execute(
+                    "UPDATE clans SET capacity = ?, "
+                    "treasury = treasury - ? "
+                    "WHERE id = ? AND treasury >= ? AND capacity = ?",
+                    (
+                        new_capacity,
+                        cost,
+                        clan_id,
+                        cost,
+                        capacity,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        "Сундук или вместимость изменились. "
+                        "Попробуйте ещё раз."
+                    )
+        except ValueError:
+            raise
+        await log_clan(
+            clan_id,
+            "capacity_upgrade",
+            f"{capacity} → {new_capacity} за {cost}",
+        )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_expand",
+            "old_capacity": capacity,
+            "new_capacity": new_capacity,
+            "cost": cost,
+            "message": f"Состав расширен до {new_capacity} мест.",
+            "state": state,
+        }
+
+    async def _web_game_clan_application_decide(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            app_id = int(payload.get("application_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная заявка.")
+        if app_id <= 0:
+            raise ValueError("Выберите заявку.")
+        approve_raw = payload.get("approve", False)
+        if isinstance(approve_raw, str):
+            approve = approve_raw.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+        else:
+            approve = bool(approve_raw)
+        ok, message = await decide_clan_application(
+            app_id, approve, actor.id
+        )
+        if not ok:
+            raise ValueError(self._web_action_error(message))
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "clan_application_decide",
+            "approved": approve,
+            "message": (
+                "Заявка принята: игрок добавлен в клан."
+                if approve
+                else "Заявка отклонена."
+            ),
             "state": state,
         }
 
@@ -3743,6 +4415,24 @@ class CastleBot(commands.Bot):
             return await self._web_game_bank_loan(command, guild, member)
         if action == "bank_repay_loan":
             return await self._web_game_bank_repay(command, guild, member)
+        if action == "clan_create":
+            return await self._web_game_clan_create(command, guild, member)
+        if action == "clan_apply":
+            return await self._web_game_clan_apply(command, guild, member)
+        if action == "clan_invite_accept":
+            return await self._web_game_clan_invite_accept(
+                command, guild, member
+            )
+        if action == "clan_leave":
+            return await self._web_game_clan_leave(command, guild, member)
+        if action == "clan_donate":
+            return await self._web_game_clan_donate(command, guild, member)
+        if action == "clan_expand":
+            return await self._web_game_clan_expand(command, guild, member)
+        if action == "clan_application_decide":
+            return await self._web_game_clan_application_decide(
+                command, guild, member
+            )
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
@@ -13886,7 +14576,7 @@ class CreateClanModal(discord.ui.Modal, title="Создание клана"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        cost = 500
+        cost = CLAN_CREATE_COST
 
         # Проверка баланса
         async with bot.db.execute("SELECT coins FROM players WHERE user_id = ?", (self.author_id,)) as c:

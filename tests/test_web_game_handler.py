@@ -901,6 +901,277 @@ def test_web_game_bank_loan_and_repay():
     asyncio.run(run())
 
 
+def test_web_game_clan_create_apply_and_approve():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 1000, 0), (3, 0, 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-create-1",
+                    "action": "clan_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"name": "Ночной дозор"},
+                }
+            )
+            assert created["ok"] is True
+            assert created["state"]["player"]["coins"] == 500
+            details = created["state"]["clan"]["details"]
+            assert details["role"] == "leader"
+            assert details["name"] == "Ночной дозор"
+            clan_id = created["clan_id"]
+
+            browser = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-state-1",
+                    "action": "state",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            entry = next(
+                row
+                for row in browser["clan"]["browser"]
+                if row["id"] == clan_id
+            )
+            assert entry["can_apply"] is True
+
+            applied = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-apply-1",
+                    "action": "clan_apply",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"clan_id": clan_id},
+                }
+            )
+            assert applied["ok"] is True
+            assert applied["state"]["clan"]["in_clan"] is False
+            pending = applied["state"]["clan"]["pending_application"]
+            assert pending["clan_name"] == "Ночной дозор"
+
+            leader_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-state-2",
+                    "action": "state",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            applications = leader_state["clan"]["details"]["applications"]
+            assert len(applications) == 1
+
+            decided = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-app-decide-1",
+                    "action": "clan_application_decide",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {
+                        "application_id": applications[0]["id"],
+                        "approve": True,
+                    },
+                }
+            )
+            assert decided["ok"] is True
+            assert decided["approved"] is True
+            assert decided["state"]["clan"]["details"]["members_count"] == 2
+            assert decided["state"]["clan"]["details"]["applications"] == []
+
+            member_state = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-state-3",
+                    "action": "state",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert member_state["clan"]["in_clan"] is True
+            assert member_state["clan"]["details"]["role"] == "member"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_clan_donate_and_expand():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (2, 5000, 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-create-2",
+                    "action": "clan_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"name": "Складской союз"},
+                }
+            )
+            donated = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-donate-1",
+                    "action": "clan_donate",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"amount": 1000},
+                }
+            )
+            assert donated["state"]["player"]["coins"] == 3500
+            assert donated["state"]["clan"]["details"]["treasury"] == 1000
+
+            expanded = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-expand-1",
+                    "action": "clan_expand",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert expanded["ok"] is True
+            assert expanded["old_capacity"] == 10
+            assert expanded["new_capacity"] == 15
+            assert expanded["state"]["clan"]["details"]["capacity"] == 15
+            assert expanded["state"]["clan"]["details"]["treasury"] == 0
+            assert created["clan_id"] == expanded["state"]["clan"]["details"]["id"]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_clan_leave_returns_treasury():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (2, 1000, 0)"
+        )
+        await db.commit()
+        try:
+            await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-create-3",
+                    "action": "clan_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"name": "Одинокий замок"},
+                }
+            )
+            await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-donate-2",
+                    "action": "clan_donate",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"amount": 300},
+                }
+            )
+            left = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-leave-1",
+                    "action": "clan_leave",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert left["ok"] is True
+            assert left["disbanded"] is True
+            assert left["treasury_returned"] == 300
+            assert left["state"]["player"]["coins"] == 500
+            assert left["state"]["clan"]["in_clan"] is False
+            assert left["state"]["clan"]["browser"] == []
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_clan_invite_accept():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 1000, 0), (3, 0, 0)"
+        )
+        await db.commit()
+        try:
+            created = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-create-4",
+                    "action": "clan_create",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"name": "Приглашённые"},
+                }
+            )
+            clan_id = int(created["clan_id"])
+            cursor = await db.execute(
+                "INSERT INTO clan_invites (clan_id, inviter_id, target_id) "
+                "VALUES (?, 2, 3)",
+                (clan_id,),
+            )
+            invite_id = cursor.lastrowid
+            await db.commit()
+
+            accepted = await m.bot.handle_web_game_command(
+                {
+                    "id": "clan-invite-1",
+                    "action": "clan_invite_accept",
+                    "user_id": "3",
+                    "guild_id": "42",
+                    "payload": {"invite_id": invite_id},
+                }
+            )
+            assert accepted["ok"] is True
+            assert accepted["state"]["clan"]["in_clan"] is True
+            assert accepted["state"]["clan"]["details"]["role"] == "member"
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
