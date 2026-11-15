@@ -6,6 +6,7 @@ import importlib.util
 import pathlib
 import sys
 import tempfile
+from unittest import mock
 
 import aiosqlite
 
@@ -1324,6 +1325,115 @@ def test_web_game_market_order_create_and_fill():
             )
             assert seller_state["market"]["my_orders"] == []
             assert seller_state["player"]["coins"] > 10000
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_pvp_raid():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 1000, 0), (3, 10000, 0)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.executemany(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (?, 0, 'basic_gen', 'profile', 0)",
+            [(2,), (3,)],
+        )
+        await db.commit()
+        try:
+            with mock.patch.object(
+                m.random, "randint", side_effect=[1000, 1]
+            ):
+                raided = await m.bot.handle_web_game_command(
+                    {
+                        "id": "pvp-raid-1",
+                        "action": "pvp_raid",
+                        "user_id": "2",
+                        "guild_id": "42",
+                        "payload": {"target_id": "3"},
+                    }
+                )
+            assert raided["ok"] is True
+            assert raided["success"] is True
+            assert raided["loot"] > 0
+            assert raided["state"]["player"]["coins"] > 1000
+            assert raided["state"]["pvp"]["stats"]["raid_cd"] > 0
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_pvp_espionage():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES "
+            "(2, 1000, 0), (3, 10000, 5)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, "
+            "income_per_hour, income_gems_per_hour, rarity, buyable) "
+            "VALUES ('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (3, 0, 'basic_gen', 'profile', 0)"
+        )
+        await db.commit()
+        try:
+            intel = await m.bot.handle_web_game_command(
+                {
+                    "id": "pvp-espionage-1",
+                    "action": "pvp_espionage",
+                    "user_id": "2",
+                    "guild_id": "42",
+                    "payload": {"target_id": "3"},
+                }
+            )
+            assert intel["ok"] is True
+            assert intel["intel"]["power"] == 1000
+            assert intel["intel"]["generators"] == 1
+            assert intel["state"]["pvp"]["stats"]["espionage_cd"] > 0
+            try:
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "pvp-espionage-2",
+                        "action": "pvp_espionage",
+                        "user_id": "2",
+                        "guild_id": "42",
+                        "payload": {"target_id": "3"},
+                    }
+                )
+            except ValueError as exc:
+                assert "Шпионаж" in str(exc)
+            else:
+                raise AssertionError("Повторный шпионаж должен быть отклонён")
         finally:
             await db.close()
 

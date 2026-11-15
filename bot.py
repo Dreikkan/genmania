@@ -2704,6 +2704,216 @@ class CastleBot(commands.Bot):
             },
         }
 
+    async def _web_game_pvp_state(
+        self, user_id: int, guild: discord.Guild | None = None
+    ) -> dict:
+        def display_name(raw_user_id: int) -> str:
+            uid = int(raw_user_id or 0)
+            member = guild.get_member(uid) if guild is not None else None
+            user = member or self.get_user(uid)
+            if user is None:
+                return f"ID {uid}"
+            return (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or f"ID {uid}"
+            )
+
+        def shield_seconds(raw_time) -> int:
+            parsed = _parse_db_time(raw_time)
+            if parsed is None:
+                return 0
+            return max(
+                0,
+                int(
+                    RAID_TARGET_SHIELD_HOURS * 3600
+                    - (datetime.datetime.now() - parsed).total_seconds()
+                ),
+            )
+
+        viewer_power = await get_combat_power(user_id)
+        raid_cd = await get_raid_cooldown_seconds(user_id)
+        duel_cd = await get_duel_cooldown_seconds(user_id)
+        espionage_cd = await get_espionage_cooldown_seconds(user_id)
+        async with self.db.execute(
+            "SELECT last_attacked_time FROM raid_cooldowns "
+            "WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        shield = shield_seconds(row[0] if row else None)
+
+        async with self.db.execute(
+            "SELECT COALESCE(raid_wins, 0) FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        raid_wins = int(row[0] or 0) if row else 0
+
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM duel_history WHERE winner_id = ?",
+            (user_id,),
+        ) as cursor:
+            duel_wins = int((await cursor.fetchone())[0] or 0)
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM duel_history "
+            "WHERE winner_id = ? OR loser_id = ?",
+            (user_id, user_id),
+        ) as cursor:
+            duels_total = int((await cursor.fetchone())[0] or 0)
+
+        targets = []
+        if guild is not None:
+            local_top = await self._web_game_local_top(guild)
+            for entry in local_top:
+                try:
+                    target_id = int(entry.get("discord_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if target_id <= 0 or target_id == user_id:
+                    continue
+                power = await get_combat_power(target_id)
+                if power <= 0:
+                    continue
+                async with self.db.execute(
+                    "SELECT last_raid_time, last_attacked_time "
+                    "FROM raid_cooldowns WHERE user_id = ?",
+                    (target_id,),
+                ) as cursor:
+                    timer_row = await cursor.fetchone()
+                last_raid = _parse_db_time(
+                    timer_row[0] if timer_row else None
+                )
+                target_raid_cd = (
+                    max(
+                        0,
+                        int(
+                            3600
+                            - (
+                                datetime.datetime.now() - last_raid
+                            ).total_seconds()
+                        ),
+                    )
+                    if last_raid
+                    else 0
+                )
+                target_shield = shield_seconds(
+                    timer_row[1] if timer_row else None
+                )
+                target_duel_cd = await get_duel_cooldown_seconds(
+                    target_id
+                )
+                raid_allowed = bool(
+                    viewer_power > 0
+                    and power
+                    >= viewer_power * RAID_MIN_TARGET_POWER_RATIO
+                )
+                duel_allowed = power_duel_allowed(
+                    viewer_power, power
+                )
+                targets.append(
+                    {
+                        "user_id": str(target_id),
+                        "name": display_name(target_id),
+                        "coins": int(entry.get("coins") or 0),
+                        "power": int(power),
+                        "shield": target_shield,
+                        "raid_cd": target_raid_cd,
+                        "duel_cd": target_duel_cd,
+                        "can_raid": bool(
+                            raid_allowed
+                            and target_shield == 0
+                            and target_raid_cd == 0
+                            and raid_cd == 0
+                        ),
+                        "can_duel": bool(
+                            duel_allowed
+                            and target_duel_cd == 0
+                            and duel_cd == 0
+                        ),
+                        "can_espionage": espionage_cd == 0,
+                    }
+                )
+                if len(targets) >= 12:
+                    break
+
+        events = []
+        async with self.db.execute(
+            "SELECT winner_id, loser_id, bet, type, timestamp "
+            "FROM duel_history WHERE winner_id = ? OR loser_id = ? "
+            "ORDER BY id DESC LIMIT 10",
+            (user_id, user_id),
+        ) as cursor:
+            for winner, loser, bet, mode, timestamp in (
+                await cursor.fetchall()
+            ):
+                won = int(winner) == user_id
+                opponent = int(loser) if won else int(winner)
+                events.append(
+                    {
+                        "type": "duel",
+                        "won": won,
+                        "text": (
+                            f"{'Победа' if won else 'Поражение'} "
+                            f"в дуэли ({mode or 'dice'}) против "
+                            f"{display_name(opponent)} · ставка "
+                            f"{format_price(int(bet or 0))}"
+                        ),
+                        "at": str(timestamp or ""),
+                    }
+                )
+        async with self.db.execute(
+            "SELECT target_id, amount, timestamp FROM raid_loot_log "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+            (user_id,),
+        ) as cursor:
+            for target_id, amount, timestamp in await cursor.fetchall():
+                events.append(
+                    {
+                        "type": "raid",
+                        "won": True,
+                        "text": (
+                            f"Рейд: украдено "
+                            f"{format_price(int(amount or 0))} у "
+                            f"{display_name(int(target_id or 0))}"
+                        ),
+                        "at": str(timestamp or ""),
+                    }
+                )
+        events.sort(key=lambda event: event["at"], reverse=True)
+
+        return {
+            "stats": {
+                "power": int(viewer_power),
+                "raid_cd": int(raid_cd),
+                "duel_cd": int(duel_cd),
+                "espionage_cd": int(espionage_cd),
+                "shield": int(shield),
+                "raid_wins": raid_wins,
+                "duel_wins": duel_wins,
+                "duels_total": duels_total,
+            },
+            "targets": targets,
+            "history": events[:10],
+            "limits": {
+                "duel_max_bet_pct": int(DUEL_MAX_BET_PCT * 100),
+                "duel_power_tolerance": int(
+                    DUEL_POWER_TOLERANCE * 100
+                ),
+                "raid_min_power_pct": int(
+                    RAID_MIN_TARGET_POWER_RATIO * 100
+                ),
+                "raid_shield_hours": int(RAID_TARGET_SHIELD_HOURS),
+                "raid_daily_loss_pct": int(
+                    RAID_DAILY_LOSS_CAP * 100
+                ),
+                "raid_cooldown_minutes": 60,
+                "espionage_cooldown_minutes": int(
+                    ESPIONAGE_COOLDOWN_SECONDS // 60
+                ),
+            },
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -2732,6 +2942,7 @@ class CastleBot(commands.Bot):
                     "bank": None,
                     "clan": None,
                     "market": None,
+                    "pvp": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2756,6 +2967,7 @@ class CastleBot(commands.Bot):
                     "bank": None,
                     "clan": None,
                     "market": None,
+                    "pvp": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2985,6 +3197,7 @@ class CastleBot(commands.Bot):
         bank = await self._web_game_bank_state(user_id)
         clan_state = await self._web_game_clan_state(user_id, guild)
         market_state = await self._web_game_market_state(user_id, guild)
+        pvp_state = await self._web_game_pvp_state(user_id, guild)
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -3029,6 +3242,7 @@ class CastleBot(commands.Bot):
             "bank": bank,
             "clan": clan_state,
             "market": market_state,
+            "pvp": pvp_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -4381,6 +4595,143 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    async def _web_game_pvp_raid(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная цель.")
+        if target_id <= 0:
+            raise ValueError("Выберите цель для рейда.")
+        if target_id == actor.id:
+            raise ValueError("Нельзя атаковать самого себя.")
+        target_member = guild.get_member(target_id)
+        if target_member is None:
+            raise ValueError("Цель должна быть участником этого сервера.")
+
+        result, error = await perform_raid([actor.id], target_id)
+        if error:
+            raise ValueError(self._web_action_error(error))
+        await finalize_raid(result)
+        loot = int((result.get("loot") or {}).get(actor.id, 0))
+        if result.get("success"):
+            if loot > 0:
+                message = (
+                    f"Рейд успешен: добыча {format_price(loot)} монет."
+                )
+            else:
+                message = (
+                    "Рейд успешен, но цель уже достигла дневного "
+                    "лимита потерь."
+                )
+        else:
+            message = (
+                "Рейд провален: атака "
+                f"{result.get('roll_atk', 0)} против защиты "
+                f"{result.get('roll_def', 0)}."
+            )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "pvp_raid",
+            "target_id": str(target_id),
+            "target_name": target_member.display_name,
+            "success": bool(result.get("success")),
+            "loot": loot,
+            "team_power": int(result.get("team_power", 0)),
+            "def_power": int(result.get("def_power", 0)),
+            "roll_atk": int(result.get("roll_atk", 0)),
+            "roll_def": int(result.get("roll_def", 0)),
+            "target_capped": bool(result.get("target_capped")),
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_pvp_espionage(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            target_id = int(payload.get("target_id") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная цель.")
+        if target_id <= 0:
+            raise ValueError("Выберите цель для разведки.")
+        if target_id == actor.id:
+            raise ValueError("Нельзя шпионить за собой.")
+        target_member = guild.get_member(target_id)
+        if target_member is None:
+            raise ValueError("Цель должна быть участником этого сервера.")
+        cooldown = await get_espionage_cooldown_seconds(actor.id)
+        if cooldown > 0:
+            raise ValueError(
+                "Шпионаж будет доступен через "
+                f"{max(1, int(cooldown // 60) + 1)} мин."
+            )
+
+        async with self.db.execute(
+            "SELECT coins, gems, COALESCE(prestige_points, 0), "
+            "COALESCE(grid_size, 9), COALESCE(title, '') "
+            "FROM players WHERE user_id = ?",
+            (target_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            raise ValueError("Игрок не найден.")
+        coins, gems, prestige, grid_size, title = row
+        power = await get_combat_power(target_id)
+        if power <= 0:
+            raise ValueError("У цели нет генераторов на энергостанции.")
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM inventory "
+            "WHERE user_id = ? AND location = 'profile'",
+            (target_id,),
+        ) as cursor:
+            generators = int((await cursor.fetchone())[0] or 0)
+        try:
+            per_sec_coins, per_sec_gems = await get_per_second_income(
+                target_id
+            )
+        except Exception:
+            per_sec_coins, per_sec_gems = 0.0, 0.0
+        clan = await get_clan(target_id)
+        await set_espionage_cooldown(actor.id)
+        intel = {
+            "user_id": str(target_id),
+            "name": target_member.display_name,
+            "coins": int(coins or 0),
+            "gems": int(gems or 0),
+            "prestige": int(prestige or 0),
+            "title": str(title or ""),
+            "clan": str(clan[1]) if clan else "Без клана",
+            "power": int(power),
+            "grid_side": max(1, math.isqrt(max(1, int(grid_size or 9)))),
+            "generators": generators,
+            "income_hour_coins": round(per_sec_coins * 3600, 2),
+            "income_hour_gems": round(per_sec_gems * 3600, 2),
+        }
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "pvp_espionage",
+            "target_id": str(target_id),
+            "target_name": target_member.display_name,
+            "intel": intel,
+            "message": (
+                f"Разведка: {target_member.display_name}, мощь "
+                f"{power}, {format_price(int(coins or 0))} монет."
+            ),
+            "state": state,
+        }
+
     def _web_game_giveaway_channel(
         self, guild: discord.Guild, raw_channel_id: str
     ) -> discord.TextChannel:
@@ -4778,6 +5129,12 @@ class CastleBot(commands.Bot):
             )
         if action == "market_order_cancel":
             return await self._web_game_market_order_cancel(
+                command, guild, member
+            )
+        if action == "pvp_raid":
+            return await self._web_game_pvp_raid(command, guild, member)
+        if action == "pvp_espionage":
+            return await self._web_game_pvp_espionage(
                 command, guild, member
             )
         if action == "admin_grant":
