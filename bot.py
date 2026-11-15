@@ -2126,6 +2126,9 @@ class CastleBot(commands.Bot):
                     "giveaway_rewards": [],
                     "top_exclusions_global": [],
                     "global_giveaways": [],
+                    "shop": [],
+                    "starter_discount": False,
+                    "sell_rate": int(SELL_RATE * 100),
                 }
             guild_id = int(guilds[0]["id"])
             guild = self.get_guild(guild_id)
@@ -2143,6 +2146,9 @@ class CastleBot(commands.Bot):
                     "giveaway_rewards": [],
                     "top_exclusions_global": [],
                     "global_giveaways": [],
+                    "shop": [],
+                    "starter_discount": False,
+                    "sell_rate": int(SELL_RATE * 100),
                 }
 
         is_owner = await self._web_game_is_owner(member or user_obj)
@@ -2181,7 +2187,8 @@ class CastleBot(commands.Bot):
         async with self.db.execute(
             """
             SELECT inv.location, inv.slot, inv.item_id, i.name, i.rarity,
-                   inv.stars, i.price, i.income_per_hour, i.income_gems_per_hour
+                   inv.stars, i.price, i.income_per_hour,
+                   i.income_gems_per_hour, COALESCE(inv.is_locked, 0)
             FROM inventory inv
             JOIN items i ON i.id = inv.item_id
             WHERE inv.user_id = ?
@@ -2204,9 +2211,12 @@ class CastleBot(commands.Bot):
             price,
             income_coins,
             income_gems,
+            is_locked,
         ) in inventory_rows:
             if location == "profile":
                 generators += 1
+            stars_int = int(stars or 0)
+            sell_price = calculate_sell_price(int(price or 0), stars_int)
             inventory.append(
                 {
                     "location": location,
@@ -2214,20 +2224,54 @@ class CastleBot(commands.Bot):
                     "item_id": item_id,
                     "name": name,
                     "rarity": rarity,
-                    "stars": stars or 0,
+                    "stars": stars_int,
                     "price": price or 0,
+                    "sell_price": sell_price,
+                    "can_sell": bool(
+                        location == "storage"
+                        and rarity in SELL_ALLOWED_RARITIES
+                        and not is_locked
+                    ),
+                    "can_move": bool(
+                        not is_locked and location in {"profile", "storage"}
+                    ),
                     "income_hour": round(
                         float(income_coins or 0)
-                        * (1 + STAR_BONUS.get(int(stars or 0), 0)),
+                        * (1 + STAR_BONUS.get(stars_int, 0)),
                         2,
                     ),
                     "income_gems_hour": round(
                         float(income_gems or 0)
-                        * (1 + STAR_BONUS.get(int(stars or 0), 0)),
+                        * (1 + STAR_BONUS.get(stars_int, 0)),
                         2,
                     ),
                 }
             )
+
+        shop = []
+        async with self.db.execute(
+            "SELECT id, name, price, income_per_hour, "
+            "income_gems_per_hour, rarity FROM items "
+            "WHERE id LIKE '%_gen' AND COALESCE(buyable, 1) = 1 "
+            "ORDER BY price ASC LIMIT 60"
+        ) as cursor:
+            for row in await cursor.fetchall():
+                shop.append(
+                    {
+                        "id": str(row[0]),
+                        "name": str(row[1] or row[0]),
+                        "price": int(row[2] or 0),
+                        "income_hour": int(row[3] or 0),
+                        "income_gems_hour": float(row[4] or 0),
+                        "rarity": str(row[5] or "common"),
+                    }
+                )
+        try:
+            starter_discount = await is_starter_shop_purchase(
+                user_id, "basic_gen"
+            )
+        except Exception:
+            starter_discount = False
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -2265,6 +2309,9 @@ class CastleBot(commands.Bot):
                 "last_collected": last_collected,
             },
             "inventory": inventory,
+            "shop": shop,
+            "starter_discount": bool(starter_discount),
+            "sell_rate": int(SELL_RATE * 100),
             "settings": {
                 "currency_name": settings.get("currency_coins", "монеты"),
                 "premium_name": settings.get("currency_gems", "гемы"),
@@ -2415,6 +2462,263 @@ class CastleBot(commands.Bot):
             "target_id": str(target_id),
             "target_name": target.display_name,
             "removed": removed,
+        }
+
+    async def _web_game_buy(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        item_id = str(payload.get("item_id") or "").strip()
+        try:
+            quantity = int(payload.get("quantity") or 1)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное количество.")
+        if not item_id.endswith("_gen"):
+            raise ValueError("Можно покупать только генераторы.")
+        if not 1 <= quantity <= 50:
+            raise ValueError("Количество должно быть от 1 до 50.")
+
+        async with self.db.execute(
+            "SELECT name, price FROM items WHERE id = ? "
+            "AND id LIKE '%_gen' AND COALESCE(buyable, 1) = 1",
+            (item_id,),
+        ) as cursor:
+            item = await cursor.fetchone()
+        if item is None:
+            raise ValueError("Генератор не найден в магазине.")
+        name = str(item[0] or item_id)
+        unit_price = int(item[1] or 0)
+        if unit_price <= 0:
+            raise ValueError("У генератора некорректная цена.")
+
+        starter = await is_starter_shop_purchase(actor.id, item_id)
+        total_cost = (
+            starter_shop_total(unit_price, quantity)
+            if starter
+            else unit_price * quantity
+        )
+        discount = unit_price * quantity - total_cost if starter else 0
+
+        try:
+            async with db_transaction():
+                cursor = await self.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (total_cost, actor.id, total_cost),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Не хватает монет для покупки.")
+                to_profile, to_storage, to_temp = await place_items(
+                    actor.id, item_id, quantity, commit=False
+                )
+        except ValueError as exc:
+            raise ValueError(str(exc))
+
+        await sort_inventory(actor.id, "profile")
+        await sort_inventory(actor.id, "storage")
+        try:
+            await update_quest_progress(actor.id, "buy_3", quantity)
+            await update_quest_progress(actor.id, "buy_10", quantity)
+            await update_quest_progress(actor.id, "buy_25", quantity)
+            await check_achievements(actor.id)
+            await complete_onboarding_step(actor.id, "buy_generator")
+            clan = await get_clan(actor.id)
+            if clan:
+                await update_clan_quest(clan[0], "buy", quantity)
+            await update_story_quests(actor.id, "buy", quantity)
+        except Exception:
+            log.exception("WEB_GAME: ошибка побочных эффектов покупки")
+
+        message = (
+            f"Куплено {name} ×{quantity} за "
+            f"{format_price(total_cost)} монет."
+        )
+        if to_storage or to_temp:
+            message += (
+                f" На станцию: {to_profile}, в хранилище: {to_storage}, "
+                f"во временное: {to_temp}."
+            )
+        if discount:
+            message += f" Скидка новичка: {format_price(discount)}."
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "buy_generator",
+            "item_id": item_id,
+            "name": name,
+            "quantity": quantity,
+            "cost": total_cost,
+            "discount": discount,
+            "placement": {
+                "profile": to_profile,
+                "storage": to_storage,
+                "temp": to_temp,
+            },
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_move(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        source = str(payload.get("location") or "")
+        if source not in {"profile", "storage"}:
+            raise ValueError("Неизвестная локация предмета.")
+        try:
+            slot = int(payload.get("slot"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный слот.")
+        target = "storage" if source == "profile" else "profile"
+
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT item_id, stars, COALESCE(is_locked, 0) "
+                    "FROM inventory WHERE user_id = ? AND location = ? "
+                    "AND slot = ?",
+                    (actor.id, source, slot),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("Предмета уже нет.")
+                item_id, stars, is_locked = row
+                stars_int = int(stars or 0)
+                if is_locked:
+                    raise ValueError("Предмет заблокирован.")
+                target_size = await (
+                    get_storage_size(actor.id)
+                    if target == "storage"
+                    else get_grid_size(actor.id)
+                )
+                async with self.db.execute(
+                    "SELECT slot FROM inventory "
+                    "WHERE user_id = ? AND location = ?",
+                    (actor.id, target),
+                ) as cursor:
+                    used = {int(row[0]) for row in await cursor.fetchall()}
+                free = [
+                    number for number in range(target_size)
+                    if number not in used
+                ]
+                if not free:
+                    raise ValueError(
+                        "В хранилище нет места."
+                        if target == "storage"
+                        else "На энергостанции нет места."
+                    )
+                new_slot = free[0]
+                cursor = await self.db.execute(
+                    "DELETE FROM inventory WHERE user_id = ? "
+                    "AND location = ? AND slot = ?",
+                    (actor.id, source, slot),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Предмета уже нет.")
+                await self.db.execute(
+                    "INSERT INTO inventory "
+                    "(user_id, slot, item_id, location, stars, is_locked) "
+                    "VALUES (?, ?, ?, ?, ?, 0)",
+                    (actor.id, new_slot, item_id, target, stars_int),
+                )
+        except ValueError as exc:
+            raise ValueError(str(exc))
+
+        await sort_inventory(actor.id, "profile")
+        await sort_inventory(actor.id, "storage")
+        try:
+            await update_quest_progress(actor.id, "move_2")
+            await update_quest_progress(actor.id, "move_5")
+        except Exception:
+            log.exception("WEB_GAME: ошибка квеста перемещения")
+
+        target_name = "хранилище" if target == "storage" else "энергостанцию"
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "move_generator",
+            "location": source,
+            "slot": slot,
+            "target": target,
+            "target_slot": new_slot,
+            "message": f"Предмет перемещён в {target_name}.",
+            "state": state,
+        }
+
+    async def _web_game_sell(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            slot = int(payload.get("slot"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный слот.")
+
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT inv.item_id, inv.stars, i.name, i.price, i.rarity "
+                    "FROM inventory inv JOIN items i ON i.id = inv.item_id "
+                    "WHERE inv.user_id = ? AND inv.location = 'storage' "
+                    "AND inv.slot = ? AND COALESCE(inv.is_locked, 0) = 0",
+                    (actor.id, slot),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("Предмет не найден в хранилище.")
+                item_id, stars, name, price, rarity = row
+                stars_int = int(stars or 0)
+                if rarity not in SELL_ALLOWED_RARITIES:
+                    raise ValueError(
+                        f"Предметы редкости "
+                        f"{RARITY_NAMES.get(rarity, rarity)} не продаются."
+                    )
+                sell_price = calculate_sell_price(
+                    int(price or 0), stars_int
+                )
+                cursor = await self.db.execute(
+                    "DELETE FROM inventory WHERE user_id = ? "
+                    "AND location = 'storage' AND slot = ? "
+                    "AND item_id = ? AND COALESCE(stars, 0) = ? "
+                    "AND COALESCE(is_locked, 0) = 0",
+                    (actor.id, slot, item_id, stars_int),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Предмета уже нет.")
+                await self.db.execute(
+                    "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                    (sell_price, actor.id),
+                )
+        except ValueError as exc:
+            raise ValueError(str(exc))
+
+        await sort_inventory(actor.id, "storage")
+        try:
+            await update_quest_progress(actor.id, "sell_3")
+            await check_achievements(actor.id)
+        except Exception:
+            log.exception("WEB_GAME: ошибка квеста продажи")
+
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "sell_generator",
+            "slot": slot,
+            "item_id": item_id,
+            "name": str(name),
+            "stars": int(stars or 0),
+            "sell_price": sell_price,
+            "message": f"Продано {name} за {format_price(sell_price)} монет.",
+            "state": state,
         }
 
     def _web_game_giveaway_channel(
@@ -2764,6 +3068,12 @@ class CastleBot(commands.Bot):
                 "gems": int(gems or 0),
                 "state": state,
             }
+        if action == "buy_generator":
+            return await self._web_game_buy(command, guild, member)
+        if action == "move_generator":
+            return await self._web_game_move(command, guild, member)
+        if action == "sell_generator":
+            return await self._web_game_sell(command, guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
