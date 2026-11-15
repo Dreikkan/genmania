@@ -109,6 +109,7 @@ def test_web_game_state_collect_and_admin():
             assert state["guild_name"] == "420 SQUAD"
             assert state["player"]["name"] == "Vortex"
             assert state["player"]["is_admin"] is True
+            assert state["player"]["grid_side"] == 3
             assert state["is_owner"] is True
             assert len(state["guilds"]) == 1
             assert len(state["admin_guilds"]) == 1
@@ -576,7 +577,7 @@ def test_web_game_buy_move_sell_generator():
         await db.execute(
             "INSERT OR REPLACE INTO items (id, name, price, income_per_hour, "
             "income_gems_per_hour, rarity, buyable) VALUES "
-            "('basic_gen', 'Базовый генератор', 1000, 3600, 0, "
+            "('basic_gen', 'Базовый генератор', 1000, 1, 0, "
             "'common', 1)"
         )
         await db.commit()
@@ -627,6 +628,10 @@ def test_web_game_buy_move_sell_generator():
             ) as cursor:
                 assert (await cursor.fetchone())[0] == 8500
             assert len(bought["state"]["inventory"]) == 2
+            assert all(
+                item["income_hour"] == 3600
+                for item in bought["state"]["inventory"]
+            )
 
             moved = await m.bot.handle_web_game_command(
                 {
