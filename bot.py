@@ -2103,6 +2103,153 @@ class CastleBot(commands.Bot):
                 "Нужны права администратора этого сервера или админ-роль."
             )
 
+    async def _web_game_bank_state(self, user_id: int) -> dict:
+        deposit = await get_deposit(user_id)
+        loan = await get_loan(user_id)
+        max_deposit, max_loan = await get_bank_limits(user_id)
+        now = datetime.datetime.now()
+
+        def parse_time(value) -> datetime.datetime | None:
+            if not value:
+                return None
+            try:
+                return datetime.datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        deposit_data = None
+        if deposit:
+            amount, rate, start, end = deposit
+            start_dt = parse_time(start)
+            end_dt = parse_time(end)
+            if start_dt is not None and end_dt is not None:
+                total_days = max(
+                    0.0, (end_dt - start_dt).total_seconds() / 86400
+                )
+                daily_rate = (
+                    float(rate or 0) / total_days if total_days > 0 else 0.0
+                )
+                amount_int = int(amount or 0)
+                payout_total = int(
+                    amount_int * ((1 + daily_rate) ** total_days)
+                )
+                matured = now >= end_dt
+                deposit_data = {
+                    "amount": amount_int,
+                    "rate_percent": round(float(rate or 0) * 100, 2),
+                    "daily_percent": round(daily_rate * 100, 3),
+                    "start": str(start),
+                    "end": str(end),
+                    "days": round(total_days, 1),
+                    "payout_total": payout_total,
+                    "profit": payout_total - amount_int,
+                    "payout_now": (
+                        payout_total if matured else amount_int
+                    ),
+                    "matured": matured,
+                }
+
+        loan_data = None
+        if loan:
+            amount, rate, due, item_id, stars, _status = loan
+            total_due = loan_total_due(loan)
+            async with self.db.execute(
+                "SELECT name FROM items WHERE id = ?", (item_id,)
+            ) as cursor:
+                item_row = await cursor.fetchone()
+            due_dt = parse_time(due)
+            loan_data = {
+                "amount": int(amount or 0),
+                "interest_percent": round(float(rate or 0) * 100, 1),
+                "total_due": int(total_due or 0),
+                "due": str(due or ""),
+                "overdue": bool(due_dt is not None and now > due_dt),
+                "item_id": str(item_id or ""),
+                "item_name": str(
+                    item_row[0] if item_row else item_id or ""
+                ),
+                "item_stars": int(stars or 0),
+            }
+
+        collateral: list[dict] = []
+        async with self.db.execute(
+            "SELECT inv.item_id, inv.stars, i.name, i.price "
+            "FROM inventory inv JOIN items i ON i.id = inv.item_id "
+            "WHERE inv.user_id = ? AND inv.location = 'profile' "
+            "AND COALESCE(inv.is_locked, 0) = 0 "
+            "ORDER BY i.price DESC, inv.stars DESC LIMIT 50",
+            (user_id,),
+        ) as cursor:
+            collateral_rows = await cursor.fetchall()
+        grouped: dict[tuple[str, int], dict] = {}
+        for item_id, stars, name, price in collateral_rows:
+            stars_int = int(stars or 0)
+            value = int(int(price or 0) * (1 + stars_int * 0.5))
+            cap = min(int(max_loan), int(value * BANK_LOAN_LTV))
+            if cap < BANK_LOAN_MIN:
+                continue
+            key = (str(item_id), stars_int)
+            entry = grouped.get(key)
+            if entry is None:
+                entry = {
+                    "item_id": str(item_id),
+                    "stars": stars_int,
+                    "name": str(name or item_id),
+                    "value": value,
+                    "max_loan": cap,
+                    "count": 0,
+                }
+                grouped[key] = entry
+            entry["count"] += 1
+        collateral = sorted(
+            grouped.values(),
+            key=lambda entry: entry["max_loan"],
+            reverse=True,
+        )
+
+        history_labels = {
+            "deposit": "Вклад",
+            "withdraw": "Снятие вклада",
+            "loan": "Кредит",
+            "loan_repay": "Погашение кредита",
+            "loan_default": "Просрочка кредита",
+        }
+        history = []
+        async with self.db.execute(
+            "SELECT amount, COALESCE(kind, 'deposit'), details, opened_at "
+            "FROM bank_history WHERE user_id = ? "
+            "ORDER BY id DESC LIMIT 8",
+            (user_id,),
+        ) as cursor:
+            for amount, kind, details, opened_at in await cursor.fetchall():
+                kind_key = str(kind or "deposit")
+                history.append(
+                    {
+                        "amount": int(amount or 0),
+                        "kind": kind_key,
+                        "label": history_labels.get(kind_key, "Операция"),
+                        "details": str(details or ""),
+                        "at": str(opened_at or ""),
+                    }
+                )
+
+        return {
+            "daily_rate": round(BANK_DAILY_RATE * 100, 2),
+            "loan_interest": round(BANK_LOAN_INTEREST * 100, 1),
+            "loan_term_days": int(BANK_LOAN_TERM_DAYS),
+            "max_days": int(BANK_MAX_DAYS),
+            "loan_min": int(BANK_LOAN_MIN),
+            "ltv": round(BANK_LOAN_LTV * 100, 1),
+            "limits": {
+                "max_deposit": int(max_deposit),
+                "max_loan": int(max_loan),
+            },
+            "deposit": deposit_data,
+            "loan": loan_data,
+            "collateral": collateral,
+            "history": history,
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -2128,6 +2275,7 @@ class CastleBot(commands.Bot):
                     "global_giveaways": [],
                     "shop": [],
                     "craft_recipes": [],
+                    "bank": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2149,6 +2297,7 @@ class CastleBot(commands.Bot):
                     "global_giveaways": [],
                     "shop": [],
                     "craft_recipes": [],
+                    "bank": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -2375,6 +2524,7 @@ class CastleBot(commands.Bot):
                 recipe["item_id"], 0
             )
         )
+        bank = await self._web_game_bank_state(user_id)
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -2416,6 +2566,7 @@ class CastleBot(commands.Bot):
             "inventory": inventory,
             "shop": shop,
             "craft_recipes": craft_recipes,
+            "bank": bank,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -2978,6 +3129,255 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    @staticmethod
+    def _bank_action_error(message: str) -> str:
+        text = str(message or "").strip()
+        for prefix in ("❌", "✅"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        return text or "Не удалось выполнить операцию."
+
+    async def _web_game_bank_deposit(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        try:
+            amount = int(payload.get("amount") or 0)
+            days = int(payload.get("days") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная сумма или срок вклада.")
+        if amount <= 0:
+            raise ValueError("Сумма вклада должна быть больше нуля.")
+        if not 1 <= days <= BANK_MAX_DAYS:
+            raise ValueError(
+                f"Срок вклада — от 1 до {BANK_MAX_DAYS} дней."
+            )
+        max_deposit, _ = await get_bank_limits(actor.id)
+        if amount > max_deposit:
+            raise ValueError(
+                f"Максимум {format_price(max_deposit)} монет на вклад."
+            )
+        if await get_deposit(actor.id):
+            raise ValueError("У вас уже есть активный вклад.")
+
+        now = datetime.datetime.now()
+        end = now + datetime.timedelta(days=days)
+        rate = BANK_DAILY_RATE * days
+        try:
+            async with db_transaction():
+                async with self.db.execute(
+                    "SELECT coins FROM players WHERE user_id = ?",
+                    (actor.id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                coins = int(row[0] or 0) if row else 0
+                if coins < amount:
+                    raise ValueError("Недостаточно монет для вклада.")
+                cursor = await self.db.execute(
+                    "UPDATE players SET coins = coins - ? "
+                    "WHERE user_id = ? AND coins >= ?",
+                    (amount, actor.id, amount),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        "Недостаточно монет (баланс изменился)."
+                    )
+                await self.db.execute(
+                    "INSERT INTO bank_deposits "
+                    "(user_id, amount, interest_rate, start_time, end_time) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        actor.id,
+                        amount,
+                        rate,
+                        now.isoformat(),
+                        end.isoformat(),
+                    ),
+                )
+                await self.db.execute(
+                    "INSERT INTO bank_history "
+                    "(user_id, amount, kind, details) "
+                    "VALUES (?, ?, 'deposit', ?)",
+                    (actor.id, amount, f"{days} дн."),
+                )
+        except aiosqlite.IntegrityError:
+            raise ValueError("У вас уже есть активный вклад.")
+
+        try:
+            await update_quest_progress(actor.id, "open_deposit")
+            await check_achievements(actor.id)
+        except Exception:
+            log.exception("WEB_GAME: ошибка побочных эффектов вклада")
+
+        payout = int(amount * ((1 + BANK_DAILY_RATE) ** days))
+        message = (
+            f"Вклад открыт: {format_price(amount)} монет на {days} дн. "
+            f"Ставка {round(BANK_DAILY_RATE * 100, 2)}% в день, "
+            f"к возврату ~{format_price(payout)}."
+        )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "bank_deposit",
+            "amount": amount,
+            "days": days,
+            "rate": round(BANK_DAILY_RATE * 100, 2),
+            "payout": payout,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_bank_withdraw(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        amount = 0
+        payout = 0
+        matured = False
+        async with db_transaction():
+            deposit = await get_deposit(actor.id)
+            if not deposit:
+                raise ValueError("У вас нет активного вклада.")
+            amount, rate, start, end = deposit
+            amount = int(amount or 0)
+            now = datetime.datetime.now()
+            try:
+                start_dt = datetime.datetime.fromisoformat(str(start))
+                end_dt = datetime.datetime.fromisoformat(str(end))
+            except (TypeError, ValueError):
+                raise ValueError("Не удалось прочитать условия вклада.")
+            total_days = max(
+                0.0, (end_dt - start_dt).total_seconds() / 86400
+            )
+            daily_rate = (
+                float(rate or 0) / total_days if total_days > 0 else 0.0
+            )
+            matured = now >= end_dt
+            payout = (
+                int(amount * ((1 + daily_rate) ** total_days))
+                if matured
+                else amount
+            )
+            await self.db.execute(
+                "UPDATE players SET coins = coins + ? WHERE user_id = ?",
+                (payout, actor.id),
+            )
+            await self.db.execute(
+                "DELETE FROM bank_deposits WHERE user_id = ?", (actor.id,)
+            )
+            await self.db.execute(
+                "INSERT INTO bank_history (user_id, amount, kind) "
+                "VALUES (?, ?, 'withdraw')",
+                (actor.id, payout),
+            )
+
+        try:
+            await update_quest_progress(actor.id, "close_deposit")
+            await check_achievements(actor.id)
+        except Exception:
+            log.exception("WEB_GAME: ошибка побочных эффектов вклада")
+
+        if matured:
+            message = (
+                f"Вклад закрыт: получено {format_price(payout)} монет "
+                f"(вложено {format_price(amount)}, "
+                f"прибыль {format_price(payout - amount)})."
+            )
+        else:
+            message = (
+                f"Вклад закрыт досрочно: возвращено "
+                f"{format_price(payout)} без процентов."
+            )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "bank_withdraw",
+            "amount": amount,
+            "payout": payout,
+            "profit": payout - amount,
+            "matured": matured,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_bank_loan(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        item_id = str(payload.get("item_id") or "").strip()
+        try:
+            stars = int(payload.get("stars") or 0)
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректные параметры кредита.")
+        if not item_id or len(item_id) > 64:
+            raise ValueError("Выберите залог для кредита.")
+        if not 0 <= stars <= 10:
+            raise ValueError("Некорректные звёзды залога.")
+        if amount <= 0:
+            raise ValueError("Сумма кредита должна быть больше нуля.")
+
+        ok, raw_message = await take_bank_loan(
+            actor.id, item_id, stars, amount
+        )
+        if not ok:
+            raise ValueError(self._bank_action_error(raw_message))
+        await sort_inventory(actor.id, "profile")
+        loan = await get_loan(actor.id)
+        total_due = loan_total_due(loan) if loan else 0
+        due = str(loan[2])[:16] if loan else ""
+        message = (
+            f"Кредит на {format_price(amount)} монет выдан. "
+            f"К погашению {format_price(int(total_due))}"
+        )
+        message += f" до {due}." if due else "."
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "bank_take_loan",
+            "item_id": item_id,
+            "stars": stars,
+            "amount": amount,
+            "total_due": int(total_due),
+            "due": due,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_bank_repay(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        loan = await get_loan(actor.id)
+        total_due = loan_total_due(loan) if loan else 0
+        ok, raw_message = await repay_bank_loan(actor.id)
+        if not ok:
+            raise ValueError(self._bank_action_error(raw_message))
+        await sort_inventory(actor.id, "profile")
+        message = (
+            f"Кредит погашен: {format_price(int(total_due))}. "
+            "Залог возвращён."
+        )
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "bank_repay_loan",
+            "total_due": int(total_due),
+            "message": message,
+            "state": state,
+        }
+
     def _web_game_giveaway_channel(
         self, guild: discord.Guild, raw_channel_id: str
     ) -> discord.TextChannel:
@@ -3335,6 +3735,14 @@ class CastleBot(commands.Bot):
             return await self._web_game_craft(command, guild, member)
         if action == "upgrade_star":
             return await self._web_game_star_upgrade(command, guild, member)
+        if action == "bank_deposit":
+            return await self._web_game_bank_deposit(command, guild, member)
+        if action == "bank_withdraw":
+            return await self._web_game_bank_withdraw(command, guild, member)
+        if action == "bank_take_loan":
+            return await self._web_game_bank_loan(command, guild, member)
+        if action == "bank_repay_loan":
+            return await self._web_game_bank_repay(command, guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
