@@ -2201,6 +2201,19 @@ class CastleBot(commands.Bot):
         ) as cursor:
             inventory_rows = await cursor.fetchall()
 
+        copy_counts: dict[tuple[str, int], int] = {}
+        for row in inventory_rows:
+            row_location = row[0]
+            row_item_id = row[2]
+            try:
+                row_stars = int(row[5] or 0)
+            except (TypeError, ValueError):
+                row_stars = 0
+            row_locked = bool(row[9])
+            if row_location in {"profile", "storage"} and not row_locked:
+                key = (str(row_item_id), row_stars)
+                copy_counts[key] = copy_counts.get(key, 0) + 1
+
         inventory = []
         generators = 0
         for (
@@ -2219,6 +2232,29 @@ class CastleBot(commands.Bot):
                 generators += 1
             stars_int = int(stars or 0)
             sell_price = calculate_sell_price(int(price or 0), stars_int)
+            next_star = stars_int + 1
+            star_req = STAR_UPGRADE.get(next_star)
+            star_upgrade = None
+            if star_req:
+                copies_needed = int(star_req["copies"])
+                copies_available = copy_counts.get(
+                    (str(item_id), stars_int), 0
+                )
+                gem_cost = int(star_req["gems"])
+                star_upgrade = {
+                    "next_star": next_star,
+                    "copies_needed": copies_needed,
+                    "copies_available": copies_available,
+                    "gems": gem_cost,
+                    "chance": round(
+                        float(star_req["chance"]) * 100.0, 1
+                    ),
+                    "can_upgrade": bool(
+                        not is_locked
+                        and copies_available >= copies_needed
+                        and int(gems or 0) >= gem_cost
+                    ),
+                }
             inventory.append(
                 {
                     "location": location,
@@ -2237,6 +2273,7 @@ class CastleBot(commands.Bot):
                     "can_move": bool(
                         not is_locked and location in {"profile", "storage"}
                     ),
+                    "star_upgrade": star_upgrade,
                     "income_hour": round(
                         float(income_coins or 0)
                         * (1 + STAR_BONUS.get(stars_int, 0))
@@ -2730,6 +2767,77 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    async def _web_game_star_upgrade(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        actor: discord.Member,
+    ) -> dict:
+        payload = command.get("payload") or {}
+        location = str(payload.get("location") or "")
+        if location not in {"profile", "storage"}:
+            raise ValueError("Неизвестная локация генератора.")
+        try:
+            slot = int(payload.get("slot"))
+        except (TypeError, ValueError):
+            raise ValueError("Некорректный слот.")
+        async with self.db.execute(
+            "SELECT inv.item_id, inv.stars, COALESCE(inv.is_locked, 0), "
+            "i.name FROM inventory inv "
+            "JOIN items i ON i.id = inv.item_id "
+            "WHERE inv.user_id = ? AND inv.location = ? AND inv.slot = ?",
+            (actor.id, location, slot),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise ValueError("Генератор не найден.")
+        item_id, current_stars, is_locked, name = row
+        if is_locked:
+            raise ValueError("Генератор заблокирован.")
+        result = await star_upgrade_attempt(
+            actor.id,
+            str(item_id),
+            int(current_stars or 0),
+            location,
+            slot,
+        )
+        if not result.get("ok"):
+            raise ValueError(
+                str(result.get("message") or "Не удалось повысить звёзды.")
+            )
+
+        await sort_inventory(actor.id, "profile")
+        await sort_inventory(actor.id, "storage")
+        next_star = int(result["next_star"])
+        success = bool(result["success"])
+        chance = float(result["final_chance"]) * 100.0
+        if success:
+            message = f"{name}: звезда повышена до {next_star}★!"
+        else:
+            message = (
+                f"{name}: попытка не удалась. Шанс был "
+                f"{chance:.0f}%, серия неудач: {int(result['pity'])}."
+            )
+            if result.get("guaranteed"):
+                message = f"{name}: звёзды повышены гарантированно."
+        state = await self._web_game_state(actor.id, guild.id)
+        return {
+            "ok": True,
+            "action": "upgrade_star",
+            "location": location,
+            "slot": slot,
+            "item_id": str(item_id),
+            "name": str(name),
+            "success": success,
+            "next_star": next_star,
+            "gem_cost": int(result.get("gem_cost", 0)),
+            "final_chance": round(chance, 1),
+            "pity": int(result.get("pity", 0)),
+            "guaranteed": bool(result.get("guaranteed", False)),
+            "message": message,
+            "state": state,
+        }
+
     def _web_game_giveaway_channel(
         self, guild: discord.Guild, raw_channel_id: str
     ) -> discord.TextChannel:
@@ -3083,6 +3191,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_move(command, guild, member)
         if action == "sell_generator":
             return await self._web_game_sell(command, guild, member)
+        if action == "upgrade_star":
+            return await self._web_game_star_upgrade(command, guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":

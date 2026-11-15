@@ -674,6 +674,61 @@ def test_web_game_buy_move_sell_generator():
     asyncio.run(run())
 
 
+def test_web_game_star_upgrade():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        m._tax_rate_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems, grid_size, "
+            "storage_size) VALUES (1, 1000, 10, 9, 36)"
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO items (id, name, price, income_per_hour, "
+            "income_gems_per_hour, rarity, buyable) VALUES "
+            "('basic_gen', 'Базовый генератор', 1000, 1, 0, "
+            "'common', 1)"
+        )
+        await db.executemany(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (1, ?, 'basic_gen', 'profile', 0)",
+            [(0,), (1,)],
+        )
+        await db.commit()
+        try:
+            result = await m.bot.handle_web_game_command(
+                {
+                    "id": "star-1",
+                    "action": "upgrade_star",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"location": "profile", "slot": 0},
+                }
+            )
+            assert result["ok"] is True
+            assert result["success"] is True
+            assert result["next_star"] == 1
+            async with db.execute(
+                "SELECT slot, stars FROM inventory "
+                "WHERE user_id = 1 ORDER BY slot"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            assert len(rows) == 1
+            assert rows[0][1] == 1
+            state_items = result["state"]["inventory"]
+            assert len(state_items) == 1
+            assert state_items[0]["stars"] == 1
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_rejects_non_admin_and_unknown_guild():
     async def run():
         db = await aiosqlite.connect(":memory:")
