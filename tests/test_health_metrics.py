@@ -84,12 +84,26 @@ def test_health_snapshot_and_background_errors():
     async def run():
         db = await _init()
         try:
+            m.bot._gateway_latency_samples[:] = [200, 400, 1200]
+            m.bot._event_loop_lag_samples[:] = [5, 150]
+            m.bot._gateway_reconnects = 2
+            m.bot._gateway_resumes = 1
             snapshot = await m.bot.build_health_snapshot(deep=True)
             assert snapshot["db_quick_check"] == "ok"
             assert snapshot["guilds"] >= 0
             assert snapshot["db_size_bytes"] >= 0
             assert isinstance(snapshot["tasks"], list)
             assert snapshot["tasks_alive"] == 0
+            assert snapshot["gateway_latency_p50_ms"] == 400
+            assert snapshot["gateway_latency_p95_ms"] == 1200
+            assert snapshot["event_loop_lag_ms"] == 150
+            assert snapshot["gateway_status"] == "error"
+            assert snapshot["gateway_reconnects"] == 2
+            assert snapshot["gateway_resumes"] == 1
+            m.bot._gateway_latency_samples.clear()
+            m.bot._event_loop_lag_samples.clear()
+            m.bot._gateway_reconnects = 0
+            m.bot._gateway_resumes = 0
 
             before = m.METRICS.background_errors_by_task.get(
                 "health_test_boom", 0

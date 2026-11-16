@@ -83,6 +83,15 @@ def _percent(current: int | float, previous: int | float) -> float:
     return round((current - previous) / previous * 100.0, 1)
 
 
+def _percentile(values, percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    index = int(round((len(ordered) - 1) * percentile / 100.0))
+    index = max(0, min(len(ordered) - 1, index))
+    return round(ordered[index], 1)
+
+
 class DashboardSync:
     """Collects aggregates and posts them to the dashboard ingest endpoint."""
 
@@ -388,6 +397,23 @@ class DashboardSync:
         metrics = METRICS.snapshot()
         latency = getattr(self.bot, "latency", 0.0) or 0.0
         latency_ms = round(latency * 1000, 1) if math.isfinite(latency) else 0.0
+        latency_samples = getattr(
+            self.bot, "_gateway_latency_samples", []
+        ) or []
+        lag_samples = getattr(
+            self.bot, "_event_loop_lag_samples", []
+        ) or []
+        latency_p95 = _percentile(latency_samples, 95)
+        lag_current = round(float(lag_samples[-1]), 1) if lag_samples else 0.0
+        lag_p95 = _percentile(lag_samples, 95)
+        if latency_ms <= 0:
+            gateway_status = "unknown"
+        elif latency_ms > 1000 or lag_current > 250:
+            gateway_status = "error"
+        elif latency_ms > 300 or lag_current > 100:
+            gateway_status = "warning"
+        else:
+            gateway_status = "ok"
 
         db_size = self._db_size()
         backup = self._latest_backup()
@@ -401,6 +427,20 @@ class DashboardSync:
             "generators": generators,
             "uptime": 100.0,
             "latency": latency_ms,
+            "latency_p50": _percentile(latency_samples, 50),
+            "latency_p95": latency_p95,
+            "event_loop_lag": lag_current,
+            "event_loop_lag_p95": lag_p95,
+            "gateway_status": gateway_status,
+            "gateway_reconnects": int(
+                getattr(self.bot, "_gateway_reconnects", 0) or 0
+            ),
+            "gateway_resumes": int(
+                getattr(self.bot, "_gateway_resumes", 0) or 0
+            ),
+            "last_disconnect_at": str(
+                getattr(self.bot, "_last_disconnect_at", "") or ""
+            ),
             "version": getattr(discord, "__version__", "live"),
             "messages_today": 0,
             "commands_today": int(metrics.get("commands_total", 0) or 0),
@@ -1138,6 +1178,14 @@ class DashboardSync:
 
     def _health(self, stats: dict) -> list[dict]:
         latency = stats.get("latency", 0)
+        latency_p95 = stats.get("latency_p95", 0)
+        lag = stats.get("event_loop_lag", 0)
+        lag_p95 = stats.get("event_loop_lag_p95", 0)
+        gateway_status = str(stats.get("gateway_status", "unknown"))
+        if gateway_status not in {"ok", "warning", "error"}:
+            gateway_status = "warning"
+        reconnects = int(stats.get("gateway_reconnects", 0) or 0)
+        resumes = int(stats.get("gateway_resumes", 0) or 0)
         db_size = int(stats.get("db_size_bytes", 0) or 0)
         tasks = getattr(self.bot, "background_tasks", []) or []
         alive = sum(1 for task in tasks if not task.done())
@@ -1149,8 +1197,25 @@ class DashboardSync:
         return [
             {
                 "name": "Discord Gateway",
-                "status": "ok",
-                "value": f"{latency} ms",
+                "status": gateway_status,
+                "value": (
+                    f"{latency} ms · p95 {latency_p95} ms · "
+                    f"lag {lag} ms"
+                ),
+            },
+            {
+                "name": "Event loop",
+                "status": (
+                    "error"
+                    if lag > 250
+                    else ("warning" if lag > 100 else "ok")
+                ),
+                "value": f"{lag} ms · p95 {lag_p95} ms",
+            },
+            {
+                "name": "Переподключения",
+                "status": "warning" if reconnects > 0 else "ok",
+                "value": f"{reconnects} · resume {resumes}",
             },
             {
                 "name": "База данных",
