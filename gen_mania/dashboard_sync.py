@@ -32,6 +32,7 @@ import discord
 
 from .config import BACKUP_INTERVAL_HOURS, UTC
 from .metrics import METRICS
+from .welcome import DEFAULT_WELCOME_TEXT_EN, DEFAULT_WELCOME_TEXT_RU
 
 log = logging.getLogger("gen_mania.dashboard")
 
@@ -176,10 +177,6 @@ class DashboardSync:
         except Exception:
             log.debug("DASHBOARD_SYNC: SQL не выполнен: %s", sql[:120], exc_info=True)
             return []
-
-    async def _has_column(self, table: str, column: str) -> bool:
-        rows = await self._fetchall(f"PRAGMA table_info({table})")
-        return any(len(row) > 1 and str(row[1]) == column for row in rows)
 
     # ------------------------------------------------------------------
     # Collection
@@ -722,13 +719,10 @@ class DashboardSync:
 
     async def _collect_guild_settings(self) -> list[dict]:
         """Настройки всех серверов бота для выбора на сайте."""
-        has_welcome = await self._has_column(
-            "guild_settings", "welcome_channel_id"
-        )
-        welcome_select = ", welcome_channel_id" if has_welcome else ""
         rows = await self._fetchall(
             "SELECT guild_id, start_coins, currency_coins, currency_gems, "
-            f"tax_rate, admin_role_id{welcome_select} FROM guild_settings"
+            "tax_rate, admin_role_id, welcome_channel_id, "
+            "welcome_text_ru, welcome_text_en FROM guild_settings"
         )
         by_guild: dict[int, Any] = {}
         for row in rows:
@@ -766,10 +760,18 @@ class DashboardSync:
                     row[5],
                 )
                 welcome_channel_id = row[6] if len(row) > 6 else None
+                welcome_text_ru = (
+                    row[7] if len(row) > 7 and row[7] is not None else None
+                )
+                welcome_text_en = (
+                    row[8] if len(row) > 8 and row[8] is not None else None
+                )
             else:
                 start_coins, currency_coins, currency_gems = 8, "монеты", "гемы"
                 tax_rate, admin_role_id = 0.02, None
                 welcome_channel_id = None
+                welcome_text_ru = None
+                welcome_text_en = None
             result.append(
                 {
                     "guild_id": guild_id,
@@ -785,6 +787,16 @@ class DashboardSync:
                     "admin_role": self._admin_role_name(guild, admin_role_id),
                     "welcome_channel": self._welcome_channel_name(
                         guild, welcome_channel_id
+                    ),
+                    "welcome_text_ru": (
+                        welcome_text_ru
+                        if welcome_text_ru is not None
+                        else DEFAULT_WELCOME_TEXT_RU
+                    ),
+                    "welcome_text_en": (
+                        welcome_text_en
+                        if welcome_text_en is not None
+                        else DEFAULT_WELCOME_TEXT_EN
                     ),
                     "public_stats": True,
                     "weekly_report": True,
@@ -804,21 +816,21 @@ class DashboardSync:
         )
         primary = guilds[0] if guilds else None
         welcome_channel_id = None
-        has_welcome = await self._has_column(
-            "guild_settings", "welcome_channel_id"
-        )
-        welcome_select = ", welcome_channel_id" if has_welcome else ""
+        welcome_text_ru = None
+        welcome_text_en = None
         if primary is not None:
             row = await self._fetchone(
                 "SELECT start_coins, currency_coins, currency_gems, "
-                f"tax_rate, admin_role_id{welcome_select} "
+                "tax_rate, admin_role_id, welcome_channel_id, "
+                "welcome_text_ru, welcome_text_en "
                 "FROM guild_settings WHERE guild_id = ?",
                 (int(primary.id),),
             )
         else:
             row = await self._fetchone(
                 "SELECT start_coins, currency_coins, currency_gems, "
-                f"tax_rate, admin_role_id{welcome_select} "
+                "tax_rate, admin_role_id, welcome_channel_id, "
+                "welcome_text_ru, welcome_text_en "
                 "FROM guild_settings ORDER BY guild_id LIMIT 1"
             )
         if row:
@@ -837,6 +849,10 @@ class DashboardSync:
             )
             if len(row) > 5:
                 welcome_channel_id = row[5]
+            if len(row) > 6 and row[6] is not None:
+                welcome_text_ru = row[6]
+            if len(row) > 7 and row[7] is not None:
+                welcome_text_en = row[7]
         else:
             start_coins, currency_coins, currency_gems = 8, "монеты", "гемы"
             tax_rate, admin_role_id = 0.02, None
@@ -856,6 +872,16 @@ class DashboardSync:
             "admin_role": self._admin_role_name(primary, admin_role_id),
             "welcome_channel": self._welcome_channel_name(
                 primary, welcome_channel_id
+            ),
+            "welcome_text_ru": (
+                welcome_text_ru
+                if welcome_text_ru is not None
+                else DEFAULT_WELCOME_TEXT_RU
+            ),
+            "welcome_text_en": (
+                welcome_text_en
+                if welcome_text_en is not None
+                else DEFAULT_WELCOME_TEXT_EN
             ),
             "public_stats": True,
             "weekly_report": True,

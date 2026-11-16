@@ -158,6 +158,12 @@ from gen_mania.services.raid_combat import (
 from gen_mania.services.seasons import SeasonRuntime, make_season_layer
 from gen_mania.services.sets import SetRuntime, make_set_layer
 from gen_mania.services.shop_ui import ShopUiRuntime, make_shop_ui_layer
+from gen_mania.welcome import (
+    DEFAULT_WELCOME_TEXT_EN,
+    DEFAULT_WELCOME_TEXT_RU,
+    DEFAULT_WELCOME_TITLE,
+    format_welcome_text,
+)
 from gen_mania.services.upgrades_ui import (
     UpgradesUiRuntime,
     make_upgrades_ui_layer,
@@ -1813,6 +1819,18 @@ class CastleBot(commands.Bot):
                     actor_id=actor_id,
                 )
                 applied.append("welcome_channel")
+
+        for key in ("welcome_text_ru", "welcome_text_en"):
+            if key not in settings:
+                continue
+            value = str(settings[key] or "").strip()[:1800]
+            await save_setting(
+                guild_id,
+                key,
+                value,
+                actor_id=actor_id,
+            )
+            applied.append(key)
 
         return {
             "ok": bool(applied),
@@ -6700,7 +6718,9 @@ class CastleBot(commands.Bot):
                 status_roles TEXT DEFAULT '{{}}',
                 battlepass_enabled INTEGER DEFAULT 1,
                 admin_role_id INTEGER DEFAULT NULL,
-                welcome_channel_id INTEGER DEFAULT NULL
+                welcome_channel_id INTEGER DEFAULT NULL,
+                welcome_text_ru TEXT DEFAULT NULL,
+                welcome_text_en TEXT DEFAULT NULL
             )
         """)
 
@@ -6714,6 +6734,8 @@ class CastleBot(commands.Bot):
             ("battlepass_enabled", "INTEGER DEFAULT 1"),
             ("admin_role_id", "INTEGER DEFAULT NULL"),
             ("welcome_channel_id", "INTEGER DEFAULT NULL"),
+            ("welcome_text_ru", "TEXT DEFAULT NULL"),
+            ("welcome_text_en", "TEXT DEFAULT NULL"),
         ]:
             await ensure_column(self.db, "guild_settings", column, definition)
 
@@ -8507,6 +8529,8 @@ _SETTINGS_DEFAULTS = {
     "admin_role_id": None,
     "tax_rate": DEFAULT_TAX_RATE,
     "welcome_channel": None,
+    "welcome_text_ru": DEFAULT_WELCOME_TEXT_RU,
+    "welcome_text_en": DEFAULT_WELCOME_TEXT_EN,
 }
 
 SETTINGS_RUNTIME = SettingsRuntime()
@@ -29773,22 +29797,23 @@ async def on_member_join(member):
                 channel = None
         if channel is None or not hasattr(channel, "send"):
             return
+        ru_template = settings.get("welcome_text_ru")
+        en_template = settings.get("welcome_text_en")
+        if ru_template is None:
+            ru_template = DEFAULT_WELCOME_TEXT_RU
+        if en_template is None:
+            en_template = DEFAULT_WELCOME_TEXT_EN
+        parts = [
+            format_welcome_text(ru_template, member, settings),
+            format_welcome_text(en_template, member, settings),
+        ]
+        description = "\n\n".join(part for part in parts if part)
+        if not description:
+            return
         embed = BotEmbed(
-            title="Добро пожаловать!",
-            description=(
-                f"{member.mention}, добро пожаловать на **{member.guild.name}**!\n"
-                "Постройте энергостанцию, собирайте доход и развивайте клан.\n"
-                "Начните с команды **/меню**."
-            ),
+            title=DEFAULT_WELCOME_TITLE,
+            description=description[:4000],
             color=0x9B59B6,
-        )
-        embed.add_field(
-            name="Стартовый баланс",
-            value=(
-                f"{int(settings.get('start_coins') or 0)} "
-                f"{settings.get('currency_coins') or 'монет'}"
-            ),
-            inline=True,
         )
         try:
             embed.set_thumbnail(url=member.display_avatar.url)

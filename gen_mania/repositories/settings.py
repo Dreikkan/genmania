@@ -26,6 +26,8 @@ SETTING_COLUMNS = {
     "admin_role_id": "admin_role_id",
     "tax_rate": "tax_rate",
     "welcome_channel": "welcome_channel_id",
+    "welcome_text_ru": "welcome_text_ru",
+    "welcome_text_en": "welcome_text_en",
 }
 
 
@@ -143,17 +145,25 @@ def make_settings_layer(runtime: SettingsRuntime):
             "admin_role_id": row[9],
             "tax_rate": row[10] if row[10] is not None else defaults["tax_rate"],
             "welcome_channel": None,
+            "welcome_text_ru": defaults.get("welcome_text_ru", ""),
+            "welcome_text_en": defaults.get("welcome_text_en", ""),
         }
-        # Отдельный запрос, чтобы старые тестовые схемы без колонки
-        # welcome_channel_id продолжали работать.
+        # Отдельный запрос, чтобы старые тестовые схемы без welcome-колонок
+        # продолжали работать.
         try:
             async with runtime.db.execute(
-                "SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?",
+                "SELECT welcome_channel_id, welcome_text_ru, welcome_text_en "
+                "FROM guild_settings WHERE guild_id = ?",
                 (guild_id,),
             ) as c:
                 welcome_row = await c.fetchone()
-            if welcome_row and welcome_row[0] is not None:
-                result["welcome_channel"] = str(welcome_row[0])
+            if welcome_row:
+                if welcome_row[0] is not None:
+                    result["welcome_channel"] = str(welcome_row[0])
+                if welcome_row[1] is not None:
+                    result["welcome_text_ru"] = str(welcome_row[1])
+                if welcome_row[2] is not None:
+                    result["welcome_text_en"] = str(welcome_row[2])
         except Exception:
             pass
         runtime.settings_cache[guild_id] = (now_ts, result)
