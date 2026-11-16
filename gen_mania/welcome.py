@@ -8,7 +8,7 @@ DEFAULT_WELCOME_TITLE = "Добро пожаловать! / Welcome!"
 DEFAULT_WELCOME_TEXT_RU = (
     "**{member}**, добро пожаловать в **Gen Mania**! "
     "Покупайте генераторы, заполняйте энергостанцию, собирайте доход и развивайте клан. "
-    "В этом вам помогут титулы, питомцы и квесты. Начинайте с команды **/меню**. "
+    "В этом вам помогут титулы, питомцы и квесты. Начинайте с команды **/genmania**. "
     "Стартовый баланс {start_coins} монет, но у нас есть вступительное задание "
     '"Первые шаги", в котором вы получите дополнительный начальный доход. Желаем удачи!'
 )
@@ -16,7 +16,7 @@ DEFAULT_WELCOME_TEXT_RU = (
 DEFAULT_WELCOME_TEXT_EN = (
     "**{member}**, welcome to **Gen Mania**! "
     "Buy generators, fill your power station, collect income and grow your clan. "
-    "Titles, pets and quests will help you. Start with the **/меню** command. "
+    "Titles, pets and quests will help you. Start with the **/genmania** command. "
     "Your starting balance is {start_coins} coins, but we have an introductory quest "
     '"First Steps" that gives you extra starting income. Good luck!'
 )
