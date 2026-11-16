@@ -3589,6 +3589,14 @@ class CastleBot(commands.Bot):
         ok, message, totals = await claim_season_rewards(user_id)
         if not ok:
             raise ValueError(message.replace("❌", "").strip())
+        parts = [f"+{int(totals.get('coins', 0))} монет"]
+        if totals.get("gems"):
+            parts.append(f"+{int(totals['gems'])} гемов")
+        if totals.get("catalysts"):
+            parts.append(f"+{int(totals['catalysts'])} катализаторов")
+        message = (
+            f"Награды сезона получены: {', '.join(parts)}."
+        )
         state = await self._web_game_state(user_id, guild.id)
         return {
             "ok": True,
@@ -3606,6 +3614,9 @@ class CastleBot(commands.Bot):
         ok, message = await buy_season_premium(user_id)
         if not ok:
             raise ValueError(message.replace("❌", "").strip())
+        message = (
+            f"Премиум-пропуск активирован: «{current_season_name()}»."
+        )
         state = await self._web_game_state(user_id, guild.id)
         return {
             "ok": True,
@@ -3760,6 +3771,15 @@ class CastleBot(commands.Bot):
         claimed_premium_set = set(claimed_premium)
         level = int(data["level"])
         premium = bool(data["premium"])
+
+        def reward_text(reward: dict) -> str:
+            parts = [f"🪙 {reward['coins']}"]
+            if reward["gems"]:
+                parts.append(f"💎 {reward['gems']}")
+            if reward["catalysts"]:
+                parts.append(f"🧪 {reward['catalysts']}")
+            return " | ".join(parts)
+
         track = []
         for reward_level in range(1, SEASON_LEVELS + 1):
             free_reward = season_reward(reward_level, False)
@@ -3769,8 +3789,8 @@ class CastleBot(commands.Bot):
                     "level": reward_level,
                     "free": free_reward,
                     "premium": premium_reward,
-                    "free_text": season_reward_text(reward_level, False),
-                    "premium_text": season_reward_text(reward_level, True),
+                    "free_text": reward_text(free_reward),
+                    "premium_text": reward_text(premium_reward),
                     "free_claimed": reward_level in claimed_free_set,
                     "premium_claimed": (
                         reward_level in claimed_premium_set
