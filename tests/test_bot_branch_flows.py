@@ -487,13 +487,13 @@ def test_upgrades_buy_select_paths():
             )
             await db.execute(
                 "INSERT OR REPLACE INTO grid_shop (id, name, price_coins, emoji, size) "
-                "VALUES ('grid_11x11', 'Grid 11', 10, '🔲', 121)"
+                "VALUES ('grid_9x9', 'Grid 9', 10, '🔲', 81)"
             )
             await db.execute(
                 "INSERT OR REPLACE INTO gem_shop "
                 "(id, name, price_gems, emoji, category) "
                 "VALUES ('vip', 'VIP', 10, '💎', 'status'), "
-                "('grid_12x12', 'Gem grid', 10, '💎', 'other')"
+                "('grid_10x10', 'Gem grid', 10, '💎', 'other')"
             )
             await db.commit()
 
@@ -509,24 +509,38 @@ def test_upgrades_buy_select_paths():
             assert interaction.edited
 
             view = m.UpgradesBuySelectView(1, options)
-            interaction = FakeInteraction(1, ["grid_11x11"])
+            interaction = FakeInteraction(1, ["grid_9x9"])
             await view.upgrade_select(interaction)
             assert any("Куплено" in str(sent) for sent in interaction.followup.sent)
 
             view = m.UpgradesBuySelectView(1, options)
-            interaction = FakeInteraction(1, ["grid_11x11"])
+            interaction = FakeInteraction(1, ["grid_9x9"])
             await view.upgrade_select(interaction)
             assert any("уже" in str(sent) for sent in interaction.followup.sent)
 
             view = m.UpgradesBuySelectView(2, options)
-            interaction = FakeInteraction(2, ["grid_11x11"])
+            interaction = FakeInteraction(2, ["grid_9x9"])
             await view.upgrade_select(interaction)
             assert any("Нужно" in str(sent) for sent in interaction.followup.sent)
 
             view = m.UpgradesBuySelectView(1, options)
-            interaction = FakeInteraction(1, ["grid_12x12"])
+            interaction = FakeInteraction(1, ["grid_10x10"])
             await view.upgrade_select(interaction)
             assert any("Куплено" in str(sent) for sent in interaction.followup.sent)
+
+            await db.execute(
+                "INSERT OR REPLACE INTO grid_shop "
+                "(id, name, price_coins, emoji, size) "
+                "VALUES ('grid_11x11', 'Grid 11', 10, '🔲', 121)"
+            )
+            await db.commit()
+            view = m.UpgradesBuySelectView(1, options)
+            interaction = FakeInteraction(1, ["grid_11x11"])
+            await view.upgrade_select(interaction)
+            assert any(
+                "максимальная сетка" in str(sent)
+                for sent in interaction.followup.sent
+            )
 
             original_open = m.open_upgrades_buy_select
 

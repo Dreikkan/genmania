@@ -305,6 +305,76 @@ def test_web_game_progress_actions():
     asyncio.run(run())
 
 
+def test_web_game_maintenance_blocks_regular_members():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins) VALUES (1, 1000), (2, 1000)"
+        )
+        await db.execute(
+            "INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (42)"
+        )
+        await db.execute(
+            "UPDATE guild_settings SET maintenance = 1 WHERE guild_id = 42"
+        )
+        await db.commit()
+        m._settings_cache.clear()
+        try:
+            state = await m.bot.handle_web_game_command(
+                {
+                    "id": "maintenance-state",
+                    "action": "state",
+                    "user_id": "2",
+                    "guild_id": "42",
+                }
+            )
+            assert state["settings"]["maintenance"] is True
+            with pytest.raises(ValueError, match="обслуживания"):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "maintenance-block",
+                        "action": "collect",
+                        "user_id": "2",
+                        "guild_id": "42",
+                    }
+                )
+            allowed = await m.bot.handle_web_game_command(
+                {
+                    "id": "maintenance-admin",
+                    "action": "collect",
+                    "user_id": "1",
+                    "guild_id": "42",
+                }
+            )
+            assert allowed["ok"] is True
+
+            await db.execute(
+                "UPDATE guild_settings SET maintenance = 0 "
+                "WHERE guild_id = 42"
+            )
+            await db.commit()
+            m._settings_cache.clear()
+            resumed = await m.bot.handle_web_game_command(
+                {
+                    "id": "maintenance-off",
+                    "action": "collect",
+                    "user_id": "2",
+                    "guild_id": "42",
+                }
+            )
+            assert resumed["ok"] is True
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_achievements_titles_prestige():
     async def run():
         db = await aiosqlite.connect(":memory:")

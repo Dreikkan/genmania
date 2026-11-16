@@ -1837,6 +1837,30 @@ class CastleBot(commands.Bot):
             )
             applied.append(key)
 
+        if "max_grid" in settings:
+            try:
+                value = int(settings["max_grid"])
+            except (TypeError, ValueError):
+                warnings.append("max_grid: не число")
+            else:
+                clamped = max(3, min(10, value))
+                if clamped != value:
+                    warnings.append("max_grid ограничен 3–10")
+                await save_setting(
+                    guild_id, "max_grid", clamped, actor_id=actor_id
+                )
+                applied.append("max_grid")
+
+        if "maintenance" in settings:
+            enabled = bool(settings["maintenance"])
+            await save_setting(
+                guild_id,
+                "maintenance",
+                1 if enabled else 0,
+                actor_id=actor_id,
+            )
+            applied.append("maintenance")
+
         return {
             "ok": bool(applied),
             "applied": applied,
@@ -4457,7 +4481,13 @@ class CastleBot(commands.Bot):
             "settings": {
                 "currency_name": settings.get("currency_coins", "монеты"),
                 "premium_name": settings.get("currency_gems", "гемы"),
-                "tax_rate": round(float(settings.get("tax_rate", 0.0)) * 100, 1),
+                "tax_rate": round(
+                    float(settings.get("tax_rate", 0.0)) * 100, 1
+                ),
+                "max_grid": max(
+                    3, min(10, int(settings.get("max_grid", 10)))
+                ),
+                "maintenance": bool(settings.get("maintenance", False)),
             },
         }
 
@@ -6888,6 +6918,17 @@ class CastleBot(commands.Bot):
         if member is None:
             raise ValueError("Вы не состоите в этом сервере.")
 
+        settings = await get_settings(guild_id)
+        if action != "state" and settings.get("maintenance"):
+            is_admin = self._is_web_admin(
+                guild, member, settings.get("admin_role_id")
+            )
+            if not is_admin and not await self._web_game_is_owner(member):
+                raise ValueError(
+                    "На сервере включён режим обслуживания. "
+                    "Игровые действия временно недоступны."
+                )
+
         if action == "collect":
             coins, gems = await collect_income(user_id, guild_id)
             state = await self._web_game_state(user_id, guild_id)
@@ -7555,7 +7596,9 @@ class CastleBot(commands.Bot):
                 admin_role_id INTEGER DEFAULT NULL,
                 welcome_channel_id INTEGER DEFAULT NULL,
                 welcome_text_ru TEXT DEFAULT NULL,
-                welcome_text_en TEXT DEFAULT NULL
+                welcome_text_en TEXT DEFAULT NULL,
+                max_grid INTEGER DEFAULT 10,
+                maintenance INTEGER DEFAULT 0
             )
         """)
 
@@ -7571,6 +7614,8 @@ class CastleBot(commands.Bot):
             ("welcome_channel_id", "INTEGER DEFAULT NULL"),
             ("welcome_text_ru", "TEXT DEFAULT NULL"),
             ("welcome_text_en", "TEXT DEFAULT NULL"),
+            ("max_grid", "INTEGER DEFAULT 10"),
+            ("maintenance", "INTEGER DEFAULT 0"),
         ]:
             await ensure_column(self.db, "guild_settings", column, definition)
 
@@ -9383,6 +9428,8 @@ _SETTINGS_DEFAULTS = {
     "welcome_channel": None,
     "welcome_text_ru": DEFAULT_WELCOME_TEXT_RU,
     "welcome_text_en": DEFAULT_WELCOME_TEXT_EN,
+    "max_grid": 10,
+    "maintenance": False,
 }
 
 SETTINGS_RUNTIME = SettingsRuntime()
@@ -10854,6 +10901,38 @@ async def deny_if_disabled(interaction: discord.Interaction, command_key: str) -
     return False
 
 
+async def get_guild_max_grid(guild_id: int) -> int:
+    """Максимальная сторона сетки, разрешённая на сервере."""
+    settings = await get_settings(guild_id)
+    try:
+        value = int(settings.get("max_grid", 10))
+    except (TypeError, ValueError):
+        value = 10
+    return max(3, min(10, value))
+
+
+async def is_guild_maintenance(guild_id: int) -> bool:
+    """Включён ли на сервере режим обслуживания."""
+    settings = await get_settings(guild_id)
+    return bool(settings.get("maintenance", False))
+
+
+async def deny_if_maintenance(interaction: discord.Interaction) -> bool:
+    """Блокирует игровые разделы на время обслуживания."""
+    if not interaction.guild_id or not await is_guild_maintenance(
+        interaction.guild_id
+    ):
+        return False
+    if await has_admin_access(interaction):
+        return False
+    text = "🛠 Сервер на обслуживании. Игровые действия временно недоступны."
+    if interaction.response.is_done():
+        await interaction.followup.send(text, ephemeral=True)
+    else:
+        await interaction.response.send_message(text, ephemeral=True)
+    return True
+
+
 # ============================================================
 #  🧭 НАВИГАЦИОННЫЙ СТЕК
 # ============================================================
@@ -11919,6 +11998,8 @@ class SafeView(discord.ui.View):
         feature_key = getattr(self, "feature_key", None)
         if feature_key and await deny_if_disabled(interaction, feature_key):
             return False
+        if feature_key and await deny_if_maintenance(interaction):
+            return False
         return True
 
     async def check_owner(self, interaction: discord.Interaction) -> bool:
@@ -11927,6 +12008,8 @@ class SafeView(discord.ui.View):
         _CURRENT_ACTOR_ID.set(interaction.user.id)
         feature_key = getattr(self, "feature_key", None)
         if feature_key and await deny_if_disabled(interaction, feature_key):
+            return False
+        if feature_key and await deny_if_maintenance(interaction):
             return False
         author_id = getattr(self, "author_id", None)
         if author_id is not None and interaction.user.id != author_id:
@@ -25401,11 +25484,13 @@ async def open_upgrades_buy_select(
     async with bot.db.execute("SELECT grid_size FROM players WHERE user_id = ?", (author_id,)) as c:
         row = await c.fetchone()
         current_grid_size = (row[0] if row else START_GRID) or START_GRID
+    max_side = await get_guild_max_grid(interaction.guild_id or 0)
+    max_cells = max_side * max_side
 
     available_rows = []
     for gid, name, price, emoji, currency, size in rows:
         size = size or grid_size_from_upgrade_id(gid)
-        if size > 0 and size <= current_grid_size:
+        if size > 0 and (size <= current_grid_size or size > max_cells):
             continue
         available_rows.append((gid, name, price, emoji, currency, size))
     rows = available_rows
@@ -25536,6 +25621,15 @@ class UpgradesBuySelectView(SafeView):
                 await interaction.followup.send(
                     f"❌ У тебя уже сетка на {current_grid} слотов. "
                     "Меньшую или такую же покупать нельзя.",
+                    ephemeral=True,
+                )
+                return
+            max_side = await get_guild_max_grid(interaction.guild_id or 0)
+            max_cells = max_side * max_side
+            if new_grid_size > max_cells:
+                await interaction.followup.send(
+                    f"❌ На этом сервере максимальная сетка "
+                    f"{max_side}×{max_side} ({max_cells} слотов).",
                     ephemeral=True,
                 )
                 return
