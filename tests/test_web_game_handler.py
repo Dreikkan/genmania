@@ -76,6 +76,39 @@ def _guild():
     return guild
 
 
+def test_web_game_pets_state():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems, active_pet) "
+            "VALUES (1, 5000, 10, 'cat')"
+        )
+        await db.execute(
+            "INSERT INTO user_pets_v2 (user_id, pet_id, level, last_fed) "
+            "VALUES (1, 'cat', 5, NULL), (1, 'dog', 2, NULL)"
+        )
+        await db.commit()
+        try:
+            pets = await m.bot._web_game_pets_state(1)
+            assert pets["count"] == 2
+            assert pets["active"]["pet_id"] == "cat"
+            assert pets["active"]["level"] == 5
+            assert pets["active"]["effects"][0]["current"] > 0
+            assert pets["active"]["feed_cost_coins"] > 0
+            assert len(pets["shop"]) == 3
+            assert all(item["pet_id"] != "cat" for item in pets["shop"])
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_state_collect_and_admin():
     async def run():
         db = await aiosqlite.connect(":memory:")

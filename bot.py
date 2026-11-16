@@ -3301,6 +3301,127 @@ class CastleBot(commands.Bot):
             },
         }
 
+    async def _web_game_pets_state(self, user_id: int) -> dict:
+        """Питомцы игрока: активный, коллекция, магазин и кулдауны."""
+        active = await get_active_pet(user_id)
+        owned_rows = await get_user_pets(user_id)
+        now = datetime.datetime.now()
+
+        def parse_time(value) -> datetime.datetime | None:
+            if isinstance(value, datetime.datetime):
+                return value
+            if not value:
+                return None
+            try:
+                return datetime.datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        def effects_payload(ptype: dict, level: int) -> list[dict]:
+            effective = pet_effective_level(level)
+            result = []
+            for effect, per_level in get_pet_effect_entries(ptype):
+                result.append(
+                    {
+                        "effect": effect,
+                        "label": PET_EFFECT_NAMES.get(effect, effect),
+                        "per_level": round(per_level * 100, 2),
+                        "current": round(per_level * effective * 100, 2),
+                    }
+                )
+            return result
+
+        def pet_payload(
+            pet_id: str,
+            level: int,
+            last_fed=None,
+            is_active: bool = False,
+        ) -> dict | None:
+            ptype = PET_TYPES.get(pet_id)
+            if not ptype:
+                return None
+            level_int = max(0, int(level or 0))
+            feed_coins, feed_gems = pet_feed_cost(level_int)
+            cooldown = 0
+            last_dt = parse_time(last_fed)
+            if last_dt is not None:
+                cooldown = max(
+                    0,
+                    int(
+                        PET_FEED_COOLDOWN_HOURS * 3600
+                        - (now - last_dt).total_seconds()
+                    ),
+                )
+            next_breakthrough = next(
+                (
+                    threshold
+                    for threshold in PET_BREAKTHROUGH_LEVELS
+                    if level_int < threshold
+                ),
+                None,
+            )
+            return {
+                "pet_id": pet_id,
+                "name": str(ptype.get("name", pet_id)),
+                "emoji": str(ptype.get("emoji", "")),
+                "desc": str(ptype.get("desc", "")),
+                "price_gems": int(ptype.get("price_gems", 0) or 0),
+                "level": level_int,
+                "effective_level": round(pet_effective_level(level_int), 2),
+                "effects": effects_payload(ptype, level_int),
+                "active": bool(is_active),
+                "maxed": level_int >= PET_MAX_LEVEL,
+                "next_breakthrough": next_breakthrough,
+                "feed_cost_coins": feed_coins,
+                "feed_cost_gems": feed_gems,
+                "feed_ready_in": cooldown,
+                "last_fed": str(last_fed) if last_fed else "",
+            }
+
+        owned: list[dict] = []
+        owned_ids: set[str] = set()
+        for pet_id, level, last_fed in owned_rows:
+            payload = pet_payload(
+                str(pet_id),
+                int(level or 0),
+                last_fed,
+                bool(active and str(active[0]) == str(pet_id)),
+            )
+            if payload is None:
+                continue
+            owned.append(payload)
+            owned_ids.add(str(pet_id))
+        owned.sort(key=lambda item: (not item["active"], -item["level"]))
+
+        active_payload = next(
+            (item for item in owned if item["active"]), None
+        )
+        shop = []
+        for pet_id, ptype in PET_TYPES.items():
+            if pet_id in owned_ids:
+                continue
+            shop.append(
+                {
+                    "pet_id": pet_id,
+                    "name": str(ptype.get("name", pet_id)),
+                    "emoji": str(ptype.get("emoji", "")),
+                    "desc": str(ptype.get("desc", "")),
+                    "price_gems": int(ptype.get("price_gems", 0) or 0),
+                    "effects": effects_payload(ptype, 0),
+                }
+            )
+
+        return {
+            "active": active_payload,
+            "owned": owned,
+            "shop": shop,
+            "count": len(owned),
+            "limits": {
+                "max_level": int(PET_MAX_LEVEL),
+                "feed_cooldown_hours": int(PET_FEED_COOLDOWN_HOURS),
+            },
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -3332,6 +3453,7 @@ class CastleBot(commands.Bot):
                     "pvp": None,
                     "auction": None,
                     "raid_party": None,
+                    "pets": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3359,6 +3481,7 @@ class CastleBot(commands.Bot):
                     "pvp": None,
                     "auction": None,
                     "raid_party": None,
+                    "pets": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3593,6 +3716,11 @@ class CastleBot(commands.Bot):
         raid_party_state = await self._web_game_raid_party_state(
             user_id, guild
         )
+        try:
+            pets_state = await self._web_game_pets_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить питомцев")
+            pets_state = None
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -3640,6 +3768,7 @@ class CastleBot(commands.Bot):
             "pvp": pvp_state,
             "auction": auction_state,
             "raid_party": raid_party_state,
+            "pets": pets_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
