@@ -46,6 +46,11 @@ class FakeMember(FakeUser):
         super().__init__(user_id, name)
         self.status = status
         self.joined_at = dt.datetime.now(dt.timezone.utc)
+        self.display_avatar = type(
+            "Avatar",
+            (),
+            {"url": f"https://cdn.discordapp.com/avatars/{user_id}/a.png"},
+        )()
 
 
 class FakeChannel:
@@ -186,6 +191,7 @@ def test_collect_builds_live_snapshot(tmp_path, monkeypatch):
             assert payload["stats"]["db_tables"] > 0
             assert payload["top_players"][0]["name"] == "Vortex"
             assert payload["top_players"][0]["clan"] == "420 SQUAD"
+            assert payload["top_players"][0]["avatar"].endswith("/a.png")
             assert payload["servers"][0]["name"] == "420 SQUAD"
             assert payload["servers"][0]["online"] == 2
             assert payload["top_clans"][0]["power"] == 4000

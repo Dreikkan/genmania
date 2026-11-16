@@ -111,6 +111,47 @@ def test_web_game_pets_state():
     asyncio.run(run())
 
 
+def test_web_game_generator_emoji_and_avatar():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins) VALUES (1, 1000)"
+        )
+        async with db.execute(
+            "SELECT id FROM items WHERE id LIKE '%_gen' LIMIT 1"
+        ) as c:
+            item_id = (await c.fetchone())[0]
+        await db.execute(
+            "INSERT INTO inventory (user_id, slot, item_id, location, stars) "
+            "VALUES (1, 0, ?, 'profile', 0)",
+            (item_id,),
+        )
+        await db.commit()
+        try:
+            state = await m.bot.handle_web_game_command(
+                {
+                    "id": "emoji-state",
+                    "action": "state",
+                    "user_id": "1",
+                    "guild_id": "42",
+                }
+            )
+            assert state["player"]["avatar"]
+            assert state["inventory"][0]["emoji"] is not None
+            assert state["shop"]
+            assert all("emoji" in item for item in state["shop"])
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_pet_actions():
     async def run():
         db = await aiosqlite.connect(":memory:")

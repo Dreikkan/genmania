@@ -4281,7 +4281,8 @@ class CastleBot(commands.Bot):
             """
             SELECT inv.location, inv.slot, inv.item_id, i.name, i.rarity,
                    inv.stars, i.price, i.income_per_hour,
-                   i.income_gems_per_hour, COALESCE(inv.is_locked, 0)
+                   i.income_gems_per_hour, COALESCE(inv.is_locked, 0),
+                   i.emoji, i.emoji_by_star
             FROM inventory inv
             JOIN items i ON i.id = inv.item_id
             WHERE inv.user_id = ?
@@ -4318,10 +4319,20 @@ class CastleBot(commands.Bot):
             income_coins,
             income_gems,
             is_locked,
+            emoji,
+            emoji_by_star,
         ) in inventory_rows:
             if location == "profile":
                 generators += 1
             stars_int = int(stars or 0)
+            try:
+                emoji_map = json.loads(emoji_by_star or "{}")
+            except (TypeError, ValueError):
+                emoji_map = {}
+            if isinstance(emoji_map, dict):
+                star_emoji = emoji_map.get(str(stars_int)) or emoji
+            else:
+                star_emoji = emoji
             sell_price = calculate_sell_price(int(price or 0), stars_int)
             next_star = stars_int + 1
             star_req = STAR_UPGRADE.get(next_star)
@@ -4353,6 +4364,7 @@ class CastleBot(commands.Bot):
                     "item_id": item_id,
                     "name": name,
                     "rarity": rarity,
+                    "emoji": str(star_emoji or ""),
                     "stars": stars_int,
                     "price": price or 0,
                     "sell_price": sell_price,
@@ -4383,7 +4395,7 @@ class CastleBot(commands.Bot):
         shop = []
         async with self.db.execute(
             "SELECT id, name, price, income_per_hour, "
-            "income_gems_per_hour, rarity FROM items "
+            "income_gems_per_hour, rarity, emoji FROM items "
             "WHERE id LIKE '%_gen' AND COALESCE(buyable, 1) = 1 "
             "ORDER BY price ASC LIMIT 60"
         ) as cursor:
@@ -4400,6 +4412,7 @@ class CastleBot(commands.Bot):
                             float(row[4] or 0) * 3600, 2
                         ),
                         "rarity": str(row[5] or "common"),
+                        "emoji": str(row[6] or ""),
                     }
                 )
         try:
@@ -4410,11 +4423,13 @@ class CastleBot(commands.Bot):
             starter_discount = False
 
         item_names: dict[str, str] = {}
+        item_emojis: dict[str, str] = {}
         async with self.db.execute(
-            "SELECT id, name FROM items WHERE id LIKE '%_gen'"
+            "SELECT id, name, emoji FROM items WHERE id LIKE '%_gen'"
         ) as cursor:
             for row in await cursor.fetchall():
                 item_names[str(row[0])] = str(row[1] or row[0])
+                item_emojis[str(row[0])] = str(row[2] or "")
 
         craft_recipes = []
         for (recipe_item_id, recipe_stars), copies in copy_counts.items():
@@ -4433,8 +4448,10 @@ class CastleBot(commands.Bot):
                 {
                     "item_id": recipe_item_id,
                     "name": item_names.get(recipe_item_id, recipe_item_id),
+                    "emoji": item_emojis.get(recipe_item_id, ""),
                     "next_id": next_id,
                     "next_name": item_names.get(next_id, next_id),
+                    "next_emoji": item_emojis.get(next_id, ""),
                     "copies_available": copies,
                     "copies_needed": copies_needed,
                     "gems": gem_cost,
@@ -4541,7 +4558,7 @@ class CastleBot(commands.Bot):
                 "user_id": str(user_id),
                 "name": member.display_name,
                 "handle": member.name,
-                "avatar": avatar,
+                "avatar": avatar or "",
                 "coins": int(coins or 0),
                 "gems": int(gems or 0),
                 "catalysts": int(catalysts or 0),
