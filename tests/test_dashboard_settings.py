@@ -37,6 +37,27 @@ class FakeMember:
         self.bot = False
 
 
+class FakeChannel:
+    def __init__(self, channel_id: int, name: str):
+        self.id = channel_id
+        self.name = name
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+        return None
+
+
+class FakeJoinMember:
+    def __init__(self, guild):
+        self.id = 3
+        self.guild = guild
+        self.mention = "<@3>"
+        self.display_name = "Newbie"
+        self.name = "newbie"
+        self.display_avatar = type("Avatar", (), {"url": "https://example.test/a.png"})()
+
+
 class FakeGuild:
     def __init__(self):
         self.id = 42
@@ -44,9 +65,16 @@ class FakeGuild:
         self.owner_id = 1
         self.roles = [FakeRole(777, "Администратор")]
         self.members = [FakeMember(1, "Vortex"), FakeMember(2, "Kira")]
+        self.text_channels = [FakeChannel(500, "welcome")]
 
     def get_member(self, user_id: int):
         return next((member for member in self.members if member.id == user_id), None)
+
+    def get_channel(self, channel_id: int):
+        return next(
+            (channel for channel in self.text_channels if channel.id == channel_id),
+            None,
+        )
 
 
 async def _prepare():
@@ -56,7 +84,8 @@ async def _prepare():
         "CREATE TABLE guild_settings (guild_id INTEGER PRIMARY KEY, "
         "bot_name TEXT, custom_emojis TEXT, currency_coins TEXT, currency_gems TEXT, "
         "prefix TEXT, start_coins INTEGER, disabled_commands TEXT, status_roles TEXT, "
-        "battlepass_enabled INTEGER, admin_role_id INTEGER, tax_rate REAL)"
+        "battlepass_enabled INTEGER, admin_role_id INTEGER, tax_rate REAL, "
+        "welcome_channel_id INTEGER)"
     )
     await db.execute(
         "CREATE TABLE admin_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -98,6 +127,87 @@ def test_apply_dashboard_settings_valid():
             ) as cursor:
                 row = await cursor.fetchone()
             assert row == (100, "кредиты", "кристаллы", 0.075, 777)
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_apply_dashboard_settings_welcome_channel():
+    async def run():
+        db = await _prepare()
+        try:
+            result = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"welcome_channel": "#welcome"},
+                }
+            )
+            assert result["ok"] is True
+            assert "welcome_channel" in result["applied"]
+            async with db.execute(
+                "SELECT welcome_channel_id FROM guild_settings WHERE guild_id = 42"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] == 500
+
+            by_id = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"welcome_channel": "<#500>"},
+                }
+            )
+            assert by_id["ok"] is True
+
+            missing = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"welcome_channel": "missing"},
+                }
+            )
+            assert missing["ok"] is False
+            assert any("welcome_channel" in warning for warning in missing["warnings"])
+
+            cleared = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"welcome_channel": ""},
+                }
+            )
+            assert cleared["ok"] is True
+            async with db.execute(
+                "SELECT welcome_channel_id FROM guild_settings WHERE guild_id = 42"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_on_member_join_sends_welcome():
+    async def run():
+        db = await _prepare()
+        try:
+            await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"welcome_channel": "#welcome"},
+                }
+            )
+            guild = m.bot.get_guild(42)
+            member = FakeJoinMember(guild)
+            await m.on_member_join(member)
+            channel = guild.text_channels[0]
+            assert channel.sent
+            embed = channel.sent[0][1].get("embed")
+            assert embed is not None
+            assert "<@3>" in embed.description
+            assert "420 SQUAD" in embed.description
         finally:
             await db.close()
 
