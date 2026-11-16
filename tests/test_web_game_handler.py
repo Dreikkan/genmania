@@ -346,6 +346,93 @@ def test_web_game_progress_actions():
     asyncio.run(run())
 
 
+def test_web_game_upgrades_and_autocollector():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) "
+            "VALUES (1, 10000, 10000)"
+        )
+        await db.commit()
+        try:
+            state = await m.bot.handle_web_game_command(
+                {
+                    "id": "upgrades-state",
+                    "action": "state",
+                    "user_id": "1",
+                    "guild_id": "42",
+                }
+            )
+            upgrades = state["upgrades"]
+            assert upgrades["grid"]["current"] == 9
+            assert upgrades["grid"]["max_side"] == 10
+            assert upgrades["grid"]["options"]
+            assert upgrades["autocollector"]["owned"] is False
+            assert upgrades["autocollector"]["next_price"] == 1500
+
+            bought = await m.bot.handle_web_game_command(
+                {
+                    "id": "upgrade-grid",
+                    "action": "upgrade_grid",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"upgrade_id": "grid_4x4"},
+                }
+            )
+            assert bought["state"]["upgrades"]["grid"]["current"] == 16
+            assert bought["state"]["player"]["coins"] < 10000
+
+            status = await m.bot.handle_web_game_command(
+                {
+                    "id": "status-buy",
+                    "action": "status_buy",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"status_id": "vip", "days": 1},
+                }
+            )
+            vip = next(
+                item
+                for item in status["state"]["upgrades"]["statuses"]
+                if item["id"] == "vip"
+            )
+            assert vip["active"] is True
+
+            auto = await m.bot.handle_web_game_command(
+                {
+                    "id": "auto-buy",
+                    "action": "autocollector_buy",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert auto["state"]["upgrades"]["autocollector"]["owned"] is True
+            assert auto["state"]["upgrades"]["autocollector"]["level"] == 1
+
+            upgraded = await m.bot.handle_web_game_command(
+                {
+                    "id": "auto-upgrade",
+                    "action": "autocollector_upgrade",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert upgraded["state"]["upgrades"]["autocollector"]["level"] == 2
+            assert upgraded["state"]["upgrades"]["autocollector"]["interval_hours"] == 3
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_mailbox_state_and_claim():
     async def run():
         db = await aiosqlite.connect(":memory:")

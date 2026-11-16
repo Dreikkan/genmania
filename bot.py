@@ -4107,6 +4107,302 @@ class CastleBot(commands.Bot):
             "track": track,
         }
 
+    async def _web_game_upgrade_grid(
+        self, command: dict, guild, member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        upgrade_id = str(payload.get("upgrade_id") or "").strip()
+        if not upgrade_id:
+            raise ValueError("Некорректное улучшение.")
+        user_id = int(member.id)
+
+        currency = ""
+        price = 0
+        size = 0
+        name = upgrade_id
+        async with self.db.execute(
+            "SELECT name, price_coins, size FROM grid_shop WHERE id = ?",
+            (upgrade_id,),
+        ) as c:
+            row = await c.fetchone()
+        if row:
+            name, price, size = row
+            currency = "coins"
+        else:
+            async with self.db.execute(
+                "SELECT name, price_gems FROM gem_shop "
+                "WHERE id = ? AND category = 'upgrade'",
+                (upgrade_id,),
+            ) as c:
+                row = await c.fetchone()
+            if not row:
+                raise ValueError("Улучшение не найдено.")
+            name, price = row
+            currency = "gems"
+            size = grid_size_from_upgrade_id(upgrade_id)
+        price = int(price or 0)
+        size = int(size or 0)
+        if size <= 0:
+            raise ValueError("Некорректный размер сетки.")
+
+        async with self.db.execute(
+            "SELECT COALESCE(grid_size, 9) FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+        current = int((row[0] if row else START_GRID) or START_GRID)
+        max_side = await get_guild_max_grid(guild.id)
+        max_cells = max_side * max_side
+        if size <= current:
+            raise ValueError("Эта сетка уже не больше текущей.")
+        if size > max_cells:
+            raise ValueError(
+                f"На сервере максимальная сетка "
+                f"{max_side}×{max_side} ({max_cells} слотов)."
+            )
+        async with self.db.execute(
+            "SELECT 1 FROM player_upgrades "
+            "WHERE user_id = ? AND upgrade_id = ?",
+            (user_id, upgrade_id),
+        ) as c:
+            if await c.fetchone():
+                raise ValueError("Это улучшение уже куплено.")
+
+        async with db_transaction():
+            cur = await self.db.execute(
+                f"UPDATE players SET {currency} = {currency} - ? "
+                f"WHERE user_id = ? AND {currency} >= ?",
+                (price, user_id, price),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Недостаточно средств.")
+            await self.db.execute(
+                "INSERT OR IGNORE INTO player_upgrades "
+                "(user_id, upgrade_id, level) VALUES (?, ?, 1)",
+                (user_id, upgrade_id),
+            )
+            await self.db.execute(
+                "UPDATE players SET grid_size = ? WHERE user_id = ?",
+                (size, user_id),
+            )
+
+        unit = "монет" if currency == "coins" else "гемов"
+        side = max(1, math.isqrt(size))
+        message = (
+            f"Куплено улучшение «{name}»: "
+            f"сетка {side}×{side}, списано {price} {unit}."
+        )
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "upgrade_grid",
+            "upgrade_id": upgrade_id,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_status_buy(
+        self, command: dict, guild, member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        status_id = str(payload.get("status_id") or "").strip()
+        try:
+            days = int(payload.get("days") or 0)
+        except (TypeError, ValueError):
+            days = 0
+        if status_id not in STATUS_BONUSES:
+            raise ValueError("Неизвестный статус.")
+        if days not in STATUS_DURATIONS:
+            raise ValueError("Некорректный срок статуса.")
+        user_id = int(member.id)
+        ok, message = await purchase_status(user_id, status_id, days)
+        if not ok:
+            raise ValueError(message.replace("❌", "").strip())
+        message = (
+            f"Статус «{STATUS_NAMES.get(status_id, status_id)}» "
+            f"активирован на {days} дн."
+        )
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "status_buy",
+            "status_id": status_id,
+            "days": days,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_autocollector_buy(self, guild, member) -> dict:
+        user_id = int(member.id)
+        ok, message = await buy_autocollector(user_id)
+        if not ok:
+            raise ValueError(message.replace("❌", "").strip())
+        message = "Автосборщик куплен."
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "autocollector_buy",
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_autocollector_upgrade(self, guild, member) -> dict:
+        user_id = int(member.id)
+        ok, message = await upgrade_autocollector(user_id)
+        if not ok:
+            raise ValueError(message.replace("❌", "").strip())
+        message = "Автосборщик улучшен."
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "autocollector_upgrade",
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_upgrades_state(
+        self, user_id: int, guild_id: int
+    ) -> dict:
+        """Улучшения: сетка, статусы и автосборщик."""
+        async with self.db.execute(
+            "SELECT COALESCE(grid_size, 9) FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+        current_grid = int((row[0] if row else START_GRID) or START_GRID)
+        max_side = await get_guild_max_grid(guild_id)
+        max_cells = max_side * max_side
+
+        grid_options = []
+        async with self.db.execute(
+            "SELECT id, name, description, price_coins, size, emoji "
+            "FROM grid_shop ORDER BY size ASC"
+        ) as c:
+            for gid, name, desc, price, size, emoji in await c.fetchall():
+                size_int = int(size or grid_size_from_upgrade_id(gid))
+                if size_int <= current_grid or size_int > max_cells:
+                    continue
+                side = max(1, math.isqrt(size_int))
+                grid_options.append(
+                    {
+                        "id": str(gid),
+                        "name": str(name or gid),
+                        "description": str(desc or ""),
+                        "price": int(price or 0),
+                        "currency": "coins",
+                        "size": size_int,
+                        "side": side,
+                        "emoji": str(emoji or ""),
+                    }
+                )
+        async with self.db.execute(
+            "SELECT id, name, description, price_gems, emoji "
+            "FROM gem_shop WHERE category = 'upgrade' "
+            "ORDER BY price_gems ASC"
+        ) as c:
+            for gid, name, desc, price, emoji in await c.fetchall():
+                size_int = grid_size_from_upgrade_id(str(gid))
+                if size_int <= current_grid or size_int > max_cells:
+                    continue
+                side = max(1, math.isqrt(size_int))
+                grid_options.append(
+                    {
+                        "id": str(gid),
+                        "name": str(name or gid),
+                        "description": str(desc or ""),
+                        "price": int(price or 0),
+                        "currency": "gems",
+                        "size": size_int,
+                        "side": side,
+                        "emoji": str(emoji or ""),
+                    }
+                )
+        grid_options.sort(key=lambda item: item["size"])
+
+        active_statuses = await get_active_statuses(user_id)
+        statuses = []
+        for status_id in STATUS_ORDER:
+            durations = []
+            for days in STATUS_DURATIONS:
+                price = status_price(status_id, days)
+                if price is None:
+                    continue
+                durations.append(
+                    {
+                        "days": int(days),
+                        "label": STATUS_DURATION_LABELS[days],
+                        "price": int(price),
+                        "per_day": round(price / days, 1),
+                    }
+                )
+            statuses.append(
+                {
+                    "id": status_id,
+                    "name": STATUS_NAMES.get(status_id, status_id),
+                    "bonus_pct": round(
+                        float(STATUS_BONUSES.get(status_id, 0.0)) * 100,
+                        1,
+                    ),
+                    "active": status_id in active_statuses,
+                    "expires_at": str(
+                        active_statuses.get(status_id) or ""
+                    ),
+                    "durations": durations,
+                }
+            )
+
+        existing = await get_autocollector(user_id)
+        if existing:
+            level = int(existing[0] or 1)
+            last_auto = str(existing[1] or "")
+            interval = int(
+                AUTOCOLLECT_LEVELS.get(level, (0, 4))[1]
+            )
+            next_level = (
+                level + 1
+                if level < AUTOCOLLECT_MAX_LEVEL
+                else None
+            )
+            next_price = 0
+            next_interval = 0
+            if next_level is not None:
+                next_price, next_interval = AUTOCOLLECT_LEVELS[
+                    next_level
+                ]
+        else:
+            level = 0
+            last_auto = ""
+            interval = 0
+            next_level = 1
+            next_price = AUTOCOLLECT_PRICE_GEMS
+            next_interval = AUTOCOLLECT_LEVELS[1][1]
+
+        return {
+            "grid": {
+                "current": current_grid,
+                "side": max(1, math.isqrt(current_grid)),
+                "max_side": max_side,
+                "max_cells": max_cells,
+                "options": grid_options,
+            },
+            "statuses": statuses,
+            "autocollector": {
+                "owned": bool(existing),
+                "level": level,
+                "interval_hours": int(interval),
+                "last_auto": last_auto,
+                "next_level": next_level,
+                "next_price": int(next_price),
+                "next_interval": int(next_interval),
+                "max_level": int(AUTOCOLLECT_MAX_LEVEL),
+                "initial_price": int(AUTOCOLLECT_PRICE_GEMS),
+            },
+        }
+
     async def _web_game_mailbox_state(self, user_id: int) -> dict:
         """Почта: предметы, которые не поместились в инвентарь."""
         async with self.db.execute(
@@ -4192,6 +4488,7 @@ class CastleBot(commands.Bot):
                     "titles": None,
                     "prestige": None,
                     "mailbox": None,
+                    "upgrades": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4228,6 +4525,7 @@ class CastleBot(commands.Bot):
                     "titles": None,
                     "prestige": None,
                     "mailbox": None,
+                    "upgrades": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4539,6 +4837,13 @@ class CastleBot(commands.Bot):
         except Exception:
             log.exception("WEB_GAME: не удалось получить почту")
             mailbox_state = None
+        try:
+            upgrades_state = await self._web_game_upgrades_state(
+                user_id, guild_id
+            )
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить улучшения")
+            upgrades_state = None
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -4595,6 +4900,7 @@ class CastleBot(commands.Bot):
             "titles": titles_state,
             "prestige": prestige_state,
             "mailbox": mailbox_state,
+            "upgrades": upgrades_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -7186,6 +7492,18 @@ class CastleBot(commands.Bot):
             return await self._web_game_prestige_do(guild, member)
         if action == "mailbox_claim":
             return await self._web_game_mailbox_claim(guild, member)
+        if action == "upgrade_grid":
+            return await self._web_game_upgrade_grid(
+                command, guild, member
+            )
+        if action == "status_buy":
+            return await self._web_game_status_buy(command, guild, member)
+        if action == "autocollector_buy":
+            return await self._web_game_autocollector_buy(guild, member)
+        if action == "autocollector_upgrade":
+            return await self._web_game_autocollector_upgrade(
+                guild, member
+            )
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
