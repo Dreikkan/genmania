@@ -1823,7 +1823,12 @@ class CastleBot(commands.Bot):
         for key in ("welcome_text_ru", "welcome_text_en"):
             if key not in settings:
                 continue
-            value = str(settings[key] or "").strip()[:1800]
+            value = (
+                str(settings[key] or "")
+                .replace("/меню", "/genmania")
+                .replace("/menu", "/genmania")
+                .strip()[:1800]
+            )
             await save_setting(
                 guild_id,
                 key,
