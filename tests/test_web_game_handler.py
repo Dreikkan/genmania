@@ -109,6 +109,77 @@ def test_web_game_pets_state():
     asyncio.run(run())
 
 
+def test_web_game_pet_actions():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (1, 1000, 500)"
+        )
+        await db.commit()
+        try:
+            bought = await m.bot.handle_web_game_command(
+                {
+                    "id": "pet-buy",
+                    "action": "pet_buy",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"pet_id": "cat"},
+                }
+            )
+            assert bought["ok"] is True
+            assert bought["state"]["pets"]["active"]["pet_id"] == "cat"
+            fed = await m.bot.handle_web_game_command(
+                {
+                    "id": "pet-feed",
+                    "action": "pet_feed",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert fed["ok"] is True
+            assert fed["state"]["pets"]["active"]["level"] == 2
+
+            await db.execute(
+                "INSERT INTO user_pets_v2 (user_id, pet_id, level, last_fed) "
+                "VALUES (1, 'dog', 1, NULL)"
+            )
+            await db.commit()
+            activated = await m.bot.handle_web_game_command(
+                {
+                    "id": "pet-activate",
+                    "action": "pet_activate",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"pet_id": "dog"},
+                }
+            )
+            assert activated["ok"] is True
+            assert activated["state"]["pets"]["active"]["pet_id"] == "dog"
+
+            cleared = await m.bot.handle_web_game_command(
+                {
+                    "id": "pet-clear",
+                    "action": "pet_activate",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"pet_id": ""},
+                }
+            )
+            assert cleared["ok"] is True
+            assert cleared["state"]["pets"]["active"] is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_state_collect_and_admin():
     async def run():
         db = await aiosqlite.connect(":memory:")

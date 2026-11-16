@@ -3422,6 +3422,114 @@ class CastleBot(commands.Bot):
             },
         }
 
+    async def _web_game_pet_buy(
+        self, command: dict, guild, member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        pet_id = str(payload.get("pet_id") or "").strip()
+        ptype = PET_TYPES.get(pet_id)
+        if not ptype:
+            raise ValueError("Неизвестный питомец.")
+        price = int(ptype.get("price_gems") or 0)
+        user_id = int(member.id)
+        async with db_transaction():
+            async with self.db.execute(
+                "SELECT 1 FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?",
+                (user_id, pet_id),
+            ) as c:
+                if await c.fetchone():
+                    raise ValueError("Этот питомец уже куплен.")
+            async with self.db.execute(
+                "SELECT gems FROM players WHERE user_id = ?", (user_id,)
+            ) as c:
+                row = await c.fetchone()
+            gems = int(row[0] or 0) if row else 0
+            if gems < price:
+                raise ValueError(
+                    f"Не хватает гемов: нужно {price}, есть {gems}."
+                )
+            cur = await self.db.execute(
+                "UPDATE players SET gems = gems - ? "
+                "WHERE user_id = ? AND gems >= ?",
+                (price, user_id, price),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Не хватает гемов.")
+            await self.db.execute(
+                "INSERT INTO user_pets_v2 (user_id, pet_id, level, last_fed) "
+                "VALUES (?, ?, 1, NULL)",
+                (user_id, pet_id),
+            )
+            await self.db.execute(
+                "UPDATE players SET active_pet = ? "
+                "WHERE user_id = ? AND (active_pet IS NULL OR active_pet = '')",
+                (pet_id, user_id),
+            )
+        await update_story_quests(user_id, "pet_buy", 1)
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "pet_buy",
+            "message": f"Куплен питомец: {ptype.get('name', pet_id)}.",
+            "state": state,
+        }
+
+    async def _web_game_pet_activate(
+        self, command: dict, guild, member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        pet_id = str(payload.get("pet_id") or "").strip()
+        user_id = int(member.id)
+        if pet_id:
+            if pet_id not in PET_TYPES:
+                raise ValueError("Неизвестный питомец.")
+            async with self.db.execute(
+                "SELECT 1 FROM user_pets_v2 WHERE user_id = ? AND pet_id = ?",
+                (user_id, pet_id),
+            ) as c:
+                if not await c.fetchone():
+                    raise ValueError("Этот питомец ещё не куплен.")
+            await self.db.execute(
+                "UPDATE players SET active_pet = ? WHERE user_id = ?",
+                (pet_id, user_id),
+            )
+            message = f"Активный питомец: {PET_TYPES[pet_id]['name']}."
+        else:
+            await self.db.execute(
+                "UPDATE players SET active_pet = NULL WHERE user_id = ?",
+                (user_id,),
+            )
+            message = "Активный питомец снят."
+        await commit_if_needed()
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "pet_activate",
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_pet_feed(
+        self, command: dict, guild, member
+    ) -> dict:
+        user_id = int(member.id)
+        ok, message, _level, _pet_id = await feed_active_pet(user_id)
+        if not ok:
+            raise ValueError(message)
+        await update_quest_progress(user_id, "feed_pet")
+        await commit_if_needed()
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "pet_feed",
+            "message": message,
+            "state": state,
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -6323,6 +6431,12 @@ class CastleBot(commands.Bot):
             return await self._web_game_auction_cancel(
                 command, guild, member
             )
+        if action == "pet_buy":
+            return await self._web_game_pet_buy(command, guild, member)
+        if action == "pet_activate":
+            return await self._web_game_pet_activate(command, guild, member)
+        if action == "pet_feed":
+            return await self._web_game_pet_feed(command, guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
