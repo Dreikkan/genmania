@@ -6739,6 +6739,23 @@ class CastleBot(commands.Bot):
         ]:
             await ensure_column(self.db, "guild_settings", column, definition)
 
+        # Команда /меню переименована в /genmania: обновляем сохранённые
+        # тексты приветствия, чтобы старые упоминания не остались.
+        await self.db.execute(
+            "UPDATE guild_settings SET "
+            "welcome_text_ru = REPLACE("
+            "REPLACE(welcome_text_ru, '/меню', '/genmania'), "
+            "'/menu', '/genmania') "
+            "WHERE welcome_text_ru IS NOT NULL"
+        )
+        await self.db.execute(
+            "UPDATE guild_settings SET "
+            "welcome_text_en = REPLACE("
+            "REPLACE(welcome_text_en, '/меню', '/genmania'), "
+            "'/menu', '/genmania') "
+            "WHERE welcome_text_en IS NOT NULL"
+        )
+
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS gem_shop (
                 id TEXT PRIMARY KEY,
@@ -11101,7 +11118,7 @@ class SafeView(discord.ui.View):
             return
         try:
             await message.edit(
-                content="⏳ Меню устарело. Открой /меню заново.",
+                content="⏳ Меню устарело. Открой /genmania заново.",
                 embed=None,
                 view=None,
             )
@@ -11259,7 +11276,7 @@ async def build_onboarding_embed(interaction: discord.Interaction) -> discord.Em
             f"Пройдено **{len(completed)}/{len(ONBOARDING_STEPS)}**.\n\n"
             + "\n\n".join(lines)
             + f"\n\n{footer_line}\n"
-            "Открыть главное меню: `/меню`."
+            "Открыть главное меню: `/genmania`."
         ),
         color=0x3498db,
     )
@@ -11308,7 +11325,7 @@ async def build_welcome_embed(interaction: discord.Interaction) -> discord.Embed
         inline=True,
     )
     embed.set_footer(
-        text="Нажми «Принять пост», чтобы открыть меню. /меню — вернуться."
+        text="Нажми «Принять пост», чтобы открыть меню. /genmania — вернуться."
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
     return await fix_embed_emojis(embed)
@@ -29621,7 +29638,7 @@ async def notifications_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="меню", description="Открыть главное меню энергостанции")
+@bot.tree.command(name="genmania", description="Открыть главное меню энергостанции")
 async def main_menu(interaction: discord.Interaction):
     guild_id = interaction.guild_id
     user_id = interaction.user.id
