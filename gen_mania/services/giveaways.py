@@ -382,7 +382,10 @@ def make_giveaway_layer(runtime: GiveawayRuntime):
         return new_level
 
     async def join_giveaway(
-        giveaway_id: int, user_id: int, guild_id: int | None
+        giveaway_id: int,
+        user_id: int,
+        guild_id: int | None,
+        is_admin: bool = False,
     ) -> tuple[bool, str]:
         """Записывает игрока в розыгрыш с проверкой scope и правил."""
         async with runtime.transaction():
@@ -407,8 +410,15 @@ def make_giveaway_layer(runtime: GiveawayRuntime):
             if ends_dt and ends_dt <= datetime.datetime.now():
                 return False, "❌ Время розыгрыша истекло."
 
-            if giveaway[4] == user_id:
-                return False, "❌ Нельзя участвовать в своём розыгрыше."
+            if scope != runtime.scope_global:
+                if giveaway[4] == user_id:
+                    return False, "❌ Нельзя участвовать в своём розыгрыше."
+                if is_admin:
+                    return (
+                        False,
+                        "❌ Администраторы сервера не могут участвовать "
+                        "в локальном розыгрыше.",
+                    )
             if (
                 giveaway[6] == "clan_level"
                 and not await runtime.get_clan(user_id)

@@ -14083,7 +14083,7 @@ async def build_giveaway_embed(giveaway) -> discord.Embed:
     if not giveaway:
         return BotEmbed(title="❌ Розыгрыш не найден", color=0xe74c3c)
     (
-        gid, guild_id, channel_id, message_id, creator_id, title,
+        gid, guild_id, channel_id, message_id, _creator_id, title,
         reward_type, reward_id, amount, winners_count, status,
         created_at, ends_at, winner_ids,
     ) = giveaway[:14]
@@ -14105,6 +14105,15 @@ async def build_giveaway_embed(giveaway) -> discord.Embed:
         if scope == GIVEAWAY_SCOPE_GLOBAL
         else ""
     )
+    if scope == GIVEAWAY_SCOPE_GLOBAL:
+        organizer = (
+            getattr(getattr(bot, "user", None), "display_name", None)
+            or getattr(getattr(bot, "user", None), "name", None)
+            or "Gen Mania"
+        )
+    else:
+        giveaway_guild = bot.get_guild(guild_id) if guild_id else None
+        organizer = getattr(giveaway_guild, "name", None) or "сервер"
     embed = BotEmbed(
         title=f"🎁 {title}",
         description=(
@@ -14112,7 +14121,7 @@ async def build_giveaway_embed(giveaway) -> discord.Embed:
             f"**Награда каждому:** {reward_text}\n"
             f"**Победителей:** {winners_count}\n"
             f"**Участников:** {entries_count}\n"
-            f"**Создал:** <@{creator_id}>"
+            f"**Организатор:** {organizer}"
         ),
         color=color,
     )
@@ -14563,10 +14572,42 @@ class GiveawayJoinView(SafeView):
         self.add_item(button)
 
     async def join(self, interaction: discord.Interaction):
+        is_admin = False
+        try:
+            guild = getattr(interaction, "guild", None)
+            user = getattr(interaction, "user", None)
+            if guild is not None and user is not None:
+                member = guild.get_member(user.id)
+                if member is not None:
+                    settings = await get_settings(guild.id)
+                    checker = getattr(bot, "_is_web_admin", None)
+                    if callable(checker):
+                        is_admin = bool(
+                            checker(
+                                guild,
+                                member,
+                                settings.get("admin_role_id"),
+                            )
+                        )
+                    else:
+                        is_admin = bool(
+                            getattr(
+                                getattr(member, "guild_permissions", None),
+                                "administrator",
+                                False,
+                            )
+                            or getattr(guild, "owner_id", None) == member.id
+                        )
+        except Exception:
+            log.debug(
+                "GIVEAWAY: не удалось определить администратора",
+                exc_info=True,
+            )
         ok, message = await join_giveaway(
             self.giveaway_id,
             interaction.user.id,
             interaction.guild_id,
+            is_admin=is_admin,
         )
         if not ok:
             await interaction.response.send_message(message, ephemeral=True)
