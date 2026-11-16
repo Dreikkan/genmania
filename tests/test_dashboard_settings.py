@@ -85,7 +85,8 @@ async def _prepare():
         "bot_name TEXT, custom_emojis TEXT, currency_coins TEXT, currency_gems TEXT, "
         "prefix TEXT, start_coins INTEGER, disabled_commands TEXT, status_roles TEXT, "
         "battlepass_enabled INTEGER, admin_role_id INTEGER, tax_rate REAL, "
-        "welcome_channel_id INTEGER, welcome_text_ru TEXT, welcome_text_en TEXT)"
+        "welcome_channel_id INTEGER, welcome_text_ru TEXT, welcome_text_en TEXT, "
+        "max_grid INTEGER, maintenance INTEGER)"
     )
     await db.execute(
         "CREATE TABLE admin_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -127,6 +128,49 @@ def test_apply_dashboard_settings_valid():
             ) as cursor:
                 row = await cursor.fetchone()
             assert row == (100, "кредиты", "кристаллы", 0.075, 777)
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_apply_dashboard_settings_grid_and_maintenance():
+    async def run():
+        db = await _prepare()
+        try:
+            result = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"max_grid": 7, "maintenance": True},
+                }
+            )
+            assert result["ok"] is True
+            assert {"max_grid", "maintenance"} <= set(result["applied"])
+            async with db.execute(
+                "SELECT max_grid, maintenance FROM guild_settings "
+                "WHERE guild_id = 42"
+            ) as cursor:
+                assert await cursor.fetchone() == (7, 1)
+
+            m._settings_cache.clear()
+            settings = await m.get_settings(42)
+            assert settings["max_grid"] == 7
+            assert settings["maintenance"] is True
+            assert await m.get_guild_max_grid(42) == 7
+            assert await m.is_guild_maintenance(42) is True
+
+            clamped = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {"max_grid": 20},
+                }
+            )
+            assert clamped["ok"] is True
+            assert any("max_grid" in warning for warning in clamped["warnings"])
+            m._settings_cache.clear()
+            assert await m.get_guild_max_grid(42) == 10
         finally:
             await db.close()
 

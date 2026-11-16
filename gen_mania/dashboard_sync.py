@@ -722,7 +722,9 @@ class DashboardSync:
         rows = await self._fetchall(
             "SELECT guild_id, start_coins, currency_coins, currency_gems, "
             "tax_rate, admin_role_id, welcome_channel_id, "
-            "welcome_text_ru, welcome_text_en FROM guild_settings"
+            "welcome_text_ru, welcome_text_en, "
+            "COALESCE(max_grid, 10), COALESCE(maintenance, 0) "
+            "FROM guild_settings"
         )
         by_guild: dict[int, Any] = {}
         for row in rows:
@@ -766,12 +768,16 @@ class DashboardSync:
                 welcome_text_en = (
                     row[8] if len(row) > 8 and row[8] is not None else None
                 )
+                max_grid = row[9] if len(row) > 9 else 10
+                maintenance = row[10] if len(row) > 10 else 0
             else:
                 start_coins, currency_coins, currency_gems = 8, "монеты", "гемы"
                 tax_rate, admin_role_id = 0.02, None
                 welcome_channel_id = None
                 welcome_text_ru = None
                 welcome_text_en = None
+                max_grid = 10
+                maintenance = 0
             result.append(
                 {
                     "guild_id": guild_id,
@@ -800,8 +806,8 @@ class DashboardSync:
                     ),
                     "public_stats": True,
                     "weekly_report": True,
-                    "maintenance": False,
-                    "max_grid": 10,
+                    "maintenance": bool(maintenance),
+                    "max_grid": max(3, min(10, int(max_grid or 10))),
                     "backup_interval": interval_text,
                 }
             )
@@ -822,7 +828,8 @@ class DashboardSync:
             row = await self._fetchone(
                 "SELECT start_coins, currency_coins, currency_gems, "
                 "tax_rate, admin_role_id, welcome_channel_id, "
-                "welcome_text_ru, welcome_text_en "
+                "welcome_text_ru, welcome_text_en, "
+                "COALESCE(max_grid, 10), COALESCE(maintenance, 0) "
                 "FROM guild_settings WHERE guild_id = ?",
                 (int(primary.id),),
             )
@@ -830,7 +837,8 @@ class DashboardSync:
             row = await self._fetchone(
                 "SELECT start_coins, currency_coins, currency_gems, "
                 "tax_rate, admin_role_id, welcome_channel_id, "
-                "welcome_text_ru, welcome_text_en "
+                "welcome_text_ru, welcome_text_en, "
+                "COALESCE(max_grid, 10), COALESCE(maintenance, 0) "
                 "FROM guild_settings ORDER BY guild_id LIMIT 1"
             )
         if row:
@@ -853,9 +861,13 @@ class DashboardSync:
                 welcome_text_ru = row[6]
             if len(row) > 7 and row[7] is not None:
                 welcome_text_en = row[7]
+            max_grid = row[8] if len(row) > 8 else 10
+            maintenance = row[9] if len(row) > 9 else 0
         else:
             start_coins, currency_coins, currency_gems = 8, "монеты", "гемы"
             tax_rate, admin_role_id = 0.02, None
+            max_grid = 10
+            maintenance = 0
         return {
             "guild_id": int(primary.id) if primary is not None else 0,
             "guild_name": str(primary.name) if primary is not None else "—",
@@ -885,8 +897,8 @@ class DashboardSync:
             ),
             "public_stats": True,
             "weekly_report": True,
-            "maintenance": False,
-            "max_grid": 10,
+            "maintenance": bool(maintenance),
+            "max_grid": max(3, min(10, int(max_grid or 10))),
             "backup_interval": self._backup_interval_text(),
         }
 

@@ -28,6 +28,8 @@ SETTING_COLUMNS = {
     "welcome_channel": "welcome_channel_id",
     "welcome_text_ru": "welcome_text_ru",
     "welcome_text_en": "welcome_text_en",
+    "max_grid": "max_grid",
+    "maintenance": "maintenance",
 }
 
 
@@ -147,6 +149,8 @@ def make_settings_layer(runtime: SettingsRuntime):
             "welcome_channel": None,
             "welcome_text_ru": defaults.get("welcome_text_ru", ""),
             "welcome_text_en": defaults.get("welcome_text_en", ""),
+            "max_grid": defaults.get("max_grid", 10),
+            "maintenance": bool(defaults.get("maintenance", False)),
         }
         # Отдельный запрос, чтобы старые тестовые схемы без welcome-колонок
         # продолжали работать.
@@ -164,6 +168,21 @@ def make_settings_layer(runtime: SettingsRuntime):
                     result["welcome_text_ru"] = str(welcome_row[1])
                 if welcome_row[2] is not None:
                     result["welcome_text_en"] = str(welcome_row[2])
+        except Exception:
+            pass
+        try:
+            async with runtime.db.execute(
+                "SELECT COALESCE(max_grid, 10), "
+                "COALESCE(maintenance, 0) "
+                "FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            ) as c:
+                extra_row = await c.fetchone()
+            if extra_row:
+                result["max_grid"] = max(
+                    3, min(10, int(extra_row[0] or 10))
+                )
+                result["maintenance"] = bool(extra_row[1])
         except Exception:
             pass
         runtime.settings_cache[guild_id] = (now_ts, result)
