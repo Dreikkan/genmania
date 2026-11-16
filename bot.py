@@ -1249,39 +1249,50 @@ CASINO_CASES = (
         "name": "Медный кейс",
         "desc": "Начальные и средние генераторы. Хороший старт коллекции.",
         "currency": "coins",
-        "price": 500,
-        "weights": {"common": 100, "uncommon": 45, "rare": 10},
+        "band": (0.0, 0.45),
+        "min_price": 150,
+        "margin": 1.05,
         "stars": ((0, 80), (1, 17), (2, 3)),
     },
     {
         "id": "silver_case",
         "name": "Серебряный кейс",
-        "desc": "Редкие и эпические генераторы с шансом на звезду.",
+        "desc": "Средние генераторы с шансом на звезду.",
         "currency": "coins",
-        "price": 12000,
-        "weights": {
-            "uncommon": 25,
-            "rare": 55,
-            "epic": 20,
-            "legendary": 3,
-        },
+        "band": (0.2, 0.75),
+        "min_price": 1000,
+        "margin": 1.05,
         "stars": ((0, 62), (1, 26), (2, 10), (3, 2)),
     },
     {
         "id": "golden_case",
         "name": "Золотой кейс",
-        "desc": "Эпические, легендарные и мифические генераторы за гемы.",
+        "desc": "Лучшие генераторы недельного пула за гемы.",
         "currency": "gems",
-        "price": 20,
-        "weights": {
-            "rare": 15,
-            "epic": 55,
-            "legendary": 25,
-            "mythic": 5,
-        },
+        "band": (0.5, 1.0),
+        "min_price": 5,
+        "margin": 1.1,
         "stars": ((0, 40), (1, 32), (2, 20), (3, 7), (4, 1)),
     },
 )
+
+
+def casino_nice_price(value: float) -> int:
+    """Округляет цену кейса до «красивого» числа."""
+    value = max(1.0, float(value))
+    if value < 100:
+        step = 5
+    elif value < 1000:
+        step = 10
+    elif value < 10000:
+        step = 100
+    elif value < 100000:
+        step = 1000
+    elif value < 1000000:
+        step = 10000
+    else:
+        step = 100000
+    return int(max(step, round(value / step) * step))
 
 
 
@@ -3485,21 +3496,22 @@ class CastleBot(commands.Bot):
         return str(emoji or "📦")
 
     async def _casino_pool(self) -> list[dict]:
-        """Недельный пул из 15 генераторов, сдвигается каждую неделю."""
+        """Недельный пул из 15 генераторов; порядок меняется каждую неделю."""
         async with self.db.execute(
             "SELECT id, name, rarity, price, emoji, "
             "COALESCE(emoji_by_star, '{}') FROM items "
             "WHERE id GLOB '*_gen' ORDER BY price ASC, id ASC"
         ) as cursor:
             rows = await cursor.fetchall()
+        rows = rows[:CASE_POOL_SIZE]
         total = len(rows)
         if not total:
             return []
         year, week, starts, ends = self._casino_week_bounds()
-        size = min(CASE_POOL_SIZE, total)
-        offset = ((year * 53 + week) * 5) % total
+        order = list(range(total))
+        random.Random(year * 100 + week).shuffle(order)
         pool = []
-        for position in range(size):
+        for position, index in enumerate(order):
             (
                 item_id,
                 name,
@@ -3507,7 +3519,7 @@ class CastleBot(commands.Bot):
                 price,
                 emoji,
                 emoji_by_star,
-            ) = rows[(offset + position) % total]
+            ) = rows[index]
             pool.append(
                 {
                     "position": position + 1,
@@ -3521,21 +3533,61 @@ class CastleBot(commands.Bot):
             )
         return pool
 
+    def _casino_case_offer(self, case: dict, pool: list[dict]) -> dict:
+        """Состав и цена кейса: цена считается от текущего пула."""
+        year, week, _starts, _ends = self._casino_week_bounds()
+        shift = ((year * 53 + week) % 3 - 1) * 0.04
+        ordered = sorted(pool, key=lambda entry: entry["price"])
+        start_ratio, end_ratio = case["band"]
+        start_ratio = min(0.85, max(0.0, start_ratio + shift))
+        end_ratio = min(1.0, max(start_ratio + 0.15, end_ratio + shift))
+        start = max(0, int(len(ordered) * start_ratio))
+        end = max(start + 1, int(len(ordered) * end_ratio))
+        items = ordered[start:end] or ordered
+        base_price = max(1, min(entry["price"] for entry in items))
+        weighted = [
+            (entry, (base_price / max(1, entry["price"])) ** 0.5)
+            for entry in items
+        ]
+        total_weight = sum(weight for _entry, weight in weighted) or 1.0
+        expected_value = sum(
+            entry["price"] * weight for entry, weight in weighted
+        ) / total_weight
+        stars_total = sum(chance for _stars, chance in case["stars"]) or 1
+        expected_stars = sum(
+            stars * chance for stars, chance in case["stars"]
+        ) / stars_total
+        value = (
+            expected_value
+            * float(case["margin"])
+            * (1 + 0.2 * expected_stars)
+        )
+        coins_price = casino_nice_price(value)
+        if case["currency"] == "gems":
+            price = max(
+                int(case["min_price"]),
+                math.ceil(coins_price / (COINS_PER_GEM * 2)),
+            )
+        else:
+            price = max(int(case["min_price"]), coins_price)
+        return {"items": weighted, "price": int(price)}
+
     async def _web_game_casino_state(self, user_id: int) -> dict:
         year, week, starts, ends = self._casino_week_bounds()
         pool = await self._casino_pool()
-        pool_rarities = {entry["rarity"] for entry in pool}
 
         cases = []
         for case in CASINO_CASES:
-            weights = {
-                rarity: weight
-                for rarity, weight in case["weights"].items()
-                if weight > 0 and rarity in pool_rarities
-            }
-            if not weights and pool:
-                weights = {rarity: 1 for rarity in pool_rarities}
-            total_weight = sum(weights.values()) or 1
+            if not pool:
+                break
+            offer = self._casino_case_offer(case, pool)
+            rarity_weights: dict[str, float] = {}
+            for entry, weight in offer["items"]:
+                rarity = entry["rarity"]
+                rarity_weights[rarity] = (
+                    rarity_weights.get(rarity, 0.0) + weight
+                )
+            total_weight = sum(rarity_weights.values()) or 1
             stars_total = sum(chance for _stars, chance in case["stars"]) or 1
             cases.append(
                 {
@@ -3543,7 +3595,7 @@ class CastleBot(commands.Bot):
                     "name": case["name"],
                     "desc": case["desc"],
                     "currency": case["currency"],
-                    "price": int(case["price"]),
+                    "price": int(offer["price"]),
                     "odds": [
                         {
                             "rarity": rarity,
@@ -3552,7 +3604,7 @@ class CastleBot(commands.Bot):
                                 weight / total_weight * 100, 1
                             ),
                         }
-                        for rarity, weight in weights.items()
+                        for rarity, weight in rarity_weights.items()
                     ],
                     "stars": [
                         {
@@ -3674,15 +3726,9 @@ class CastleBot(commands.Bot):
 
         currency = str(case["currency"])
         column = "coins" if currency == "coins" else "gems"
-        price = int(case["price"])
-        weights = case["weights"]
-        eligible = [
-            (entry, int(weights.get(entry["rarity"], 0)))
-            for entry in pool
-            if int(weights.get(entry["rarity"], 0)) > 0
-        ]
-        if not eligible:
-            eligible = [(entry, 1) for entry in pool]
+        offer = self._casino_case_offer(case, pool)
+        price = int(offer["price"])
+        eligible = offer["items"]
 
         rng = random.SystemRandom()
         total_weight = sum(weight for _entry, weight in eligible)

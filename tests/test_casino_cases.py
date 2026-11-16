@@ -124,7 +124,8 @@ def test_casino_pool_is_weekly_and_unique():
                     entry["item_id"] for entry in await m.bot._casino_pool()
                 ]
             assert week47 != week48
-            assert len(set(week47) & set(week48)) == 10
+            assert set(week47) == set(week48)
+            assert len(set(week47)) == 15
         finally:
             await db.close()
 
@@ -144,12 +145,12 @@ def test_casino_state_cases_and_odds():
             bronze = casino["cases"][0]
             assert bronze["id"] == "bronze_case"
             assert bronze["currency"] == "coins"
-            assert bronze["price"] == 500
+            assert bronze["price"] > 0
             assert bronze["odds"]
             assert abs(sum(item["chance"] for item in bronze["stars"]) - 100) < 0.2
             golden = casino["cases"][2]
             assert golden["currency"] == "gems"
-            assert golden["price"] == 20
+            assert golden["price"] > 0
             assert casino["history"] == []
         finally:
             await db.close()
@@ -159,7 +160,7 @@ def test_casino_state_cases_and_odds():
 
 def test_casino_case_open_spends_coins_and_grants_item():
     async def run():
-        db = await _setup(coins=10_000)
+        db = await _setup(coins=100_000)
         try:
             result = await m.bot.handle_web_game_command(
                 {
@@ -172,7 +173,7 @@ def test_casino_case_open_spends_coins_and_grants_item():
             )
             assert result["ok"] is True
             assert result["action"] == "case_open"
-            assert result["price"] == 500
+            assert result["price"] > 0
             assert result["currency"] == "coins"
             assert result["item"]["item_id"].endswith("_gen")
             assert 0 <= result["item"]["stars"] <= 2
@@ -184,7 +185,7 @@ def test_casino_case_open_spends_coins_and_grants_item():
                 "SELECT coins FROM players WHERE user_id = 2"
             ) as cursor:
                 coins = int((await cursor.fetchone())[0])
-            assert coins == 9_500
+            assert coins == 100_000 - result["price"]
             async with db.execute(
                 "SELECT COUNT(*) FROM casino_case_opens WHERE user_id = 2"
             ) as cursor:
@@ -206,7 +207,7 @@ def test_casino_case_open_spends_coins_and_grants_item():
 
 def test_casino_case_open_uses_gems():
     async def run():
-        db = await _setup(gems=20)
+        db = await _setup(gems=5000)
         try:
             result = await m.bot.handle_web_game_command(
                 {
@@ -219,11 +220,13 @@ def test_casino_case_open_uses_gems():
             )
             assert result["ok"] is True
             assert result["currency"] == "gems"
-            assert result["price"] == 20
+            assert result["price"] > 0
             async with db.execute(
                 "SELECT gems FROM players WHERE user_id = 2"
             ) as cursor:
-                assert int((await cursor.fetchone())[0]) == 0
+                assert int((await cursor.fetchone())[0]) == (
+                    5000 - result["price"]
+                )
         finally:
             await db.close()
 
