@@ -454,10 +454,13 @@ class DashboardSync:
             member = member_map.get(user_id)
             status = "online" if user_id in active_ids else "offline"
             joined = ""
+            avatar = ""
             if member is not None:
                 joined_at = getattr(member, "joined_at", None)
                 if joined_at is not None:
                     joined = joined_at.date().isoformat()
+                display_avatar = getattr(member, "display_avatar", None)
+                avatar = str(getattr(display_avatar, "url", "") or "")
 
             result.append(
                 {
@@ -465,6 +468,7 @@ class DashboardSync:
                     "discord_id": str(user_id),
                     "name": name,
                     "handle": handle,
+                    "avatar": avatar,
                     "clan": str(row[8] or "Без клана"),
                     "level": int(row[3] or 0),
                     "coins": int(row[1] or 0),
