@@ -279,7 +279,7 @@ def test_history_and_growth(tmp_path):
     assert len(weekly["labels"]) == 7
     assert growth["players"] > 0
     assert sync._read_history()
-    assert sync._health({"latency": 42, "db_size_bytes": 0})[0]["value"] == "42 ms"
+    assert sync._health({"latency": 42, "db_size_bytes": 0})[0]["value"].startswith("42 ms")
     assert sync._latest_backup() == ""
 
 

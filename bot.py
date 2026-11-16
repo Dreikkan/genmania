@@ -18,6 +18,7 @@ from pathlib import Path
 import asyncio
 import contextvars
 import math
+import time
 
 from gen_mania.config import (
     BACKUP_INTERVAL_HOURS,
@@ -1568,6 +1569,16 @@ intents = discord.Intents.default()
 intents.members = True
 
 
+def _percentile(values: list[float], percentile: float) -> float:
+    """Простой percentile без внешних зависимостей."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = int(round((len(ordered) - 1) * percentile / 100.0))
+    index = max(0, min(len(ordered) - 1, index))
+    return round(float(ordered[index]), 1)
+
+
 class CastleBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
@@ -1584,6 +1595,11 @@ class CastleBot(commands.Bot):
         self.dashboard_sync = None
         self.web_game = None
         self._web_game_table_ready = False
+        self._gateway_latency_samples: list[float] = []
+        self._event_loop_lag_samples: list[float] = []
+        self._gateway_reconnects = 0
+        self._gateway_resumes = 0
+        self._last_disconnect_at: str | None = None
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -1659,6 +1675,7 @@ class CastleBot(commands.Bot):
                 "weekly_report_task", self.weekly_report_task
             ),
             self._spawn_background("retention_task", self.retention_task),
+            self._spawn_background("diagnostics_task", self.diagnostics_task),
             self._spawn_background("health_writer", self.health_writer),
         ]
 
@@ -7554,6 +7571,43 @@ class CastleBot(commands.Bot):
             if latency is not None and not math.isnan(latency)
             else None
         )
+        latency_samples = getattr(
+            self, "_gateway_latency_samples", []
+        ) or []
+        lag_samples = getattr(
+            self, "_event_loop_lag_samples", []
+        ) or []
+        latency_p50 = _percentile(latency_samples, 50)
+        latency_p95 = _percentile(latency_samples, 95)
+        lag_current = (
+            round(lag_samples[-1], 1) if lag_samples else 0.0
+        )
+        lag_p95 = _percentile(lag_samples, 95)
+        current_latency = snapshot["gateway_latency_ms"]
+        if current_latency is None and latency_samples:
+            current_latency = round(latency_samples[-1], 1)
+        if current_latency is None:
+            gateway_status = "unknown"
+        elif current_latency > 1000 or lag_current > 250:
+            gateway_status = "error"
+        elif current_latency > 300 or lag_current > 100:
+            gateway_status = "warning"
+        else:
+            gateway_status = "ok"
+        snapshot["gateway_latency_p50_ms"] = latency_p50
+        snapshot["gateway_latency_p95_ms"] = latency_p95
+        snapshot["event_loop_lag_ms"] = lag_current
+        snapshot["event_loop_lag_p95_ms"] = lag_p95
+        snapshot["gateway_status"] = gateway_status
+        snapshot["gateway_reconnects"] = int(
+            getattr(self, "_gateway_reconnects", 0) or 0
+        )
+        snapshot["gateway_resumes"] = int(
+            getattr(self, "_gateway_resumes", 0) or 0
+        )
+        snapshot["last_disconnect_at"] = str(
+            getattr(self, "_last_disconnect_at", "") or ""
+        )
         snapshot["db_path"] = self.db_path
         db_size = 0
         if self.db_path:
@@ -7577,6 +7631,39 @@ class CastleBot(commands.Bot):
             except (aiosqlite.Error, OSError) as exc:
                 snapshot["db_quick_check"] = f"error: {exc}"
         return snapshot
+
+    async def diagnostics_task(self):
+        """Собирает latency, event loop lag и статистику переподключений."""
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                started = time.perf_counter()
+                await asyncio.sleep(0.1)
+                lag = max(
+                    0.0,
+                    (time.perf_counter() - started - 0.1) * 1000.0,
+                )
+                self._event_loop_lag_samples.append(lag)
+                latency = getattr(self, "latency", None)
+                if (
+                    latency is not None
+                    and math.isfinite(latency)
+                    and latency > 0
+                ):
+                    self._gateway_latency_samples.append(
+                        latency * 1000.0
+                    )
+                for samples in (
+                    self._gateway_latency_samples,
+                    self._event_loop_lag_samples,
+                ):
+                    if len(samples) > 240:
+                        del samples[:-240]
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("DIAGNOSTICS: ошибка сбора метрик")
+            await asyncio.sleep(15)
 
     async def health_writer(self):
         """Пишет health.json для внешнего мониторинга."""
@@ -31368,6 +31455,20 @@ async def on_ready():
         return
     bot._guild_access_synced = True
     await sync_all_guild_access()
+
+
+@bot.event
+async def on_disconnect():
+    if not bot.is_closed():
+        bot._gateway_reconnects += 1
+        bot._last_disconnect_at = datetime.datetime.now(
+            datetime.timezone.utc
+        ).isoformat()
+
+
+@bot.event
+async def on_resume():
+    bot._gateway_resumes += 1
 
 
 @bot.event
