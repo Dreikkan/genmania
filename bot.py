@@ -3760,6 +3760,217 @@ class CastleBot(commands.Bot):
             "completed": sum(1 for item in items if item["completed"]),
         }
 
+    async def _web_game_title_set(
+        self, command: dict, guild, member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        title_id = str(payload.get("title_id") or "").strip()
+        if title_id not in TITLES:
+            raise ValueError("Неизвестный титул.")
+        user_id = int(member.id)
+        unlocked = await get_unlocked_titles(user_id)
+        if title_id not in unlocked:
+            raise ValueError("Титул ещё не открыт.")
+        name = TITLES[title_id][0]
+        await self.db.execute(
+            "UPDATE players SET title = ? WHERE user_id = ?",
+            (name, user_id),
+        )
+        await commit_if_needed()
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "title_set",
+            "title_id": title_id,
+            "title": name,
+            "message": f"Титул изменён на «{name}».",
+            "state": state,
+        }
+
+    async def _web_game_prestige_do(self, guild, member) -> dict:
+        user_id = int(member.id)
+        ok, message, gain, points = await do_prestige(user_id, guild.id)
+        if not ok:
+            raise ValueError(message.replace("❌", "").strip())
+        message = (
+            f"Перерождение завершено: +{gain} очков престижа. "
+            f"Всего очков: {points}."
+        )
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "prestige_do",
+            "gain": int(gain),
+            "points": int(points),
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_achievements_state(self, user_id: int) -> dict:
+        """Достижения: открытые и закрытые, награды и дата."""
+        async with self.db.execute(
+            "SELECT id, name, description, reward_gems "
+            "FROM achievements ORDER BY reward_gems ASC, name ASC"
+        ) as c:
+            rows = await c.fetchall()
+        async with self.db.execute(
+            "SELECT achievement_id, unlocked_at "
+            "FROM player_achievements WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            unlocked_rows = await c.fetchall()
+        unlocked = {
+            str(row[0]): str(row[1] or "") for row in unlocked_rows
+        }
+        prestige = await get_prestige_points(user_id)
+        scale = reward_scale(prestige)
+        items = []
+        for ach_id, name, description, reward in rows:
+            ach_id = str(ach_id)
+            items.append(
+                {
+                    "id": ach_id,
+                    "name": str(name or ach_id),
+                    "description": str(description or ""),
+                    "reward_gems": max(
+                        1, int(int(reward or 0) * scale)
+                    ),
+                    "unlocked": ach_id in unlocked,
+                    "unlocked_at": unlocked.get(ach_id, ""),
+                }
+            )
+        return {
+            "items": items,
+            "total": len(items),
+            "unlocked": sum(1 for item in items if item["unlocked"]),
+            "scale": round(scale, 2),
+        }
+
+    async def _web_game_titles_state(self, user_id: int) -> dict:
+        """Титулы: текущий, открытые и условия получения."""
+        unlocked = await get_unlocked_titles(user_id)
+        async with self.db.execute(
+            "SELECT title FROM players WHERE user_id = ?", (user_id,)
+        ) as c:
+            row = await c.fetchone()
+        current = str((row[0] if row else "") or "Новичок")
+        items = []
+        for title_id, (name, requirement) in TITLES.items():
+            bonus_type, bonus_value = TITLE_BONUSES.get(
+                title_id, (None, 0.0)
+            )
+            items.append(
+                {
+                    "id": title_id,
+                    "name": name,
+                    "requirement": requirement,
+                    "bonus_type": bonus_type or "",
+                    "bonus_label": (
+                        BTYPE_NAMES.get(bonus_type, "")
+                        if bonus_type
+                        else ""
+                    ),
+                    "bonus_pct": round(float(bonus_value) * 100, 1),
+                    "unlocked": title_id in unlocked,
+                    "current": name == current,
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                not item["current"],
+                not item["unlocked"],
+            )
+        )
+        return {
+            "items": items,
+            "total": len(items),
+            "unlocked": sum(1 for item in items if item["unlocked"]),
+            "current": current,
+        }
+
+    async def _web_game_prestige_state(self, user_id: int) -> dict:
+        """Престиж: очки, бонус, доступное перерождение и блокеры."""
+        async with self.db.execute(
+            "SELECT COALESCE(lifetime_production, 0), "
+            "COALESCE(prestige_points, 0) "
+            "FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+        total, points = row if row else (0, 0)
+        total = int(total or 0)
+        points = int(points or 0)
+        gain = int(prestige_gain_from_lifetime(total, points))
+        next_cost = int(prestige_point_cost(points))
+        next_need = max(0, next_cost - total) if gain <= 0 else 0
+        progress = (
+            100
+            if gain > 0 or next_cost <= 0
+            else min(100, round(total / next_cost * 100, 1))
+        )
+        bonus_pct = int(
+            min(
+                points * PRESTIGE_BONUS_PER_POINT,
+                PRESTIGE_BONUS_CAP,
+            )
+            * 100
+        )
+        blockers = []
+        checks = (
+            (
+                "вклад",
+                "SELECT 1 FROM bank_deposits WHERE user_id = ?",
+            ),
+            (
+                "кредит",
+                "SELECT 1 FROM bank_loans WHERE user_id = ? "
+                "AND COALESCE(status, 'active') = 'active'",
+            ),
+            (
+                "ордера",
+                "SELECT 1 FROM market_orders WHERE user_id = ? "
+                "AND status = 'active'",
+            ),
+            (
+                "аукционы",
+                "SELECT 1 FROM auctions WHERE seller_id = ? "
+                "AND status = 'active'",
+            ),
+            (
+                "почту",
+                "SELECT 1 FROM mailbox WHERE user_id = ?",
+            ),
+        )
+        for label, sql in checks:
+            try:
+                async with self.db.execute(sql, (user_id,)) as c:
+                    if await c.fetchone():
+                        blockers.append(label)
+            except Exception:
+                continue
+        return {
+            "points": points,
+            "bonus_pct": bonus_pct,
+            "gain": gain,
+            "total_production": total,
+            "next_cost": next_cost,
+            "next_need": int(next_need),
+            "progress": progress,
+            "can_prestige": bool(gain > 0 and not blockers),
+            "blockers": blockers,
+            "max_bonus_pct": int(PRESTIGE_BONUS_CAP * 100),
+            "reward_scale_pct": round(
+                (reward_scale(points) - 1) * 100, 1
+            ),
+            "base_cost": int(PRESTIGE_BASE_REQUIREMENT),
+            "step_cost": int(PRESTIGE_STEP_REQUIREMENT),
+            "start_coins": int(DEFAULT_START_COINS),
+            "start_grid": int(START_GRID),
+            "storage_size": int(STORAGE_SIZE),
+        }
+
     async def _web_game_season_state(self, user_id: int) -> dict:
         """Сезон: уровень, XP, премиум и трек наград."""
         data = await get_season_data(user_id)
@@ -3855,6 +4066,9 @@ class CastleBot(commands.Bot):
                     "daily_quests": None,
                     "story_quests": None,
                     "season": None,
+                    "achievements": None,
+                    "titles": None,
+                    "prestige": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3887,6 +4101,9 @@ class CastleBot(commands.Bot):
                     "daily_quests": None,
                     "story_quests": None,
                     "season": None,
+                    "achievements": None,
+                    "titles": None,
+                    "prestige": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4150,6 +4367,23 @@ class CastleBot(commands.Bot):
         except Exception:
             log.exception("WEB_GAME: не удалось получить сезон")
             season_state = None
+        try:
+            achievements_state = await self._web_game_achievements_state(
+                user_id
+            )
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить достижения")
+            achievements_state = None
+        try:
+            titles_state = await self._web_game_titles_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить титулы")
+            titles_state = None
+        try:
+            prestige_state = await self._web_game_prestige_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить престиж")
+            prestige_state = None
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -4202,6 +4436,9 @@ class CastleBot(commands.Bot):
             "daily_quests": daily_quests_state,
             "story_quests": story_quests_state,
             "season": season_state,
+            "achievements": achievements_state,
+            "titles": titles_state,
+            "prestige": prestige_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -6770,6 +7007,10 @@ class CastleBot(commands.Bot):
             return await self._web_game_season_claim(guild, member)
         if action == "season_buy_premium":
             return await self._web_game_season_buy_premium(guild, member)
+        if action == "title_set":
+            return await self._web_game_title_set(command, guild, member)
+        if action == "prestige_do":
+            return await self._web_game_prestige_do(guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":

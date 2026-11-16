@@ -305,6 +305,84 @@ def test_web_game_progress_actions():
     asyncio.run(run())
 
 
+def test_web_game_achievements_titles_prestige():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems, lifetime_production) "
+            "VALUES (1, 1000, 500, 150000)"
+        )
+        await db.execute(
+            "INSERT INTO player_achievements (user_id, achievement_id) "
+            "VALUES (1, 'first_craft')"
+        )
+        await db.commit()
+        try:
+            state = await m.bot.handle_web_game_command(
+                {
+                    "id": "meta-state",
+                    "action": "state",
+                    "user_id": "1",
+                    "guild_id": "42",
+                }
+            )
+            json.dumps(state)
+            assert state["achievements"]["total"] == m.ACHIEVEMENTS_COUNT
+            assert state["achievements"]["unlocked"] == 1
+            assert state["titles"]["current"] == "Новичок"
+            assert state["titles"]["unlocked"] >= 1
+            assert state["prestige"]["points"] == 0
+            assert state["prestige"]["gain"] == 1
+            assert state["prestige"]["can_prestige"] is True
+
+            title = await m.bot.handle_web_game_command(
+                {
+                    "id": "title-set",
+                    "action": "title_set",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"title_id": "novice"},
+                }
+            )
+            assert title["ok"] is True
+            assert title["state"]["titles"]["current"] == "Новичок"
+            with pytest.raises(ValueError):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "title-locked",
+                        "action": "title_set",
+                        "user_id": "1",
+                        "guild_id": "42",
+                        "payload": {"title_id": "rich"},
+                    }
+                )
+
+            prestige = await m.bot.handle_web_game_command(
+                {
+                    "id": "prestige-do",
+                    "action": "prestige_do",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert prestige["ok"] is True
+            assert prestige["state"]["prestige"]["points"] == 1
+            assert prestige["state"]["prestige"]["bonus_pct"] == 5
+            assert prestige["state"]["prestige"]["can_prestige"] is False
+            assert prestige["state"]["player"]["coins"] == m.DEFAULT_START_COINS
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_state_collect_and_admin():
     async def run():
         db = await aiosqlite.connect(":memory:")
