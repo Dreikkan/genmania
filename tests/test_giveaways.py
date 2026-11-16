@@ -312,6 +312,76 @@ def test_giveaway_embed_uses_bot_or_server_as_organizer():
     asyncio.run(run())
 
 
+def test_giveaway_join_view_detects_local_admin():
+    async def run():
+        db = await _init()
+        original_join = m.join_giveaway
+        original_get_settings = m.get_settings
+        original_is_admin = m.bot._is_web_admin
+        captured = {}
+        try:
+            class FakeMember:
+                id = 7
+
+            class FakeGuild:
+                id = 100
+                owner_id = 1
+
+                def get_member(self, user_id):
+                    return FakeMember() if user_id == 7 else None
+
+            class Response:
+                def __init__(self):
+                    self.messages = []
+
+                async def send_message(self, *args, **kwargs):
+                    self.messages.append((args, kwargs))
+
+            class Interaction:
+                user = SimpleNamespace(id=7)
+                guild = FakeGuild()
+                guild_id = 100
+                message = None
+                response = Response()
+
+            async def fake_settings(guild_id):
+                return {"admin_role_id": 55}
+
+            async def fake_join(
+                giveaway_id, user_id, guild_id, is_admin=False
+            ):
+                captured["is_admin"] = is_admin
+                return False, "no"
+
+            checked = []
+
+            def fake_is_web_admin(guild, member, admin_role_id):
+                checked.append((guild.id, member.id, admin_role_id))
+                return True
+
+            m.get_settings = fake_settings
+            m.join_giveaway = fake_join
+            m.bot._is_web_admin = fake_is_web_admin
+            view = m.GiveawayJoinView(1)
+            interaction = Interaction()
+            await view.join(interaction)
+            assert captured["is_admin"] is True
+            assert checked == [(100, 7, 55)]
+            assert interaction.response.messages
+
+            m.bot._is_web_admin = lambda *args: False
+            interaction = Interaction()
+            await view.join(interaction)
+            assert captured["is_admin"] is False
+        finally:
+            m.join_giveaway = original_join
+            m.get_settings = original_get_settings
+            m.bot._is_web_admin = original_is_admin
+            await _close(db)
+
+    asyncio.run(run())
+
+
 def test_finish_giveaway_pays_winners_without_creator_charge():
     async def run():
         db = await _init(coins=10_000)
