@@ -1545,6 +1545,7 @@ def test_web_game_clan_create_apply_and_approve():
             )
             applications = leader_state["clan"]["details"]["applications"]
             assert len(applications) == 1
+            assert applications[0]["avatar"] == "https://example.test/avatar.png"
 
             decided = await m.bot.handle_web_game_command(
                 {
@@ -1561,6 +1562,9 @@ def test_web_game_clan_create_apply_and_approve():
             assert decided["ok"] is True
             assert decided["approved"] is True
             assert decided["state"]["clan"]["details"]["members_count"] == 2
+            members = decided["state"]["clan"]["details"]["members"]
+            approved = [item for item in members if item["user_id"] == "3"]
+            assert approved and approved[0]["avatar"] == "https://example.test/avatar.png"
             assert decided["state"]["clan"]["details"]["applications"] == []
 
             member_state = await m.bot.handle_web_game_command(

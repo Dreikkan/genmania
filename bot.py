@@ -2414,10 +2414,13 @@ class CastleBot(commands.Bot):
     async def _web_game_clan_state(
         self, user_id: int, guild: discord.Guild | None = None
     ) -> dict:
-        def display_name(raw_user_id: int) -> str:
+        def resolve_user(raw_user_id: int):
             uid = int(raw_user_id or 0)
             member = guild.get_member(uid) if guild is not None else None
-            user = member or self.get_user(uid)
+            return uid, member or self.get_user(uid)
+
+        def display_name(raw_user_id: int) -> str:
+            uid, user = resolve_user(raw_user_id)
             if user is None:
                 return f"ID {uid}"
             return (
@@ -2425,6 +2428,15 @@ class CastleBot(commands.Bot):
                 or getattr(user, "name", None)
                 or f"ID {uid}"
             )
+
+        def avatar_url(raw_user_id: int) -> str:
+            _uid, user = resolve_user(raw_user_id)
+            if user is None:
+                return ""
+            try:
+                return str(getattr(user.display_avatar, "url", "") or "")
+            except Exception:
+                return ""
 
         role_labels = {
             "leader": "Лидер",
@@ -2576,6 +2588,7 @@ class CastleBot(commands.Bot):
                         {
                             "user_id": str(raw_uid),
                             "name": display_name(int(raw_uid)),
+                            "avatar": avatar_url(int(raw_uid)),
                             "role": member_role,
                             "role_label": role_labels.get(
                                 member_role, member_role
@@ -2657,6 +2670,7 @@ class CastleBot(commands.Bot):
                                     "id": str(app_id),
                                     "user_id": str(target_id),
                                     "name": display_name(int(target_id)),
+                                    "avatar": avatar_url(int(target_id)),
                                     "created_at": str(created_at or ""),
                                 }
                             )
