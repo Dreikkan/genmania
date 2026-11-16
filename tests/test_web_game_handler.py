@@ -305,6 +305,71 @@ def test_web_game_progress_actions():
     asyncio.run(run())
 
 
+def test_web_game_mailbox_state_and_claim():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins) VALUES (1, 1000)"
+        )
+        async with db.execute("SELECT id FROM items LIMIT 1") as c:
+            item_id = (await c.fetchone())[0]
+        await db.execute(
+            "INSERT INTO mailbox (user_id, item_id, quantity, stars, reason) "
+            "VALUES (1, ?, 2, 0, 'Награда')",
+            (item_id,),
+        )
+        await db.commit()
+        try:
+            state = await m.bot.handle_web_game_command(
+                {
+                    "id": "mail-state",
+                    "action": "state",
+                    "user_id": "1",
+                    "guild_id": "42",
+                }
+            )
+            assert state["mailbox"]["count"] == 1
+            assert state["mailbox"]["items"][0]["quantity"] == 2
+
+            claimed = await m.bot.handle_web_game_command(
+                {
+                    "id": "mail-claim",
+                    "action": "mailbox_claim",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert claimed["ok"] is True
+            assert claimed["claimed"] == 1
+            assert claimed["state"]["mailbox"]["count"] == 0
+            async with db.execute(
+                "SELECT COUNT(*) FROM inventory WHERE user_id = 1"
+            ) as c:
+                assert (await c.fetchone())[0] >= 1
+
+            empty = await m.bot.handle_web_game_command(
+                {
+                    "id": "mail-empty",
+                    "action": "mailbox_claim",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert empty["message"] == "Почта пуста."
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_web_game_maintenance_blocks_regular_members():
     async def run():
         db = await aiosqlite.connect(":memory:")

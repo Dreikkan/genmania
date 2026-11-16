@@ -4058,6 +4058,51 @@ class CastleBot(commands.Bot):
             "track": track,
         }
 
+    async def _web_game_mailbox_state(self, user_id: int) -> dict:
+        """Почта: предметы, которые не поместились в инвентарь."""
+        async with self.db.execute(
+            "SELECT m.id, m.item_id, m.quantity, m.stars, i.name, "
+            "m.reason, m.created_at "
+            "FROM mailbox m LEFT JOIN items i ON i.id = m.item_id "
+            "WHERE m.user_id = ? ORDER BY m.id ASC LIMIT 100",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+        items = []
+        for mid, item_id, quantity, stars, name, reason, created_at in rows:
+            items.append(
+                {
+                    "id": int(mid),
+                    "item_id": str(item_id or ""),
+                    "name": str(name or item_id or "Предмет"),
+                    "quantity": int(quantity or 1),
+                    "stars": int(stars or 0),
+                    "reason": str(reason or ""),
+                    "created_at": str(created_at or ""),
+                }
+            )
+        return {"items": items, "count": len(items)}
+
+    async def _web_game_mailbox_claim(self, guild, member) -> dict:
+        user_id = int(member.id)
+        claimed, failed = await claim_mailbox_items(user_id)
+        if claimed == 0 and failed == 0:
+            message = "Почта пуста."
+        else:
+            message = (
+                f"Получено: {claimed}. "
+                f"Не поместилось: {failed}."
+            )
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "mailbox_claim",
+            "claimed": int(claimed),
+            "failed": int(failed),
+            "message": message,
+            "state": state,
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -4097,6 +4142,7 @@ class CastleBot(commands.Bot):
                     "achievements": None,
                     "titles": None,
                     "prestige": None,
+                    "mailbox": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4132,6 +4178,7 @@ class CastleBot(commands.Bot):
                     "achievements": None,
                     "titles": None,
                     "prestige": None,
+                    "mailbox": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4421,6 +4468,11 @@ class CastleBot(commands.Bot):
         except Exception:
             log.exception("WEB_GAME: не удалось получить престиж")
             prestige_state = None
+        try:
+            mailbox_state = await self._web_game_mailbox_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить почту")
+            mailbox_state = None
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -4476,6 +4528,7 @@ class CastleBot(commands.Bot):
             "achievements": achievements_state,
             "titles": titles_state,
             "prestige": prestige_state,
+            "mailbox": mailbox_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -7065,6 +7118,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_title_set(command, guild, member)
         if action == "prestige_do":
             return await self._web_game_prestige_do(guild, member)
+        if action == "mailbox_claim":
+            return await self._web_game_mailbox_claim(guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
@@ -20082,6 +20137,35 @@ class ProfileView(BaseView):
         await interaction.response.defer()
         await go_back(interaction, self.author_id, fallback="main")
         
+async def claim_mailbox_items(user_id: int) -> tuple[int, int]:
+    """Забирает все предметы из почты, возвращает (получено, не поместилось)."""
+    claimed = 0
+    failed = 0
+    async with db_transaction():
+        async with bot.db.execute(
+            "SELECT id, item_id, quantity, stars FROM mailbox "
+            "WHERE user_id = ? ORDER BY id ASC",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+        for mid, item_id, quantity, stars in rows:
+            try:
+                await place_items(
+                    user_id,
+                    item_id,
+                    quantity,
+                    commit=False,
+                    stars=stars,
+                )
+                await bot.db.execute(
+                    "DELETE FROM mailbox WHERE id = ?", (mid,)
+                )
+                claimed += 1
+            except ValueError:
+                failed += 1
+    return claimed, failed
+
+
 async def build_mailbox_embed(user_id: int):
     async with bot.db.execute(
         "SELECT m.id, m.item_id, m.quantity, m.stars, i.name, i.emoji "
@@ -20132,28 +20216,7 @@ class MailboxView(BaseView):
     @discord.ui.button(label="Забрать всё", emoji=get_emoji("_approve"), style=discord.ButtonStyle.success)
     async def btn_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        claimed = 0
-        failed = 0
-        async with db_transaction():
-            async with bot.db.execute(
-                "SELECT id, item_id, quantity, stars FROM mailbox "
-                "WHERE user_id = ? ORDER BY id ASC",
-                (self.author_id,),
-            ) as c:
-                rows = await c.fetchall()
-            for mid, item_id, quantity, stars in rows:
-                try:
-                    await place_items(
-                        self.author_id,
-                        item_id,
-                        quantity,
-                        commit=False,
-                        stars=stars,
-                    )
-                    await bot.db.execute("DELETE FROM mailbox WHERE id = ?", (mid,))
-                    claimed += 1
-                except ValueError:
-                    failed += 1
+        claimed, failed = await claim_mailbox_items(self.author_id)
 
         embed, count = await build_mailbox_embed(self.author_id)
         await interaction.edit_original_response(
