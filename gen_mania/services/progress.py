@@ -30,6 +30,9 @@ class ProgressRuntime:
         self._reward_scale_getter: Callable[[], Callable] = (
             lambda: lambda points: 1.0
         )
+        self._prestige_getter: Callable[[], Callable] = (
+            lambda: lambda user_id: 0
+        )
         self.story_quests: dict = {}
         self.quest_pool: dict = {}
         self.daily_rewards: dict = {}
@@ -53,6 +56,7 @@ class ProgressRuntime:
         add_clan_xp_getter: Callable[[], Callable],
         today_str_getter: Callable[[], Callable],
         reward_scale_getter: Callable[[], Callable],
+        prestige_getter: Callable[[], Callable],
         story_quests: dict,
         quest_pool: dict,
         daily_rewards: dict,
@@ -75,6 +79,7 @@ class ProgressRuntime:
         self._today_str_getter = today_str_getter
         self._clan_quests_getter = clan_quests_getter
         self._reward_scale_getter = reward_scale_getter
+        self._prestige_getter = prestige_getter
         self.story_quests = story_quests
         self.quest_pool = quest_pool
         self.daily_rewards = daily_rewards
@@ -132,6 +137,9 @@ class ProgressRuntime:
 
     def reward_scale(self, prestige_points: int) -> float:
         return self._reward_scale_getter()(prestige_points)
+
+    async def get_prestige_points(self, user_id: int):
+        return await self._prestige_getter()(user_id)
 
 
 def make_progress_layer(runtime: ProgressRuntime):
@@ -550,6 +558,88 @@ def make_progress_layer(runtime: ProgressRuntime):
         claimed = json.loads(claimed_json or "[]")
         return list(progress.keys()), progress, claimed
 
+    async def claim_daily_quest(
+        user_id: int,
+        quest_id: str,
+        guild_id: int | None = None,
+    ) -> dict:
+        """Выдаёт награду за выполненный ежедневный квест."""
+        quests, progress, claimed = await get_or_create_daily_quests(user_id)
+        if quest_id not in quests or quest_id in claimed:
+            return {"ok": False, "reason": "Недоступно."}
+        meta = runtime.quest_pool.get(quest_id)
+        if meta is None:
+            return {"ok": False, "reason": "Неизвестный квест."}
+        desc, target, reward_gems, reward_coins = meta
+        current = int(progress.get(quest_id, 0) or 0)
+        if current < target:
+            return {
+                "ok": False,
+                "reason": f"Не выполнено: {current}/{target}.",
+            }
+
+        prestige = await runtime.get_prestige_points(user_id)
+        scale = runtime.reward_scale(prestige)
+        reward_gems = max(1, int(reward_gems * scale))
+        reward_coins = max(1, int(reward_coins * scale))
+
+        async with runtime.transaction():
+            async with runtime.db.execute(
+                "SELECT daily_quest_progress, daily_quest_claimed "
+                "FROM players WHERE user_id = ?",
+                (user_id,),
+            ) as c:
+                row = await c.fetchone()
+            if not row:
+                return {"ok": False, "reason": "Профиль не найден."}
+            try:
+                fresh_progress = json.loads(row[0] or "{}")
+                fresh_claimed = json.loads(row[1] or "[]")
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": "Награда уже получена."}
+            if not isinstance(fresh_progress, dict):
+                fresh_progress = {}
+            if not isinstance(fresh_claimed, list):
+                fresh_claimed = []
+            if quest_id in fresh_claimed:
+                return {"ok": False, "reason": "Награда уже получена."}
+            if int(fresh_progress.get(quest_id, 0) or 0) < target:
+                return {"ok": False, "reason": "Квест ещё не выполнен."}
+
+            fresh_claimed.append(quest_id)
+            await runtime.db.execute(
+                "UPDATE players SET daily_quest_claimed = ?, "
+                "gems = gems + ?, coins = coins + ?, "
+                "total_gems_earned = total_gems_earned + ?, "
+                "total_coins_earned = total_coins_earned + ?, "
+                "lifetime_production = lifetime_production + ? "
+                "WHERE user_id = ?",
+                (
+                    json.dumps(fresh_claimed),
+                    reward_gems,
+                    reward_coins,
+                    reward_gems,
+                    reward_coins,
+                    reward_coins,
+                    user_id,
+                ),
+            )
+
+        await runtime.add_season_xp(
+            user_id,
+            runtime.season_xp_amount("quest"),
+            guild_id,
+            action="quest",
+        )
+        return {
+            "ok": True,
+            "quest_id": quest_id,
+            "title": desc,
+            "gems": reward_gems,
+            "coins": reward_coins,
+            "scale": round(scale, 2),
+        }
+
     async def update_quest_progress(
         user_id: int, quest_id: str, amount: int = 1
     ):
@@ -641,6 +731,7 @@ def make_progress_layer(runtime: ProgressRuntime):
         claim_daily,
         check_achievements,
         get_or_create_daily_quests,
+        claim_daily_quest,
         update_quest_progress,
         get_or_create_clan_quests,
         update_clan_quest,
