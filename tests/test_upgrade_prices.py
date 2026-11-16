@@ -110,4 +110,4 @@ def test_clan_upgrade_embed_shows_next_quadratic_cost():
 
 def test_upgrade_prices_use_targeted_migration():
     assert m.CONTENT_VERSION == 11
-    assert m.SCHEMA_VERSION == 18
+    assert m.SCHEMA_VERSION == 19

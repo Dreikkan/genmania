@@ -1237,6 +1237,55 @@ def pet_effective_level(level: int) -> float:
     )
 
 # ============================================================
+#  🎰 КАЗИНО: КЕЙСЫ
+# ============================================================
+
+CASE_POOL_SIZE = 15
+CASINO_DAY_LIMIT = 60
+
+CASINO_CASES = (
+    {
+        "id": "bronze_case",
+        "name": "Медный кейс",
+        "desc": "Начальные и средние генераторы. Хороший старт коллекции.",
+        "currency": "coins",
+        "price": 500,
+        "weights": {"common": 100, "uncommon": 45, "rare": 10},
+        "stars": ((0, 80), (1, 17), (2, 3)),
+    },
+    {
+        "id": "silver_case",
+        "name": "Серебряный кейс",
+        "desc": "Редкие и эпические генераторы с шансом на звезду.",
+        "currency": "coins",
+        "price": 12000,
+        "weights": {
+            "uncommon": 25,
+            "rare": 55,
+            "epic": 20,
+            "legendary": 3,
+        },
+        "stars": ((0, 62), (1, 26), (2, 10), (3, 2)),
+    },
+    {
+        "id": "golden_case",
+        "name": "Золотой кейс",
+        "desc": "Эпические, легендарные и мифические генераторы за гемы.",
+        "currency": "gems",
+        "price": 20,
+        "weights": {
+            "rare": 15,
+            "epic": 55,
+            "legendary": 25,
+            "mythic": 5,
+        },
+        "stars": ((0, 40), (1, 32), (2, 20), (3, 7), (4, 1)),
+    },
+)
+
+
+
+# ============================================================
 #  🤖 АВТОСБОРЩИК
 # ============================================================
 
@@ -3405,6 +3454,332 @@ class CastleBot(commands.Bot):
             },
         }
 
+    # ---------- Казино: кейсы ----------
+
+    @staticmethod
+    def _casino_week_bounds(
+        now: datetime.datetime | None = None,
+    ) -> tuple[int, int, datetime.datetime, datetime.datetime]:
+        moment = now or datetime.datetime.now(datetime.timezone.utc)
+        iso = moment.isocalendar()
+        start = (moment - datetime.timedelta(days=moment.weekday())).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        return iso.year, iso.week, start, start + datetime.timedelta(days=7)
+
+    @staticmethod
+    def _casino_item_emoji(
+        emoji: str, emoji_by_star: str | None, stars: int
+    ) -> str:
+        try:
+            mapping = json.loads(emoji_by_star or "{}")
+        except (TypeError, ValueError):
+            mapping = {}
+        if isinstance(mapping, dict):
+            value = mapping.get(str(int(stars)))
+            if value:
+                return str(value)
+        return str(emoji or "📦")
+
+    async def _casino_pool(self) -> list[dict]:
+        """Недельный пул из 15 генераторов, сдвигается каждую неделю."""
+        async with self.db.execute(
+            "SELECT id, name, rarity, price, emoji, "
+            "COALESCE(emoji_by_star, '{}') FROM items "
+            "WHERE id GLOB '*_gen' ORDER BY price ASC, id ASC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        total = len(rows)
+        if not total:
+            return []
+        year, week, starts, ends = self._casino_week_bounds()
+        size = min(CASE_POOL_SIZE, total)
+        offset = ((year * 53 + week) * 5) % total
+        pool = []
+        for position in range(size):
+            (
+                item_id,
+                name,
+                rarity,
+                price,
+                emoji,
+                emoji_by_star,
+            ) = rows[(offset + position) % total]
+            pool.append(
+                {
+                    "position": position + 1,
+                    "item_id": str(item_id),
+                    "name": str(name or item_id),
+                    "rarity": str(rarity or "common"),
+                    "price": int(float(price or 0)),
+                    "emoji": str(emoji or "📦"),
+                    "_emoji_by_star": str(emoji_by_star or "{}"),
+                }
+            )
+        return pool
+
+    async def _web_game_casino_state(self, user_id: int) -> dict:
+        year, week, starts, ends = self._casino_week_bounds()
+        pool = await self._casino_pool()
+        pool_rarities = {entry["rarity"] for entry in pool}
+
+        cases = []
+        for case in CASINO_CASES:
+            weights = {
+                rarity: weight
+                for rarity, weight in case["weights"].items()
+                if weight > 0 and rarity in pool_rarities
+            }
+            if not weights and pool:
+                weights = {rarity: 1 for rarity in pool_rarities}
+            total_weight = sum(weights.values()) or 1
+            stars_total = sum(chance for _stars, chance in case["stars"]) or 1
+            cases.append(
+                {
+                    "id": case["id"],
+                    "name": case["name"],
+                    "desc": case["desc"],
+                    "currency": case["currency"],
+                    "price": int(case["price"]),
+                    "odds": [
+                        {
+                            "rarity": rarity,
+                            "label": RARITY_NAMES.get(rarity, rarity),
+                            "chance": round(
+                                weight / total_weight * 100, 1
+                            ),
+                        }
+                        for rarity, weight in weights.items()
+                    ],
+                    "stars": [
+                        {
+                            "stars": int(stars),
+                            "chance": round(chance / stars_total * 100, 1),
+                        }
+                        for stars, chance in case["stars"]
+                    ],
+                }
+            )
+
+        history = []
+        async with self.db.execute(
+            "SELECT o.case_id, o.item_id, o.stars, o.currency, o.price, "
+            "o.created_at, COALESCE(i.name, o.item_id), "
+            "COALESCE(i.rarity, 'common'), COALESCE(i.emoji, '📦'), "
+            "COALESCE(i.emoji_by_star, '{}') "
+            "FROM casino_case_opens o LEFT JOIN items i ON i.id = o.item_id "
+            "WHERE o.user_id = ? ORDER BY o.id DESC LIMIT 10",
+            (user_id,),
+        ) as cursor:
+            for (
+                case_id,
+                item_id,
+                stars,
+                currency,
+                price,
+                created_at,
+                name,
+                rarity,
+                emoji,
+                emoji_by_star,
+            ) in await cursor.fetchall():
+                case_name = next(
+                    (
+                        case["name"]
+                        for case in CASINO_CASES
+                        if case["id"] == str(case_id)
+                    ),
+                    str(case_id),
+                )
+                stars_int = int(stars or 0)
+                history.append(
+                    {
+                        "case_id": str(case_id),
+                        "case_name": case_name,
+                        "item_id": str(item_id),
+                        "name": str(name),
+                        "rarity": str(rarity),
+                        "stars": stars_int,
+                        "emoji": self._casino_item_emoji(
+                            str(emoji), str(emoji_by_star), stars_int
+                        ),
+                        "currency": str(currency),
+                        "price": int(price or 0),
+                        "at": str(created_at or ""),
+                    }
+                )
+
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM casino_case_opens "
+            "WHERE user_id = ? AND date(created_at) = date('now')",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        opened_today = int(row[0] or 0) if row else 0
+
+        return {
+            "week": {
+                "year": int(year),
+                "week": int(week),
+                "starts_at": starts.isoformat(),
+                "ends_at": ends.isoformat(),
+            },
+            "pool": [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if not key.startswith("_")
+                }
+                for entry in pool
+            ],
+            "cases": cases,
+            "history": history,
+            "opened_today": opened_today,
+            "day_limit": int(CASINO_DAY_LIMIT),
+        }
+
+    async def _web_game_case_open(
+        self, command: dict, guild: discord.Guild, member: discord.Member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        case_id = str(payload.get("case_id") or "").strip()
+        case = next(
+            (entry for entry in CASINO_CASES if entry["id"] == case_id),
+            None,
+        )
+        if case is None:
+            raise ValueError("Неизвестный кейс.")
+
+        user_id = int(member.id)
+        pool = await self._casino_pool()
+        if not pool:
+            raise ValueError("Недельный пул кейсов пуст. Попробуйте позже.")
+
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM casino_case_opens "
+            "WHERE user_id = ? AND date(created_at) = date('now')",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row and int(row[0] or 0) >= CASINO_DAY_LIMIT:
+            raise ValueError(
+                f"Дневной лимит кейсов: {CASINO_DAY_LIMIT}. "
+                "Возвращайтесь завтра."
+            )
+
+        currency = str(case["currency"])
+        column = "coins" if currency == "coins" else "gems"
+        price = int(case["price"])
+        weights = case["weights"]
+        eligible = [
+            (entry, int(weights.get(entry["rarity"], 0)))
+            for entry in pool
+            if int(weights.get(entry["rarity"], 0)) > 0
+        ]
+        if not eligible:
+            eligible = [(entry, 1) for entry in pool]
+
+        rng = random.SystemRandom()
+        total_weight = sum(weight for _entry, weight in eligible)
+        roll = rng.uniform(0, total_weight)
+        upto = 0.0
+        chosen = eligible[-1][0]
+        for entry, weight in eligible:
+            upto += weight
+            if roll <= upto:
+                chosen = entry
+                break
+
+        stars_total = sum(chance for _stars, chance in case["stars"])
+        star_roll = rng.uniform(0, stars_total)
+        star_upto = 0.0
+        stars = int(case["stars"][0][0])
+        for star_value, chance in case["stars"]:
+            star_upto += chance
+            if star_roll <= star_upto:
+                stars = int(star_value)
+                break
+
+        item_id = str(chosen["item_id"])
+        item_name = str(chosen["name"])
+        item_emoji = self._casino_item_emoji(
+            str(chosen["emoji"]),
+            str(chosen.get("_emoji_by_star") or "{}"),
+            stars,
+        )
+        placed = "inventory"
+
+        async with db_transaction():
+            cursor = await self.db.execute(
+                f"UPDATE players SET {column} = {column} - ? "
+                f"WHERE user_id = ? AND {column} >= ?",
+                (price, user_id, price),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Не хватает средств для открытия кейса.")
+            try:
+                await place_items(
+                    user_id,
+                    item_id,
+                    1,
+                    commit=False,
+                    stars=stars,
+                )
+            except ValueError:
+                await self.db.execute(
+                    "INSERT INTO mailbox "
+                    "(user_id, item_id, quantity, stars, reason) "
+                    "VALUES (?, ?, 1, ?, 'case')",
+                    (user_id, item_id, stars),
+                )
+                placed = "mailbox"
+            await self.db.execute(
+                "INSERT INTO casino_case_opens "
+                "(user_id, guild_id, case_id, item_id, stars, currency, "
+                "price) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    guild.id,
+                    case_id,
+                    item_id,
+                    stars,
+                    currency,
+                    price,
+                ),
+            )
+
+        await sort_inventory(user_id, "profile")
+        await sort_inventory(user_id, "storage")
+        state = await self._web_game_state(user_id, guild.id)
+        stars_label = f" {stars}★" if stars else ""
+        message = (
+            f"{case['name']}: выпал «{item_name}»{stars_label}."
+        )
+        if placed == "mailbox":
+            message += " Места не было — предмет отправлен в почту."
+        return {
+            "ok": True,
+            "action": "case_open",
+            "case_id": case_id,
+            "currency": currency,
+            "price": price,
+            "placed": placed,
+            "message": message,
+            "item": {
+                "item_id": item_id,
+                "name": item_name,
+                "emoji": item_emoji,
+                "stars": stars,
+                "rarity": str(chosen["rarity"]),
+            },
+            "state": state,
+        }
+
     async def _web_game_pets_state(self, user_id: int) -> dict:
         """Питомцы игрока: активный, коллекция, магазин и кулдауны."""
         active = await get_active_pet(user_id)
@@ -4520,6 +4895,7 @@ class CastleBot(commands.Bot):
                     "prestige": None,
                     "mailbox": None,
                     "upgrades": None,
+                    "casino": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4557,6 +4933,7 @@ class CastleBot(commands.Bot):
                     "prestige": None,
                     "mailbox": None,
                     "upgrades": None,
+                    "casino": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -4875,6 +5252,11 @@ class CastleBot(commands.Bot):
         except Exception:
             log.exception("WEB_GAME: не удалось получить улучшения")
             upgrades_state = None
+        try:
+            casino_state = await self._web_game_casino_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить казино")
+            casino_state = None
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -4932,6 +5314,7 @@ class CastleBot(commands.Bot):
             "prestige": prestige_state,
             "mailbox": mailbox_state,
             "upgrades": upgrades_state,
+            "casino": casino_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -7503,6 +7886,8 @@ class CastleBot(commands.Bot):
             return await self._web_game_auction_cancel(
                 command, guild, member
             )
+        if action == "case_open":
+            return await self._web_game_case_open(command, guild, member)
         if action == "pet_buy":
             return await self._web_game_pet_buy(command, guild, member)
         if action == "pet_activate":
@@ -8107,6 +8492,20 @@ class CastleBot(commands.Bot):
                 quantity INTEGER DEFAULT 1,
                 stars INTEGER DEFAULT 0,
                 reason TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_case_opens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER,
+                case_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                stars INTEGER DEFAULT 0,
+                currency TEXT NOT NULL,
+                price INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -9423,6 +9822,7 @@ class CastleBot(commands.Bot):
             "CREATE INDEX IF NOT EXISTS idx_duel_history_loser ON duel_history(loser_id)",
             "CREATE INDEX IF NOT EXISTS idx_user_notifications_user ON user_notifications(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_mailbox_user ON mailbox(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_casino_opens_user ON casino_case_opens(user_id, id DESC)",
             "CREATE INDEX IF NOT EXISTS idx_players_coins ON players(coins)",
             "CREATE INDEX IF NOT EXISTS idx_players_gems ON players(gems)",
             "CREATE INDEX IF NOT EXISTS idx_players_last_collected ON players(last_collected)",
