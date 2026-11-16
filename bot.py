@@ -1767,6 +1767,53 @@ class CastleBot(commands.Bot):
                 )
                 applied.append("admin_role_id")
 
+        if "welcome_channel" in settings:
+            raw = str(settings["welcome_channel"] or "").strip()
+            if raw.startswith("<#") and raw.endswith(">"):
+                raw = raw[2:-1]
+            if raw.startswith("#"):
+                raw = raw[1:].strip()
+            channel_id = None
+            if raw in {"", "0", "нет", "none", "None"}:
+                channel_id = None
+            elif raw.isdigit():
+                channel = guild.get_channel(int(raw))
+                if channel is not None and hasattr(channel, "send"):
+                    channel_id = channel.id
+                else:
+                    warnings.append(
+                        f"welcome_channel: канал {raw} не найден"
+                    )
+            else:
+                channel = next(
+                    (
+                        item
+                        for item in guild.text_channels
+                        if item.name.casefold() == raw.casefold()
+                    ),
+                    None,
+                )
+                if channel is not None:
+                    channel_id = channel.id
+                else:
+                    warnings.append(
+                        f"welcome_channel: канал «{raw}» не найден"
+                    )
+            if channel_id is not None or raw in {
+                "",
+                "0",
+                "нет",
+                "none",
+                "None",
+            }:
+                await save_setting(
+                    guild_id,
+                    "welcome_channel",
+                    channel_id,
+                    actor_id=actor_id,
+                )
+                applied.append("welcome_channel")
+
         return {
             "ok": bool(applied),
             "applied": applied,
@@ -6652,7 +6699,8 @@ class CastleBot(commands.Bot):
                 disabled_commands TEXT DEFAULT '[]',
                 status_roles TEXT DEFAULT '{{}}',
                 battlepass_enabled INTEGER DEFAULT 1,
-                admin_role_id INTEGER DEFAULT NULL
+                admin_role_id INTEGER DEFAULT NULL,
+                welcome_channel_id INTEGER DEFAULT NULL
             )
         """)
 
@@ -6665,6 +6713,7 @@ class CastleBot(commands.Bot):
             ("status_roles", "TEXT DEFAULT '{}'"),
             ("battlepass_enabled", "INTEGER DEFAULT 1"),
             ("admin_role_id", "INTEGER DEFAULT NULL"),
+            ("welcome_channel_id", "INTEGER DEFAULT NULL"),
         ]:
             await ensure_column(self.db, "guild_settings", column, definition)
 
@@ -8457,6 +8506,7 @@ _SETTINGS_DEFAULTS = {
     "battlepass_enabled": True,
     "admin_role_id": None,
     "tax_rate": DEFAULT_TAX_RATE,
+    "welcome_channel": None,
 }
 
 SETTINGS_RUNTIME = SettingsRuntime()
@@ -29710,6 +29760,49 @@ async def on_guild_remove(guild):
 @bot.event
 async def on_member_join(member):
     _tax_rate_cache.pop(member.id, None)
+    if getattr(member, "bot", False):
+        return
+    try:
+        settings = await get_settings(member.guild.id)
+        raw_channel = settings.get("welcome_channel")
+        channel = None
+        if raw_channel:
+            try:
+                channel = member.guild.get_channel(int(raw_channel))
+            except (TypeError, ValueError):
+                channel = None
+        if channel is None or not hasattr(channel, "send"):
+            return
+        embed = BotEmbed(
+            title="Добро пожаловать!",
+            description=(
+                f"{member.mention}, добро пожаловать на **{member.guild.name}**!\n"
+                "Постройте энергостанцию, собирайте доход и развивайте клан.\n"
+                "Начните с команды **/меню**."
+            ),
+            color=0x9B59B6,
+        )
+        embed.add_field(
+            name="Стартовый баланс",
+            value=(
+                f"{int(settings.get('start_coins') or 0)} "
+                f"{settings.get('currency_coins') or 'монет'}"
+            ),
+            inline=True,
+        )
+        try:
+            embed.set_thumbnail(url=member.display_avatar.url)
+        except Exception:
+            pass
+        await channel.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        log.warning(
+            "WELCOME: не удалось отправить приветствие в guild %s",
+            getattr(member.guild, "id", None),
+            exc_info=True,
+        )
+    except Exception:
+        log.exception("WELCOME: ошибка приветствия")
 
 
 @bot.event

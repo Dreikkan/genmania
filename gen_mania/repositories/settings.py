@@ -25,6 +25,7 @@ SETTING_COLUMNS = {
     "battlepass_enabled": "battlepass_enabled",
     "admin_role_id": "admin_role_id",
     "tax_rate": "tax_rate",
+    "welcome_channel": "welcome_channel_id",
 }
 
 
@@ -141,7 +142,20 @@ def make_settings_layer(runtime: SettingsRuntime):
             "battlepass_enabled": bool(row[8]) if row[8] is not None else True,
             "admin_role_id": row[9],
             "tax_rate": row[10] if row[10] is not None else defaults["tax_rate"],
+            "welcome_channel": None,
         }
+        # Отдельный запрос, чтобы старые тестовые схемы без колонки
+        # welcome_channel_id продолжали работать.
+        try:
+            async with runtime.db.execute(
+                "SELECT welcome_channel_id FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            ) as c:
+                welcome_row = await c.fetchone()
+            if welcome_row and welcome_row[0] is not None:
+                result["welcome_channel"] = str(welcome_row[0])
+        except Exception:
+            pass
         runtime.settings_cache[guild_id] = (now_ts, result)
         return copy.deepcopy(result)
 
