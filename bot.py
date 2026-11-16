@@ -1655,6 +1655,9 @@ class CastleBot(commands.Bot):
             ),
             self._spawn_background("war_closer", self.war_closer),
             self._spawn_background("backup_task", self.backup_task),
+            self._spawn_background(
+                "weekly_report_task", self.weekly_report_task
+            ),
             self._spawn_background("retention_task", self.retention_task),
             self._spawn_background("health_writer", self.health_writer),
         ]
@@ -1685,15 +1688,62 @@ class CastleBot(commands.Bot):
             guild_id = int(update.get("guild_id") or 0)
         except (TypeError, ValueError):
             return {"ok": False, "error": "invalid guild_id"}
-        guild = self.get_guild(guild_id)
-        if guild is None:
-            return {"ok": False, "error": "guild not found"}
 
         actor_raw = update.get("requested_by")
         actor_text = str(actor_raw or "").strip()
         actor_id = int(actor_text) if actor_text.isdigit() else None
         if actor_id is None:
             return {"ok": False, "error": "missing actor"}
+
+        scope = str(update.get("scope") or "")
+        if scope == "global":
+            settings = update.get("settings")
+            if not isinstance(settings, dict):
+                return {"ok": False, "error": "missing settings"}
+            actor = self.get_user(actor_id) or discord.Object(id=actor_id)
+            if not await self._web_game_is_owner(actor):
+                return {"ok": False, "error": "actor is not bot owner"}
+
+            applied: list[str] = []
+            warnings: list[str] = []
+            if "public_stats" in settings:
+                enabled = bool(settings["public_stats"])
+                await save_global_setting(
+                    "public_stats", "1" if enabled else "0"
+                )
+                applied.append("public_stats")
+            if "weekly_report" in settings:
+                enabled = bool(settings["weekly_report"])
+                await save_global_setting(
+                    "weekly_report", "1" if enabled else "0"
+                )
+                applied.append("weekly_report")
+            if "backup_interval_hours" in settings:
+                try:
+                    hours = int(settings["backup_interval_hours"])
+                except (TypeError, ValueError):
+                    warnings.append("backup_interval_hours: не число")
+                else:
+                    if hours not in {1, 6, 12, 24, 168}:
+                        warnings.append(
+                            "backup_interval_hours: допустимо 1, 6, 12, 24, 168"
+                        )
+                    else:
+                        await save_global_setting(
+                            "backup_interval_hours", hours
+                        )
+                        applied.append("backup_interval_hours")
+            return {
+                "ok": bool(applied),
+                "applied": applied,
+                "warnings": warnings,
+                "scope": "global",
+            }
+
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            return {"ok": False, "error": "guild not found"}
+
         actor_member = guild.get_member(actor_id)
         if actor_member is None:
             return {"ok": False, "error": "actor is not a guild member"}
@@ -1707,7 +1757,6 @@ class CastleBot(commands.Bot):
         if not isinstance(settings, dict):
             return {"ok": False, "error": "missing settings"}
 
-        actor_id = int(actor_text)
         applied: list[str] = []
         warnings: list[str] = []
 
@@ -7280,15 +7329,136 @@ class CastleBot(commands.Bot):
 
     async def backup_task(self):
         await self.wait_until_ready()
+        last_backup = datetime.datetime.now()
         while not self.is_closed():
             try:
-                await asyncio.sleep(max(1, BACKUP_INTERVAL_HOURS) * 3600)
+                await asyncio.sleep(300)
+                settings = await get_global_settings()
+                interval = int(
+                    settings.get(
+                        "backup_interval_hours",
+                        BACKUP_INTERVAL_HOURS,
+                    )
+                )
+                now = datetime.datetime.now()
+                elapsed = (now - last_backup).total_seconds()
+                if elapsed < max(1, interval) * 3600:
+                    continue
                 await self.backup_database("scheduled")
+                last_backup = now
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Ошибка фонового бэкапа")
                 await asyncio.sleep(300)
+
+    async def weekly_report_task(self):
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await asyncio.sleep(3600)
+                await self._maybe_send_weekly_report()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Ошибка еженедельного отчёта")
+                await asyncio.sleep(600)
+
+    async def _maybe_send_weekly_report(self) -> None:
+        settings = await get_global_settings()
+        if not settings.get("weekly_report"):
+            return
+        now = datetime.datetime.now()
+        if now.weekday() != 6 or now.hour < 12:
+            return
+        today = now.date().isoformat()
+        if settings.get("last_weekly_report") == today:
+            return
+        owner_ids = list(getattr(self, "owner_ids", set()) or [])
+        if not owner_ids:
+            try:
+                info = await self.application_info()
+            except Exception:
+                return
+            owner_ids = [info.owner.id]
+
+        embed = await self.build_weekly_report_embed()
+        sent = False
+        for owner_id in owner_ids:
+            try:
+                user = self.get_user(owner_id) or await self.fetch_user(
+                    owner_id
+                )
+                await user.send(embed=embed)
+                sent = True
+            except Exception:
+                log.debug(
+                    "WEEKLY_REPORT: не удалось отправить %s",
+                    owner_id,
+                    exc_info=True,
+                )
+        if sent:
+            await save_global_setting("last_weekly_report", today)
+
+    async def build_weekly_report_embed(self) -> discord.Embed:
+        async with self.db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(coins), 0), "
+            "COALESCE(SUM(gems), 0), COALESCE(SUM(lifetime_production), 0) "
+            "FROM players"
+        ) as c:
+            players, coins, gems, production = await c.fetchone()
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM clans"
+        ) as c:
+            clans = (await c.fetchone())[0] or 0
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM giveaways WHERE status = 'active'"
+        ) as c:
+            giveaways = (await c.fetchone())[0] or 0
+        async with self.db.execute(
+            "SELECT user_id, coins FROM players ORDER BY coins DESC LIMIT 5"
+        ) as c:
+            top_rows = await c.fetchall()
+        top_lines = []
+        for user_id, player_coins in top_rows:
+            user = self.get_user(int(user_id))
+            name = (
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or str(user_id)
+            )
+            top_lines.append(f"**{name}** — {format_price(player_coins)}")
+        embed = BotEmbed(
+            title="Еженедельный отчёт",
+            description=(
+                f"Серверов: **{len(self.guilds)}** · "
+                f"игроков: **{players}** · кланов: **{clans}**"
+            ),
+            color=0x3498db,
+        )
+        embed.add_field(
+            name="Экономика",
+            value=(
+                f"Монеты: **{format_price(coins)}**\n"
+                f"Гемы: **{format_price(gems)}**\n"
+                f"Производство: **{format_price(production)}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Активность",
+            value=(
+                f"Активных розыгрышей: **{giveaways}**\n"
+                f"Всего игроков: **{players}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Топ игроков",
+            value="\n".join(top_lines) or "Нет данных",
+            inline=False,
+        )
+        return embed
 
     async def retention_task(self):
         await self.wait_until_ready()
@@ -7690,6 +7860,24 @@ class CastleBot(commands.Bot):
             "'/menu', '/genmania') "
             "WHERE welcome_text_en IS NOT NULL"
         )
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS global_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        for key, value in (
+            ("public_stats", "1"),
+            ("weekly_report", "1"),
+            ("backup_interval_hours", str(BACKUP_INTERVAL_HOURS)),
+            ("last_weekly_report", ""),
+        ):
+            await self.db.execute(
+                "INSERT OR IGNORE INTO global_settings (key, value) "
+                "VALUES (?, ?)",
+                (key, value),
+            )
 
         await self.db.execute("""
             CREATE TABLE IF NOT EXISTS gem_shop (
@@ -10954,6 +11142,49 @@ async def deny_if_disabled(interaction: discord.Interaction, command_key: str) -
             )
         return True
     return False
+
+
+async def get_global_settings() -> dict:
+    """Глобальные настройки владельца бота."""
+    result = {
+        "public_stats": True,
+        "weekly_report": True,
+        "backup_interval_hours": int(BACKUP_INTERVAL_HOURS),
+        "last_weekly_report": "",
+    }
+    try:
+        async with bot.db.execute(
+            "SELECT key, value FROM global_settings"
+        ) as c:
+            rows = await c.fetchall()
+    except Exception:
+        return result
+    for key, value in rows:
+        key = str(key)
+        value = str(value or "")
+        if key in {"public_stats", "weekly_report"}:
+            result[key] = value in {"1", "true", "True"}
+        elif key == "backup_interval_hours":
+            try:
+                hours = int(value)
+            except (TypeError, ValueError):
+                hours = int(BACKUP_INTERVAL_HOURS)
+            if hours not in {1, 6, 12, 24, 168}:
+                hours = int(BACKUP_INTERVAL_HOURS)
+            result[key] = hours
+        elif key == "last_weekly_report":
+            result[key] = value
+    return result
+
+
+async def save_global_setting(key: str, value) -> None:
+    """Сохраняет глобальную настройку владельца."""
+    await bot.db.execute(
+        "INSERT INTO global_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+    await commit_if_needed()
 
 
 async def get_guild_max_grid(guild_id: int) -> int:
