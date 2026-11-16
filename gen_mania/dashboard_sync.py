@@ -235,6 +235,7 @@ class DashboardSync:
             "economy": economy,
             "settings": await self._collect_settings(),
             "guild_settings": await self._collect_guild_settings(),
+            "global_settings": await self._collect_global_settings(),
         }
 
     def _member_map(self) -> dict[int, Any]:
@@ -680,13 +681,42 @@ class DashboardSync:
             )
         return result
 
+    async def _collect_global_settings(self) -> dict:
+        rows = await self._fetchall(
+            "SELECT key, value FROM global_settings"
+        )
+        values = {
+            str(key): str(value or "") for key, value in rows
+        }
+
+        def as_bool(key: str, default: bool = True) -> bool:
+            raw = values.get(key)
+            if raw is None:
+                return default
+            return raw in {"1", "true", "True"}
+
+        try:
+            hours = int(values.get("backup_interval_hours", ""))
+        except (TypeError, ValueError):
+            hours = int(BACKUP_INTERVAL_HOURS)
+        if hours not in {1, 6, 12, 24, 168}:
+            hours = int(BACKUP_INTERVAL_HOURS)
+        return {
+            "public_stats": as_bool("public_stats", True),
+            "weekly_report": as_bool("weekly_report", True),
+            "backup_interval_hours": hours,
+            "backup_interval": self._backup_interval_text(hours),
+        }
+
     @staticmethod
-    def _backup_interval_text() -> str:
-        hours = int(BACKUP_INTERVAL_HOURS)
+    def _backup_interval_text(hours: int | None = None) -> str:
+        hours = int(hours or BACKUP_INTERVAL_HOURS)
         if hours == 1:
             return "1 час"
         if hours in (6, 12):
             return f"{hours} часов"
+        if hours == 168:
+            return "7 дней"
         return "24 часа"
 
     @staticmethod
@@ -739,7 +769,8 @@ class DashboardSync:
             or len(getattr(guild, "members", []) or []),
             reverse=True,
         )
-        interval_text = self._backup_interval_text()
+        global_settings = await self._collect_global_settings()
+        interval_text = global_settings["backup_interval"]
         result: list[dict] = []
         for guild in guilds:
             try:
@@ -804,8 +835,8 @@ class DashboardSync:
                         if welcome_text_en is not None
                         else DEFAULT_WELCOME_TEXT_EN
                     ),
-                    "public_stats": True,
-                    "weekly_report": True,
+                    "public_stats": global_settings["public_stats"],
+                    "weekly_report": global_settings["weekly_report"],
                     "maintenance": bool(maintenance),
                     "max_grid": max(3, min(10, int(max_grid or 10))),
                     "backup_interval": interval_text,
@@ -868,6 +899,7 @@ class DashboardSync:
             tax_rate, admin_role_id = 0.02, None
             max_grid = 10
             maintenance = 0
+        global_settings = await self._collect_global_settings()
         return {
             "guild_id": int(primary.id) if primary is not None else 0,
             "guild_name": str(primary.name) if primary is not None else "—",
@@ -895,11 +927,11 @@ class DashboardSync:
                 if welcome_text_en is not None
                 else DEFAULT_WELCOME_TEXT_EN
             ),
-            "public_stats": True,
-            "weekly_report": True,
+            "public_stats": global_settings["public_stats"],
+            "weekly_report": global_settings["weekly_report"],
             "maintenance": bool(maintenance),
             "max_grid": max(3, min(10, int(max_grid or 10))),
-            "backup_interval": self._backup_interval_text(),
+            "backup_interval": global_settings["backup_interval"],
         }
 
     async def _collect_economy(self, stats: dict, weekly: dict) -> dict:

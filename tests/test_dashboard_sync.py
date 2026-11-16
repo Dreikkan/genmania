@@ -21,6 +21,7 @@ CREATE TABLE clan_members (user_id INTEGER PRIMARY KEY, clan_id INTEGER, role TE
 CREATE TABLE clan_inventory (clan_id INTEGER, slot INTEGER, item_id TEXT, stars INTEGER DEFAULT 0, PRIMARY KEY (clan_id, slot));
 CREATE TABLE clan_wars (id INTEGER PRIMARY KEY, winner_id INTEGER);
 CREATE TABLE guild_settings (guild_id INTEGER PRIMARY KEY, start_coins INTEGER, currency_coins TEXT, currency_gems TEXT, tax_rate REAL, admin_role_id INTEGER, welcome_channel_id INTEGER, welcome_text_ru TEXT, welcome_text_en TEXT, max_grid INTEGER, maintenance INTEGER);
+CREATE TABLE global_settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE market_prices (item_id TEXT PRIMARY KEY, base_price INTEGER, current_price INTEGER, demand INTEGER, supply INTEGER);
 CREATE TABLE market_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT, price INTEGER, demand INTEGER, supply INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE market_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, side TEXT, item_id TEXT, price INTEGER, quantity INTEGER, filled INTEGER, status TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
@@ -116,6 +117,14 @@ async def make_bot(tmp_path: Path, *, with_data: bool = True):
         await db.execute("INSERT INTO clan_inventory (clan_id, slot, item_id, stars) VALUES (1, 1, 'gen_1', 1)")
         await db.execute("INSERT INTO clan_wars (winner_id) VALUES (1)")
         await db.execute("INSERT INTO guild_settings (guild_id, start_coins, currency_coins, currency_gems, tax_rate, admin_role_id, welcome_channel_id, welcome_text_ru, welcome_text_en, max_grid, maintenance) VALUES (1, 500, 'монеты', 'гемы', 0.05, 123, 500, 'Привет, {member}', 'Hello, {member}', 7, 1)")
+        await db.executemany(
+            "INSERT INTO global_settings (key, value) VALUES (?, ?)",
+            [
+                ("public_stats", "0"),
+                ("weekly_report", "1"),
+                ("backup_interval_hours", "6"),
+            ],
+        )
         await db.execute("INSERT INTO market_prices (item_id, base_price, current_price, demand, supply) VALUES ('gen_1', 1000, 1200, 10, 20)")
         await db.executemany("INSERT INTO market_history (item_id, price) VALUES ('gen_1', ?)", [(1000,), (1200,)])
         await db.execute("INSERT INTO market_orders (user_id, side, item_id, price, quantity, filled, status) VALUES (1, 'buy', 'gen_1', 1200, 3, 3, 'filled')")
@@ -198,6 +207,13 @@ def test_collect_builds_live_snapshot(tmp_path, monkeypatch):
             assert payload["guild_settings"][0]["maintenance"] is True
             assert payload["settings"]["max_grid"] == 7
             assert payload["settings"]["maintenance"] is True
+            assert payload["settings"]["public_stats"] is False
+            assert payload["settings"]["backup_interval"] == "6 часов"
+            assert payload["guild_settings"][0]["public_stats"] is False
+            assert payload["guild_settings"][0]["backup_interval"] == "6 часов"
+            assert payload["global_settings"]["public_stats"] is False
+            assert payload["global_settings"]["weekly_report"] is True
+            assert payload["global_settings"]["backup_interval_hours"] == 6
             assert len(payload["activity"]["labels"]) == 30
             assert len(payload["economy"]["weekly"]["values"]) == 7
             assert payload["economy"]["split"][0]["value"] > 0

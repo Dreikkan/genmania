@@ -93,6 +93,9 @@ async def _prepare():
         "admin_id INTEGER, target_id INTEGER, guild_id INTEGER, action TEXT, "
         "details TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
+    await db.execute(
+        "CREATE TABLE global_settings (key TEXT PRIMARY KEY, value TEXT)"
+    )
     await db.execute("INSERT INTO guild_settings (guild_id) VALUES (42)")
     await db.commit()
     guild = FakeGuild()
@@ -100,6 +103,69 @@ async def _prepare():
     m._settings_cache.clear()
     m._tax_rate_cache.clear()
     return db
+
+
+def test_apply_global_settings_owner_only():
+    async def run():
+        db = await _prepare()
+        original_is_owner = m.bot.is_owner
+
+        async def fake_is_owner(user):
+            return getattr(user, "id", None) == 1
+
+        m.bot.is_owner = fake_is_owner
+        try:
+            denied = await m.bot.apply_dashboard_settings(
+                {
+                    "scope": "global",
+                    "guild_id": 0,
+                    "requested_by": "2",
+                    "settings": {"public_stats": False},
+                }
+            )
+            assert denied["ok"] is False
+
+            result = await m.bot.apply_dashboard_settings(
+                {
+                    "scope": "global",
+                    "guild_id": 0,
+                    "requested_by": "1",
+                    "settings": {
+                        "public_stats": False,
+                        "weekly_report": True,
+                        "backup_interval_hours": 6,
+                    },
+                }
+            )
+            assert result["ok"] is True
+            assert {
+                "public_stats",
+                "weekly_report",
+                "backup_interval_hours",
+            } <= set(result["applied"])
+            settings = await m.get_global_settings()
+            assert settings["public_stats"] is False
+            assert settings["weekly_report"] is True
+            assert settings["backup_interval_hours"] == 6
+
+            invalid = await m.bot.apply_dashboard_settings(
+                {
+                    "scope": "global",
+                    "guild_id": 0,
+                    "requested_by": "1",
+                    "settings": {"backup_interval_hours": 3},
+                }
+            )
+            assert invalid["ok"] is False
+            assert any(
+                "backup_interval_hours" in warning
+                for warning in invalid["warnings"]
+            )
+        finally:
+            m.bot.is_owner = original_is_owner
+            await db.close()
+
+    asyncio.run(run())
 
 
 def test_apply_dashboard_settings_valid():
