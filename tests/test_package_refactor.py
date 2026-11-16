@@ -65,7 +65,7 @@ spec.loader.exec_module(m)
 
 
 def test_package_config_and_metrics_reexports():
-    assert m.SCHEMA_VERSION == SCHEMA_VERSION == 18
+    assert m.SCHEMA_VERSION == SCHEMA_VERSION == 19
     assert m.CONTENT_VERSION == CONTENT_VERSION == 11
     assert m.DEFAULT_START_COINS == DEFAULT_START_COINS
     assert m.MetricsRegistry is MetricsRegistry
