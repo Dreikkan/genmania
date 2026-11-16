@@ -380,7 +380,7 @@ def test_giveaway_helpers_and_join_view():
             finally:
                 m.bot.get_channel = original_get_channel
 
-            async def join_false(*args):
+            async def join_false(*args, **kwargs):
                 return False, "no"
 
             original_join = m.join_giveaway
@@ -395,7 +395,7 @@ def test_giveaway_helpers_and_join_view():
             finally:
                 m.join_giveaway = original_join
 
-            async def join_true(*args):
+            async def join_true(*args, **kwargs):
                 return True, "ok"
 
             async def get_giveaway(giveaway_id):

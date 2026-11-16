@@ -239,9 +239,16 @@ def test_join_rules_for_server_and_global_giveaways():
             ok, message = await m.join_giveaway(server_id, 3, 999)
             assert not ok and "другом сервере" in message
 
+            ok, message = await m.join_giveaway(
+                server_id, 4, 100, is_admin=True
+            )
+            assert not ok and "Администраторы" in message
+
             global_id = await _insert_giveaway(
                 db, guild_id=None, scope="global", ends_at=_future()
             )
+            ok, message = await m.join_giveaway(global_id, 1, 100)
+            assert ok, message
             ok, message = await m.join_giveaway(global_id, 3, 999)
             assert ok, message
 
@@ -263,6 +270,43 @@ def test_join_rules_for_server_and_global_giveaways():
             ok, message = await m.join_giveaway(clan_giveaway, 2, 100)
             assert not ok and "клане" in message
         finally:
+            await _close(db)
+
+    asyncio.run(run())
+
+
+def test_giveaway_embed_uses_bot_or_server_as_organizer():
+    async def run():
+        db = await _init()
+        original_user = getattr(m.bot._connection, "user", None)
+        original_get_guild = m.bot.get_guild
+        try:
+            m.bot._connection.user = SimpleNamespace(
+                display_name="Gen Mania Bot", name="genmania"
+            )
+            m.bot.get_guild = lambda guild_id: (
+                SimpleNamespace(name="420 SQUAD")
+                if guild_id == 100
+                else None
+            )
+            server_id = await _insert_giveaway(db, guild_id=100)
+            server_embed = await m.build_giveaway_embed(
+                await m.get_giveaway(server_id)
+            )
+            assert "**Организатор:** 420 SQUAD" in server_embed.description
+            assert "Создал:" not in server_embed.description
+
+            global_id = await _insert_giveaway(
+                db, guild_id=None, scope="global"
+            )
+            global_embed = await m.build_giveaway_embed(
+                await m.get_giveaway(global_id)
+            )
+            assert "**Организатор:** Gen Mania Bot" in global_embed.description
+            assert "<@1>" not in global_embed.description
+        finally:
+            m.bot._connection.user = original_user
+            m.bot.get_guild = original_get_guild
             await _close(db)
 
     asyncio.run(run())
@@ -447,7 +491,7 @@ def test_create_global_giveaway_posts_to_all_servers():
                 assert (await c.fetchone())[0] == 2
 
             ok, message = await m.join_giveaway(1, 1, 999)
-            assert not ok and "своём" in message
+            assert ok, message
             ok, message = await m.join_giveaway(1, 2, 999)
             assert ok, message
             ok, message = await m.join_giveaway(1, 3, 999)
