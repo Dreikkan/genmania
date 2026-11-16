@@ -85,7 +85,7 @@ async def _prepare():
         "bot_name TEXT, custom_emojis TEXT, currency_coins TEXT, currency_gems TEXT, "
         "prefix TEXT, start_coins INTEGER, disabled_commands TEXT, status_roles TEXT, "
         "battlepass_enabled INTEGER, admin_role_id INTEGER, tax_rate REAL, "
-        "welcome_channel_id INTEGER)"
+        "welcome_channel_id INTEGER, welcome_text_ru TEXT, welcome_text_en TEXT)"
     )
     await db.execute(
         "CREATE TABLE admin_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -160,6 +160,28 @@ def test_apply_dashboard_settings_welcome_channel():
             )
             assert by_id["ok"] is True
 
+            texts = await m.bot.apply_dashboard_settings(
+                {
+                    "guild_id": 42,
+                    "requested_by": "1",
+                    "settings": {
+                        "welcome_text_ru": "Привет, {member}!",
+                        "welcome_text_en": "Hello, {member}!",
+                    },
+                }
+            )
+            assert texts["ok"] is True
+            assert "welcome_text_ru" in texts["applied"]
+            assert "welcome_text_en" in texts["applied"]
+            async with db.execute(
+                "SELECT welcome_text_ru, welcome_text_en "
+                "FROM guild_settings WHERE guild_id = 42"
+            ) as cursor:
+                assert (await cursor.fetchone()) == (
+                    "Привет, {member}!",
+                    "Hello, {member}!",
+                )
+
             missing = await m.bot.apply_dashboard_settings(
                 {
                     "guild_id": 42,
@@ -196,7 +218,11 @@ def test_on_member_join_sends_welcome():
                 {
                     "guild_id": 42,
                     "requested_by": "1",
-                    "settings": {"welcome_channel": "#welcome"},
+                    "settings": {
+                        "welcome_channel": "#welcome",
+                        "welcome_text_ru": "RU: {member} · {start_coins} {currency}",
+                        "welcome_text_en": "EN: {member} · {server}",
+                    },
                 }
             )
             guild = m.bot.get_guild(42)
@@ -206,8 +232,8 @@ def test_on_member_join_sends_welcome():
             assert channel.sent
             embed = channel.sent[0][1].get("embed")
             assert embed is not None
-            assert "<@3>" in embed.description
-            assert "420 SQUAD" in embed.description
+            assert "RU: <@3> · 8 монеты" in embed.description
+            assert "EN: <@3> · 420 SQUAD" in embed.description
         finally:
             await db.close()
 
