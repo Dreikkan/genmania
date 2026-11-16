@@ -3890,7 +3890,11 @@ class CastleBot(commands.Bot):
             "current": current,
         }
 
-    async def _web_game_prestige_state(self, user_id: int) -> dict:
+    async def _web_game_prestige_state(
+        self,
+        user_id: int,
+        start_coins: int = DEFAULT_START_COINS,
+    ) -> dict:
         """Престиж: очки, бонус, доступное перерождение и блокеры."""
         async with self.db.execute(
             "SELECT COALESCE(lifetime_production, 0), "
@@ -3966,7 +3970,7 @@ class CastleBot(commands.Bot):
             ),
             "base_cost": int(PRESTIGE_BASE_REQUIREMENT),
             "step_cost": int(PRESTIGE_STEP_REQUIREMENT),
-            "start_coins": int(DEFAULT_START_COINS),
+            "start_coins": int(start_coins),
             "start_grid": int(START_GRID),
             "storage_size": int(STORAGE_SIZE),
         }
@@ -4380,7 +4384,16 @@ class CastleBot(commands.Bot):
             log.exception("WEB_GAME: не удалось получить титулы")
             titles_state = None
         try:
-            prestige_state = await self._web_game_prestige_state(user_id)
+            try:
+                start_coins = int(
+                    settings.get("start_coins", DEFAULT_START_COINS)
+                )
+            except (TypeError, ValueError):
+                start_coins = DEFAULT_START_COINS
+            start_coins = max(0, min(start_coins, MAX_START_COINS))
+            prestige_state = await self._web_game_prestige_state(
+                user_id, start_coins
+            )
         except Exception:
             log.exception("WEB_GAME: не удалось получить престиж")
             prestige_state = None
