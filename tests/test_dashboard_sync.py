@@ -20,7 +20,7 @@ CREATE TABLE clans (id INTEGER PRIMARY KEY, name TEXT, treasury INTEGER DEFAULT 
 CREATE TABLE clan_members (user_id INTEGER PRIMARY KEY, clan_id INTEGER, role TEXT, joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE clan_inventory (clan_id INTEGER, slot INTEGER, item_id TEXT, stars INTEGER DEFAULT 0, PRIMARY KEY (clan_id, slot));
 CREATE TABLE clan_wars (id INTEGER PRIMARY KEY, winner_id INTEGER);
-CREATE TABLE guild_settings (guild_id INTEGER PRIMARY KEY, start_coins INTEGER, currency_coins TEXT, currency_gems TEXT, tax_rate REAL, admin_role_id INTEGER);
+CREATE TABLE guild_settings (guild_id INTEGER PRIMARY KEY, start_coins INTEGER, currency_coins TEXT, currency_gems TEXT, tax_rate REAL, admin_role_id INTEGER, welcome_channel_id INTEGER);
 CREATE TABLE market_prices (item_id TEXT PRIMARY KEY, base_price INTEGER, current_price INTEGER, demand INTEGER, supply INTEGER);
 CREATE TABLE market_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT, price INTEGER, demand INTEGER, supply INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE market_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, side TEXT, item_id TEXT, price INTEGER, quantity INTEGER, filled INTEGER, status TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
@@ -47,6 +47,12 @@ class FakeMember(FakeUser):
         self.joined_at = dt.datetime.now(dt.timezone.utc)
 
 
+class FakeChannel:
+    def __init__(self, channel_id: int, name: str):
+        self.id = channel_id
+        self.name = name
+
+
 class FakeGuild:
     def __init__(self, guild_id: int, name: str, members: list[FakeMember]):
         self.id = guild_id
@@ -58,6 +64,13 @@ class FakeGuild:
         self.features = {"COMMUNITY"}
         self.preferred_locale = "ru"
         self.premium_subscription_count = 5
+        self.text_channels = [FakeChannel(500, "welcome")]
+
+    def get_channel(self, channel_id: int):
+        return next(
+            (channel for channel in self.text_channels if channel.id == channel_id),
+            None,
+        )
 
 
 class FakeBot:
@@ -102,7 +115,7 @@ async def make_bot(tmp_path: Path, *, with_data: bool = True):
         await db.execute("INSERT INTO clan_members (user_id, clan_id, role) VALUES (1, 1, 'leader')")
         await db.execute("INSERT INTO clan_inventory (clan_id, slot, item_id, stars) VALUES (1, 1, 'gen_1', 1)")
         await db.execute("INSERT INTO clan_wars (winner_id) VALUES (1)")
-        await db.execute("INSERT INTO guild_settings (guild_id, start_coins, currency_coins, currency_gems, tax_rate, admin_role_id) VALUES (1, 500, 'монеты', 'гемы', 0.05, 123)")
+        await db.execute("INSERT INTO guild_settings (guild_id, start_coins, currency_coins, currency_gems, tax_rate, admin_role_id, welcome_channel_id) VALUES (1, 500, 'монеты', 'гемы', 0.05, 123, 500)")
         await db.execute("INSERT INTO market_prices (item_id, base_price, current_price, demand, supply) VALUES ('gen_1', 1000, 1200, 10, 20)")
         await db.executemany("INSERT INTO market_history (item_id, price) VALUES ('gen_1', ?)", [(1000,), (1200,)])
         await db.execute("INSERT INTO market_orders (user_id, side, item_id, price, quantity, filled, status) VALUES (1, 'buy', 'gen_1', 1200, 3, 3, 'filled')")
@@ -171,11 +184,13 @@ def test_collect_builds_live_snapshot(tmp_path, monkeypatch):
             assert payload["transactions"][0]["amount"] == -3600
             assert payload["logs"][0]["type"] == "grant"
             assert payload["settings"]["tax_rate"] == 5.0
+            assert payload["settings"]["welcome_channel"] == "#welcome"
             assert payload["admin_user_ids"] == [1]
             assert payload["admin_guilds"] == {"1": ["1"]}
             assert payload["guild_settings"][0]["guild_id"] == 1
             assert payload["guild_settings"][0]["start_coins"] == 500
             assert payload["guild_settings"][0]["guild_name"] == "420 SQUAD"
+            assert payload["guild_settings"][0]["welcome_channel"] == "#welcome"
             assert len(payload["activity"]["labels"]) == 30
             assert len(payload["economy"]["weekly"]["values"]) == 7
             assert payload["economy"]["split"][0]["value"] > 0
