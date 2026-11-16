@@ -3530,6 +3530,275 @@ class CastleBot(commands.Bot):
             "state": state,
         }
 
+    async def _web_game_daily_claim(self, guild, member) -> dict:
+        user_id = int(member.id)
+        result = await claim_daily(user_id)
+        if not result.get("ok"):
+            raise ValueError(
+                result.get("reason") or "Награда уже получена."
+            )
+        message = (
+            f"Ежедневная награда за день {result['day']}: "
+            f"+{result['coins']} монет, +{result['gems']} гемов."
+        )
+        if result.get("item"):
+            message += f" Предмет: {result['item']}."
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "daily_claim",
+            "day": int(result["day"]),
+            "coins": int(result["coins"]),
+            "gems": int(result["gems"]),
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_quest_claim(
+        self, command: dict, guild, member
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        quest_id = str(payload.get("quest_id") or "").strip()
+        if not quest_id:
+            raise ValueError("Некорректный квест.")
+        user_id = int(member.id)
+        result = await claim_daily_quest(user_id, quest_id, guild.id)
+        if not result.get("ok"):
+            raise ValueError(
+                result.get("reason") or "Не удалось получить награду."
+            )
+        message = (
+            f"Награда за «{result['title']}»: "
+            f"+{result['gems']} гемов, +{result['coins']} монет."
+        )
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "quest_claim",
+            "quest_id": quest_id,
+            "gems": int(result["gems"]),
+            "coins": int(result["coins"]),
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_season_claim(self, guild, member) -> dict:
+        user_id = int(member.id)
+        ok, message, totals = await claim_season_rewards(user_id)
+        if not ok:
+            raise ValueError(message.replace("❌", "").strip())
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "season_claim",
+            "levels": int(totals.get("levels", 0)),
+            "coins": int(totals.get("coins", 0)),
+            "gems": int(totals.get("gems", 0)),
+            "catalysts": int(totals.get("catalysts", 0)),
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_season_buy_premium(self, guild, member) -> dict:
+        user_id = int(member.id)
+        ok, message = await buy_season_premium(user_id)
+        if not ok:
+            raise ValueError(message.replace("❌", "").strip())
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "season_buy_premium",
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_daily_state(self, user_id: int) -> dict:
+        """Ежедневный вход: доступность, серия и ближайшие награды."""
+        async with self.db.execute(
+            "SELECT last_daily, streak_days, COALESCE(prestige_points, 0) "
+            "FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            row = await c.fetchone()
+        last_daily, streak, prestige = row if row else (None, 0, 0)
+        streak = int(streak or 0)
+        scale = reward_scale(prestige or 0)
+        today = datetime.date.today()
+        available = True
+        next_day = 1
+        if last_daily:
+            try:
+                last_date = datetime.datetime.fromisoformat(
+                    str(last_daily)
+                ).date()
+            except (TypeError, ValueError):
+                last_date = None
+            if last_date is not None:
+                delta = (today - last_date).days
+                available = delta >= 1
+                if delta == 0:
+                    next_day = max(1, min(streak, 30))
+                elif delta == 1:
+                    next_day = min(streak + 1, 30)
+        coins, gems, item_id = DAILY_REWARDS[next_day]
+        item_name = ""
+        if item_id:
+            async with self.db.execute(
+                "SELECT name FROM items WHERE id = ?", (item_id,)
+            ) as c:
+                item_row = await c.fetchone()
+            item_name = str(item_row[0]) if item_row else str(item_id)
+        upcoming = []
+        for day in range(next_day, min(next_day + 7, 31)):
+            day_coins, day_gems, day_item = DAILY_REWARDS[day]
+            upcoming.append(
+                {
+                    "day": day,
+                    "coins": int(day_coins * scale),
+                    "gems": int(day_gems * scale),
+                    "item": str(day_item or ""),
+                }
+            )
+        return {
+            "available": bool(available),
+            "streak": streak,
+            "next_day": next_day,
+            "coins": int(coins * scale),
+            "gems": int(gems * scale),
+            "item": item_name,
+            "scale": round(scale, 2),
+            "last_daily": str(last_daily) if last_daily else "",
+            "upcoming": upcoming,
+        }
+
+    async def _web_game_daily_quests_state(self, user_id: int) -> dict:
+        """Ежедневные задания: прогресс, награды и статус получения."""
+        quests, progress, claimed = await get_or_create_daily_quests(user_id)
+        prestige = await get_prestige_points(user_id)
+        scale = reward_scale(prestige)
+        items = []
+        for quest_id in quests:
+            meta = QUEST_POOL.get(quest_id)
+            if not meta:
+                continue
+            desc, target, reward_gems, reward_coins = meta
+            current = int(progress.get(quest_id, 0) or 0)
+            target_int = int(target)
+            completed = current >= target_int
+            is_claimed = quest_id in claimed
+            items.append(
+                {
+                    "id": quest_id,
+                    "title": desc,
+                    "progress": current,
+                    "target": target_int,
+                    "completed": completed,
+                    "claimed": is_claimed,
+                    "can_claim": bool(completed and not is_claimed),
+                    "reward_gems": max(1, int(reward_gems * scale)),
+                    "reward_coins": max(1, int(reward_coins * scale)),
+                }
+            )
+        return {
+            "quests": items,
+            "scale": round(scale, 2),
+            "date": today_str(),
+            "total": len(items),
+            "claimable": sum(1 for item in items if item["can_claim"]),
+            "claimed": sum(1 for item in items if item["claimed"]),
+        }
+
+    async def _web_game_story_quests_state(self, user_id: int) -> dict:
+        """Сюжетные квесты: прогресс по главам."""
+        await sync_story_achievements(user_id)
+        async with self.db.execute(
+            "SELECT quest_id, progress, completed "
+            "FROM player_quests WHERE user_id = ?",
+            (user_id,),
+        ) as c:
+            rows = await c.fetchall()
+        progress_map = {
+            str(row[0]): (int(row[1] or 0), bool(row[2]))
+            for row in rows
+        }
+        items = []
+        for quest_id, (
+            name,
+            desc,
+            target,
+            _action,
+            reward,
+        ) in STORY_QUESTS.items():
+            current, completed = progress_map.get(quest_id, (0, False))
+            items.append(
+                {
+                    "id": quest_id,
+                    "name": name,
+                    "description": desc,
+                    "progress": current,
+                    "target": int(target),
+                    "completed": bool(completed),
+                    "reward_gems": int(reward),
+                }
+            )
+        return {
+            "quests": items,
+            "total": len(items),
+            "completed": sum(1 for item in items if item["completed"]),
+        }
+
+    async def _web_game_season_state(self, user_id: int) -> dict:
+        """Сезон: уровень, XP, премиум и трек наград."""
+        data = await get_season_data(user_id)
+        claimed_free = sorted(int(value) for value in data["claimed_free"])
+        claimed_premium = sorted(
+            int(value) for value in data["claimed_premium"]
+        )
+        claimed_free_set = set(claimed_free)
+        claimed_premium_set = set(claimed_premium)
+        level = int(data["level"])
+        premium = bool(data["premium"])
+        track = []
+        for reward_level in range(1, SEASON_LEVELS + 1):
+            free_reward = season_reward(reward_level, False)
+            premium_reward = season_reward(reward_level, True)
+            track.append(
+                {
+                    "level": reward_level,
+                    "free": free_reward,
+                    "premium": premium_reward,
+                    "free_text": season_reward_text(reward_level, False),
+                    "premium_text": season_reward_text(reward_level, True),
+                    "free_claimed": reward_level in claimed_free_set,
+                    "premium_claimed": (
+                        reward_level in claimed_premium_set
+                    ),
+                    "unlocked": reward_level <= level,
+                    "current": reward_level == level,
+                    "next": reward_level == level + 1,
+                }
+            )
+        return {
+            "season_id": data["season_id"],
+            "season_name": data["season_name"],
+            "xp": int(data["xp"]),
+            "level": level,
+            "remaining": int(data["remaining"]),
+            "needed": int(data["needed"]),
+            "premium": premium,
+            "days_left": int(data["days_left"]),
+            "claimed_free": claimed_free,
+            "claimed_premium": claimed_premium,
+            "claimable_free": list(data["claimable_free"]),
+            "claimable_premium": list(data["claimable_premium"]),
+            "levels": int(SEASON_LEVELS),
+            "premium_cost_gems": int(SEASON_PREMIUM_COST_GEMS),
+            "event_label": season_event_label() or "",
+            "track": track,
+        }
+
     async def _web_game_state(
         self, user_id: int, guild_id: int
     ) -> dict:
@@ -3562,6 +3831,10 @@ class CastleBot(commands.Bot):
                     "auction": None,
                     "raid_party": None,
                     "pets": None,
+                    "daily": None,
+                    "daily_quests": None,
+                    "story_quests": None,
+                    "season": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3590,6 +3863,10 @@ class CastleBot(commands.Bot):
                     "auction": None,
                     "raid_party": None,
                     "pets": None,
+                    "daily": None,
+                    "daily_quests": None,
+                    "story_quests": None,
+                    "season": None,
                     "starter_discount": False,
                     "sell_rate": int(SELL_RATE * 100),
                 }
@@ -3829,6 +4106,30 @@ class CastleBot(commands.Bot):
         except Exception:
             log.exception("WEB_GAME: не удалось получить питомцев")
             pets_state = None
+        try:
+            daily_state = await self._web_game_daily_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить ежедневную награду")
+            daily_state = None
+        try:
+            daily_quests_state = await self._web_game_daily_quests_state(
+                user_id
+            )
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить ежедневные квесты")
+            daily_quests_state = None
+        try:
+            story_quests_state = await self._web_game_story_quests_state(
+                user_id
+            )
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить сюжетные квесты")
+            story_quests_state = None
+        try:
+            season_state = await self._web_game_season_state(user_id)
+        except Exception:
+            log.exception("WEB_GAME: не удалось получить сезон")
+            season_state = None
 
         avatar = getattr(member.display_avatar, "url", None)
         clan_name = clan_row[1] if clan_row else None
@@ -3877,6 +4178,10 @@ class CastleBot(commands.Bot):
             "auction": auction_state,
             "raid_party": raid_party_state,
             "pets": pets_state,
+            "daily": daily_state,
+            "daily_quests": daily_quests_state,
+            "story_quests": story_quests_state,
+            "season": season_state,
             "starter_discount": bool(starter_discount),
             "sell_rate": int(SELL_RATE * 100),
             "settings": {
@@ -6437,6 +6742,14 @@ class CastleBot(commands.Bot):
             return await self._web_game_pet_activate(command, guild, member)
         if action == "pet_feed":
             return await self._web_game_pet_feed(command, guild, member)
+        if action == "daily_claim":
+            return await self._web_game_daily_claim(guild, member)
+        if action == "quest_claim":
+            return await self._web_game_quest_claim(command, guild, member)
+        if action == "season_claim":
+            return await self._web_game_season_claim(guild, member)
+        if action == "season_buy_premium":
+            return await self._web_game_season_buy_premium(guild, member)
         if action == "admin_grant":
             return await self._web_game_grant(command, guild, member)
         if action == "admin_reset":
@@ -9695,6 +10008,7 @@ PROGRESS_RUNTIME.configure(
     add_clan_xp_getter=lambda: add_clan_xp,
     today_str_getter=lambda: today_str,
     reward_scale_getter=lambda: reward_scale,
+    prestige_getter=lambda: get_prestige_points,
     story_quests=STORY_QUESTS,
     quest_pool=QUEST_POOL,
     daily_rewards=DAILY_REWARDS,
@@ -9707,6 +10021,7 @@ PROGRESS_RUNTIME.configure(
     claim_daily,
     check_achievements,
     get_or_create_daily_quests,
+    claim_daily_quest,
     update_quest_progress,
     get_or_create_clan_quests,
     update_clan_quest,
@@ -24289,34 +24604,22 @@ class ClaimQuestSelectView(SafeView):
         qid = interaction.data["values"][0]
         await interaction.response.defer()
         user_id = interaction.user.id
-        quests, progress, claimed = await get_or_create_daily_quests(user_id)
-        if qid not in quests or qid in claimed:
-            await self.fail(interaction, "❌ Недоступно.")
-            return
-        desc, target, reward_gems, reward_coins = QUEST_POOL[qid]
-        if progress[qid] < target:
-            await self.fail(interaction, f"❌ Не выполнено: {progress[qid]}/{target}.")
-            return
-        prestige = await get_prestige_points(user_id)
-        scale = reward_scale(prestige)
-        reward_gems = max(1, int(reward_gems * scale))
-        reward_coins = max(1, int(reward_coins * scale))
-        claimed.append(qid)
-        await bot.db.execute(
-            "UPDATE players SET daily_quest_claimed = ?, gems = gems + ?, coins = coins + ?, "
-            "total_gems_earned = total_gems_earned + ?, "
-            "total_coins_earned = total_coins_earned + ?, "
-            "lifetime_production = lifetime_production + ? WHERE user_id = ?",
-            (json.dumps(claimed), reward_gems, reward_coins,
-             reward_gems, reward_coins, reward_coins, user_id)
+        result = await claim_daily_quest(
+            user_id, qid, interaction.guild_id
         )
-        await commit_if_needed()
-        await add_season_xp(
-            user_id, season_xp_amount("quest"), interaction.guild_id, action="quest"
-        )
+        if not result.get("ok"):
+            await self.fail(
+                interaction,
+                f"❌ {result.get('reason', 'Недоступно.')}",
+            )
+            return
         embed = BotEmbed(
             title="🎁 Награда получена",
-            description=f"💎 **{reward_gems}** гемов и 🪙 **{reward_coins}** монет за «{desc}»!",
+            description=(
+                f"💎 **{result['gems']}** гемов и "
+                f"🪙 **{result['coins']}** монет за "
+                f"«{result['title']}»!"
+            ),
             color=0x2ecc71,
         )
         await interaction.edit_original_response(

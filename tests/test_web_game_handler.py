@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import pathlib
 import sys
 import tempfile
 from unittest import mock
 
 import aiosqlite
+import pytest
 
 BOT_PATH = pathlib.Path(__file__).resolve().parent.parent / "bot.py"
 spec = importlib.util.spec_from_file_location("genmania_web_game_handler_test", BOT_PATH)
@@ -174,6 +176,129 @@ def test_web_game_pet_actions():
             )
             assert cleared["ok"] is True
             assert cleared["state"]["pets"]["active"] is None
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_web_game_progress_actions():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        m.bot.data_dir = pathlib.Path(tempfile.mkdtemp())
+        m.bot._web_game_table_ready = False
+        await m.bot.init_db()
+        m._settings_cache.clear()
+        _guild()
+        await db.execute(
+            "INSERT INTO players (user_id, coins, gems) VALUES (1, 1000, 500)"
+        )
+        await db.commit()
+        try:
+            state = await m.bot.handle_web_game_command(
+                {
+                    "id": "progress-state",
+                    "action": "state",
+                    "user_id": "1",
+                    "guild_id": "42",
+                }
+            )
+            json.dumps(state)
+            assert state["daily"]["available"] is True
+            assert len(state["daily_quests"]["quests"]) == 3
+            assert len(state["story_quests"]["quests"]) == len(
+                m.STORY_QUESTS
+            )
+            assert state["season"]["level"] == 0
+            assert state["season"]["premium"] is False
+
+            daily = await m.bot.handle_web_game_command(
+                {
+                    "id": "daily-claim",
+                    "action": "daily_claim",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert daily["ok"] is True
+            assert daily["state"]["daily"]["available"] is False
+            with pytest.raises(ValueError):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "daily-again",
+                        "action": "daily_claim",
+                        "user_id": "1",
+                        "guild_id": "42",
+                        "payload": {},
+                    }
+                )
+
+            quest = daily["state"]["daily_quests"]["quests"][0]
+            progress = {
+                item["id"]: item["progress"]
+                for item in daily["state"]["daily_quests"]["quests"]
+            }
+            progress[quest["id"]] = quest["target"]
+            await db.execute(
+                "UPDATE players SET daily_quest_progress = ? "
+                "WHERE user_id = 1",
+                (json.dumps(progress),),
+            )
+            await db.commit()
+            quest_claimed = await m.bot.handle_web_game_command(
+                {
+                    "id": "quest-claim",
+                    "action": "quest_claim",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {"quest_id": quest["id"]},
+                }
+            )
+            assert quest_claimed["ok"] is True
+            assert quest_claimed["state"]["daily_quests"]["claimed"] >= 1
+            with pytest.raises(ValueError):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "quest-again",
+                        "action": "quest_claim",
+                        "user_id": "1",
+                        "guild_id": "42",
+                        "payload": {"quest_id": quest["id"]},
+                    }
+                )
+
+            await m.add_season_xp(1, 300, action="prestige")
+            season_claim = await m.bot.handle_web_game_command(
+                {
+                    "id": "season-claim",
+                    "action": "season_claim",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert season_claim["ok"] is True
+            assert season_claim["state"]["season"]["level"] >= 1
+            assert season_claim["state"]["season"]["claimable_free"] == []
+
+            await db.execute(
+                "UPDATE players SET gems = 1000 WHERE user_id = 1"
+            )
+            await db.commit()
+            premium = await m.bot.handle_web_game_command(
+                {
+                    "id": "season-premium",
+                    "action": "season_buy_premium",
+                    "user_id": "1",
+                    "guild_id": "42",
+                    "payload": {},
+                }
+            )
+            assert premium["ok"] is True
+            assert premium["state"]["season"]["premium"] is True
+            assert premium["state"]["season"]["claimable_premium"]
         finally:
             await db.close()
 
