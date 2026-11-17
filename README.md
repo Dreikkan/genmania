@@ -185,11 +185,11 @@ owner-only команда `/health` показывает метрики и со�
 DASHBOARD_SYNC_URL=https://genmania.tech/api/ingest.php
 DASHBOARD_SYNC_TOKEN=<тот же токен, что ingest_token в config.php сайта>
 DASHBOARD_SYNC_INTERVAL=300
-DASHBOARD_GAME_INTERVAL=5
+DASHBOARD_GAME_INTERVAL=10
 ```
 
 `DASHBOARD_GAME_INTERVAL` — период опроса игровых команд для вкладки
-«Игра» (2–60 секунд). Игровой канал использует тот же токен, что и
+«Игра» (5–60 секунд, по умолчанию 10). Игровой канал использует тот же токен, что и
 синхронизация статистики, либо отдельный `DASHBOARD_GAME_TOKEN`.
 
 Если переменные не заданы, задача синхронизации не запускается и бот
