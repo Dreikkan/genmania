@@ -1261,6 +1261,11 @@ CASINO_TABLE_LIMITS = {
     "coins": {"min": 100, "max": 1_000_000},
     "gems": {"min": 1, "max": 500},
 }
+CASINO_ROOM_CAPACITY = 5
+CASINO_ROOM_MIN_PLAYERS = 2
+CASINO_ROOM_TURN_SECONDS = 40
+CASINO_ROOM_WAIT_SECONDS = 15 * 60
+CASINO_ROOM_FINISHED_SECONDS = 2 * 60
 
 CASINO_CASES = (
     {
@@ -1679,6 +1684,8 @@ class CastleBot(commands.Bot):
         self._gateway_reconnects = 0
         self._gateway_resumes = 0
         self._last_disconnect_at: str | None = None
+        self._casino_rooms: dict[str, dict] = {}
+        self._casino_room_lock = asyncio.Lock()
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -1726,6 +1733,7 @@ class CastleBot(commands.Bot):
         # 3. Бэкап перед миграциями и инициализация таблиц
         await self.backup_database("startup")
         await self.init_db()
+        await self._casino_room_recover_stakes()
         await self.tree.sync()
 
         await self.load_application_emojis()
@@ -1754,6 +1762,7 @@ class CastleBot(commands.Bot):
                 "weekly_report_task", self.weekly_report_task
             ),
             self._spawn_background("retention_task", self.retention_task),
+            self._spawn_background("casino_room_task", self.casino_room_task),
             self._spawn_background("diagnostics_task", self.diagnostics_task),
             self._spawn_background("health_writer", self.health_writer),
         ]
@@ -4506,6 +4515,863 @@ class CastleBot(commands.Bot):
             "state": state,
             **public,
         }
+
+    # ---------- Казино: комнаты блэкджека ----------
+
+    @staticmethod
+    def _casino_room_key(guild_id: int, code: str) -> str:
+        return f"{int(guild_id)}:{str(code).upper()}"
+
+    def _casino_room_find(self, guild_id: int, code: str) -> dict | None:
+        return self._casino_rooms.get(
+            self._casino_room_key(guild_id, code)
+        )
+
+    def _casino_room_for_user(
+        self, guild_id: int, user_id: int
+    ) -> dict | None:
+        for room in self._casino_rooms.values():
+            if int(room["guild_id"]) != int(guild_id):
+                continue
+            if any(
+                int(player["user_id"]) == int(user_id)
+                for player in room["players"]
+            ):
+                return room
+        return None
+
+    @staticmethod
+    def _casino_room_player(room: dict, user_id: int) -> dict | None:
+        return next(
+            (
+                player
+                for player in room["players"]
+                if int(player["user_id"]) == int(user_id)
+            ),
+            None,
+        )
+
+    def _casino_room_code(self, guild_id: int) -> str:
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        for _ in range(30):
+            code = "".join(
+                random.SystemRandom().choice(alphabet) for _ in range(6)
+            )
+            if self._casino_room_find(guild_id, code) is None:
+                return code
+        raise ValueError("Не удалось создать комнату. Попробуйте ещё раз.")
+
+    def _casino_room_lobby(self, guild_id: int) -> list[dict]:
+        rooms = []
+        for room in self._casino_rooms.values():
+            if (
+                int(room["guild_id"]) != int(guild_id)
+                or room["status"] != "waiting"
+            ):
+                continue
+            host = self._casino_room_player(room, room["host_id"])
+            rooms.append(
+                {
+                    "code": str(room["code"]),
+                    "host_id": str(room["host_id"]),
+                    "host_name": str(host["name"]) if host else "",
+                    "players": len(room["players"]),
+                    "capacity": int(CASINO_ROOM_CAPACITY),
+                    "currency": str(room["currency"]),
+                    "bet": int(host["bet"]) if host else 0,
+                    "min_bet": int(room["min_bet"]),
+                    "max_bet": int(room["max_bet"]),
+                    "created_at": float(room["created_at"]),
+                }
+            )
+        rooms.sort(key=lambda entry: entry["created_at"])
+        return rooms
+
+    def _casino_room_snapshot(
+        self, room: dict, viewer_id: int
+    ) -> dict:
+        turn_user_id = None
+        if (
+            room["status"] == "playing"
+            and 0 <= int(room["turn_index"]) < len(room["players"])
+        ):
+            turn_user_id = int(
+                room["players"][int(room["turn_index"])]["user_id"]
+            )
+        dealer_cards = (
+            list(room["dealer"])[:1]
+            if room["dealer_hidden"]
+            else list(room["dealer"])
+        )
+        players = []
+        for player in room["players"]:
+            cards = list(player["cards"])
+            total, _soft = hand_value(cards)
+            players.append(
+                {
+                    "user_id": str(player["user_id"]),
+                    "name": str(player["name"]),
+                    "avatar": str(player.get("avatar") or ""),
+                    "seat": int(player["seat"]),
+                    "bet": int(player["bet"]),
+                    "stake": int(player["stake"]),
+                    "cards": self._blackjack_cards(cards),
+                    "total": total,
+                    "status": str(player["status"]),
+                    "doubled": bool(player["doubled"]),
+                    "auto_stood": bool(player.get("auto_stood")),
+                    "is_host": int(player["user_id"]) == int(room["host_id"]),
+                    "is_turn": int(player["user_id"]) == turn_user_id,
+                    "is_me": int(player["user_id"]) == int(viewer_id),
+                    "outcome": player.get("outcome"),
+                    "payout": int(player.get("payout") or 0),
+                    "net": int(player.get("net") or 0),
+                    "can_double": (
+                        len(cards) == 2
+                        and not player["doubled"]
+                        and player["status"] == "playing"
+                        and int(player["user_id"]) == turn_user_id
+                    ),
+                }
+            )
+        host = self._casino_room_player(room, room["host_id"])
+        return {
+            "code": str(room["code"]),
+            "guild_id": str(room["guild_id"]),
+            "host_id": str(room["host_id"]),
+            "host_name": str(host["name"]) if host else "",
+            "status": str(room["status"]),
+            "currency": str(room["currency"]),
+            "capacity": int(CASINO_ROOM_CAPACITY),
+            "min_bet": int(room["min_bet"]),
+            "max_bet": int(room["max_bet"]),
+            "players": players,
+            "dealer_cards": self._blackjack_cards(dealer_cards),
+            "dealer_hidden": bool(room["dealer_hidden"]),
+            "dealer_total": hand_value(dealer_cards)[0],
+            "turn_user_id": str(turn_user_id) if turn_user_id else None,
+            "turn_deadline": (
+                float(room["turn_deadline"])
+                if room.get("turn_deadline")
+                else None
+            ),
+            "turn_seconds": int(CASINO_ROOM_TURN_SECONDS),
+            "created_at": float(room["created_at"]),
+            "finished_at": (
+                float(room["finished_at"])
+                if room.get("finished_at")
+                else None
+            ),
+            "is_host": int(room["host_id"]) == int(viewer_id),
+        }
+
+    async def _casino_room_response(
+        self,
+        action: str,
+        guild: discord.Guild,
+        user_id: int,
+        room: dict | None,
+        message: str,
+    ) -> dict:
+        return {
+            "ok": True,
+            "action": action,
+            "message": message,
+            "room": (
+                self._casino_room_snapshot(room, user_id)
+                if room is not None
+                else None
+            ),
+            "rooms": self._casino_room_lobby(guild.id),
+            "state": await self._web_game_state(user_id, guild.id),
+        }
+
+    async def _web_game_room_state(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._casino_room_lock:
+            room = self._casino_room_for_user(guild.id, user_id)
+            return {
+                "ok": True,
+                "action": "room_state",
+                "room": (
+                    self._casino_room_snapshot(room, user_id)
+                    if room is not None
+                    else None
+                ),
+                "rooms": self._casino_room_lobby(guild.id),
+            }
+
+    async def _web_game_room_create(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        currency = str(payload.get("currency") or "coins").strip()
+        if currency not in CASINO_TABLE_LIMITS:
+            raise ValueError("Неверная валюта комнаты.")
+        try:
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная ставка.")
+        user_id = int(member.id)
+        coins, gems = await self._casino_balances(user_id)
+        balance = gems if currency == "gems" else coins
+        limits = self._casino_bet_limits(balance, currency)
+        if limits["max"] <= 0:
+            raise ValueError("Недостаточно средств для создания комнаты.")
+        if amount < limits["min"] or amount > limits["max"]:
+            raise ValueError(
+                f"Ставка должна быть от {limits['min']} до "
+                f"{limits['max']}."
+            )
+        column = "coins" if currency == "coins" else "gems"
+        async with self._casino_room_lock:
+            if self._casino_room_for_user(guild.id, user_id):
+                raise ValueError("Вы уже находитесь в комнате.")
+            code = self._casino_room_code(guild.id)
+            stake_row_id = 0
+            async with db_transaction():
+                cursor = await self.db.execute(
+                    f"UPDATE players SET {column} = {column} - ? "
+                    f"WHERE user_id = ? AND {column} >= ?",
+                    (amount, user_id, amount),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Недостаточно средств для ставки.")
+                stake = await self.db.execute(
+                    "INSERT INTO casino_blackjack_games "
+                    "(user_id, guild_id, bet, currency, status) "
+                    "VALUES (?, ?, ?, ?, 'room')",
+                    (user_id, guild.id, amount, currency),
+                )
+                stake_row_id = int(stake.lastrowid or 0)
+            now = time.time()
+            room = {
+                "code": code,
+                "guild_id": int(guild.id),
+                "host_id": user_id,
+                "currency": currency,
+                "min_bet": limits["min"],
+                "max_bet": limits["max"],
+                "status": "waiting",
+                "created_at": now,
+                "updated_at": now,
+                "finished_at": None,
+                "players": [
+                    {
+                        "user_id": user_id,
+                        "name": str(member.display_name),
+                        "avatar": str(
+                            getattr(member.display_avatar, "url", "") or ""
+                        ),
+                        "seat": 0,
+                        "bet": amount,
+                        "stake": amount,
+                        "cards": [],
+                        "status": "waiting",
+                        "doubled": False,
+                        "outcome": None,
+                        "payout": 0,
+                        "net": 0,
+                        "stake_row_id": stake_row_id,
+                    }
+                ],
+                "dealer": [],
+                "dealer_hidden": True,
+                "shoe": [],
+                "turn_index": 0,
+                "turn_deadline": None,
+            }
+            self._casino_rooms[
+                self._casino_room_key(guild.id, code)
+            ] = room
+        return await self._casino_room_response(
+            "room_create",
+            guild,
+            user_id,
+            room,
+            f"Комната {code} создана. Пригласите игроков.",
+        )
+
+    async def _web_game_room_join(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        code = str(payload.get("code") or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{6}", code):
+            raise ValueError("Некорректный код комнаты.")
+        currency = str(payload.get("currency") or "coins").strip()
+        if currency not in CASINO_TABLE_LIMITS:
+            raise ValueError("Неверная валюта комнаты.")
+        try:
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная ставка.")
+        user_id = int(member.id)
+        coins, gems = await self._casino_balances(user_id)
+        balance = gems if currency == "gems" else coins
+        limits = self._casino_bet_limits(balance, currency)
+        if limits["max"] <= 0:
+            raise ValueError("Недостаточно средств для входа.")
+        if amount < limits["min"] or amount > limits["max"]:
+            raise ValueError(
+                f"Ставка должна быть от {limits['min']} до "
+                f"{limits['max']}."
+            )
+        column = "coins" if currency == "coins" else "gems"
+        async with self._casino_room_lock:
+            room = self._casino_room_find(guild.id, code)
+            if room is None:
+                raise ValueError("Комната не найдена.")
+            if room["status"] != "waiting":
+                raise ValueError("В комнате уже идёт игра.")
+            if room["currency"] != currency:
+                raise ValueError("Валюта комнаты не совпадает.")
+            if len(room["players"]) >= CASINO_ROOM_CAPACITY:
+                raise ValueError("В комнате нет свободных мест.")
+            if self._casino_room_for_user(guild.id, user_id):
+                raise ValueError("Вы уже находитесь в комнате.")
+            used_seats = {int(p["seat"]) for p in room["players"]}
+            seat = next(
+                (
+                    index
+                    for index in range(CASINO_ROOM_CAPACITY)
+                    if index not in used_seats
+                ),
+                None,
+            )
+            if seat is None:
+                raise ValueError("В комнате нет свободных мест.")
+            stake_row_id = 0
+            async with db_transaction():
+                cursor = await self.db.execute(
+                    f"UPDATE players SET {column} = {column} - ? "
+                    f"WHERE user_id = ? AND {column} >= ?",
+                    (amount, user_id, amount),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Недостаточно средств для ставки.")
+                stake = await self.db.execute(
+                    "INSERT INTO casino_blackjack_games "
+                    "(user_id, guild_id, bet, currency, status) "
+                    "VALUES (?, ?, ?, ?, 'room')",
+                    (user_id, guild.id, amount, currency),
+                )
+                stake_row_id = int(stake.lastrowid or 0)
+            room["players"].append(
+                {
+                    "user_id": user_id,
+                    "name": str(member.display_name),
+                    "avatar": str(
+                        getattr(member.display_avatar, "url", "") or ""
+                    ),
+                    "seat": seat,
+                    "bet": amount,
+                    "stake": amount,
+                    "cards": [],
+                    "status": "waiting",
+                    "doubled": False,
+                    "outcome": None,
+                    "payout": 0,
+                    "net": 0,
+                    "stake_row_id": stake_row_id,
+                }
+            )
+            room["updated_at"] = time.time()
+        return await self._casino_room_response(
+            "room_join",
+            guild,
+            user_id,
+            room,
+            f"Вы вошли в комнату {code}.",
+        )
+
+    async def _web_game_room_leave(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._casino_room_lock:
+            room = self._casino_room_for_user(guild.id, user_id)
+            if room is None:
+                return await self._casino_room_response(
+                    "room_leave",
+                    guild,
+                    user_id,
+                    None,
+                    "Вы не находитесь в комнате.",
+                )
+            player = self._casino_room_player(room, user_id)
+            if room["status"] == "waiting":
+                if player is not None and player["bet"] > 0:
+                    column = (
+                        "gems"
+                        if room["currency"] == "gems"
+                        else "coins"
+                    )
+                    async with db_transaction():
+                        await self.db.execute(
+                            f"UPDATE players SET {column} = {column} + ? "
+                            "WHERE user_id = ?",
+                            (int(player["bet"]), user_id),
+                        )
+                        if player.get("stake_row_id"):
+                            await self.db.execute(
+                                "DELETE FROM casino_blackjack_games "
+                                "WHERE id = ? AND status = 'room'",
+                                (int(player["stake_row_id"]),),
+                            )
+                room["players"] = [
+                    entry
+                    for entry in room["players"]
+                    if int(entry["user_id"]) != user_id
+                ]
+                if room["host_id"] == user_id and room["players"]:
+                    room["host_id"] = int(room["players"][0]["user_id"])
+                if not room["players"]:
+                    self._casino_rooms.pop(
+                        self._casino_room_key(guild.id, room["code"]),
+                        None,
+                    )
+                    room = None
+                message = "Вы вышли из комнаты."
+            elif room["status"] == "playing":
+                was_turn = (
+                    0 <= int(room["turn_index"]) < len(room["players"])
+                    and int(
+                        room["players"][int(room["turn_index"])]["user_id"]
+                    )
+                    == user_id
+                )
+                if player is not None:
+                    player["status"] = "stand"
+                    player["auto_stood"] = True
+                if was_turn:
+                    await self._casino_room_advance(room)
+                else:
+                    room["updated_at"] = time.time()
+                message = "Вы вышли из раздачи. Ставка осталась в игре."
+            else:
+                room["players"] = [
+                    entry
+                    for entry in room["players"]
+                    if int(entry["user_id"]) != user_id
+                ]
+                if not room["players"]:
+                    self._casino_rooms.pop(
+                        self._casino_room_key(guild.id, room["code"]),
+                        None,
+                    )
+                    room = None
+                message = "Вы вышли из комнаты."
+        return await self._casino_room_response(
+            "room_leave", guild, user_id, room, message
+        )
+
+    async def _web_game_room_start(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._casino_room_lock:
+            room = self._casino_room_for_user(guild.id, user_id)
+            if room is None:
+                raise ValueError("Вы не находитесь в комнате.")
+            if int(room["host_id"]) != user_id:
+                raise ValueError("Только хозяин комнаты может начать игру.")
+            if room["status"] != "waiting":
+                raise ValueError("Игра уже началась.")
+            if len(room["players"]) < CASINO_ROOM_MIN_PLAYERS:
+                raise ValueError(
+                    "Нужно минимум "
+                    f"{CASINO_ROOM_MIN_PLAYERS} игрока."
+                )
+            room["status"] = "playing"
+            room["dealer"] = []
+            room["dealer_hidden"] = True
+            room["shoe"] = new_shoe()
+            room["turn_deadline"] = None
+            room["turn_index"] = 0
+            for player in room["players"]:
+                player["cards"] = [
+                    room["shoe"].pop(),
+                    room["shoe"].pop(),
+                ]
+                player["doubled"] = False
+                player["stake"] = int(player["bet"])
+                player["outcome"] = None
+                player["payout"] = 0
+                player["net"] = 0
+                player["auto_stood"] = False
+                player["status"] = (
+                    "blackjack"
+                    if is_blackjack(player["cards"])
+                    else "playing"
+                )
+            room["dealer"] = [
+                room["shoe"].pop(),
+                room["shoe"].pop(),
+            ]
+            room["updated_at"] = time.time()
+            if is_blackjack(room["dealer"]):
+                await self._casino_room_finish(room)
+                message = "У дилера блэкджек. Раздача завершена."
+            else:
+                room["turn_index"] = 0
+                await self._casino_room_begin_turns(room)
+                message = "Раздача началась."
+        return await self._casino_room_response(
+            "room_start", guild, user_id, room, message
+        )
+
+    async def _casino_room_draw(self, room: dict, cards: list[str]) -> None:
+        if not room["shoe"]:
+            room["shoe"] = new_shoe()
+        cards.append(room["shoe"].pop())
+
+    async def _casino_room_begin_turns(self, room: dict) -> None:
+        for index, player in enumerate(room["players"]):
+            if player["status"] == "playing":
+                room["turn_index"] = index
+                room["turn_deadline"] = (
+                    time.time() + CASINO_ROOM_TURN_SECONDS
+                )
+                room["updated_at"] = time.time()
+                return
+        await self._casino_room_finish(room)
+
+    async def _casino_room_advance(self, room: dict) -> None:
+        room["turn_index"] = int(room["turn_index"]) + 1
+        players = room["players"]
+        while int(room["turn_index"]) < len(players):
+            index = int(room["turn_index"])
+            if players[index]["status"] == "playing":
+                room["turn_deadline"] = (
+                    time.time() + CASINO_ROOM_TURN_SECONDS
+                )
+                room["updated_at"] = time.time()
+                return
+            room["turn_index"] = index + 1
+        await self._casino_room_finish(room)
+
+    async def _web_game_room_hit(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._casino_room_lock:
+            room = self._casino_room_for_user(guild.id, user_id)
+            if room is None:
+                raise ValueError("Вы не находитесь в комнате.")
+            if room["status"] != "playing":
+                raise ValueError("Сейчас нет активной раздачи.")
+            current = room["players"][int(room["turn_index"])]
+            if int(current["user_id"]) != user_id:
+                raise ValueError("Сейчас ход другого игрока.")
+            await self._casino_room_draw(room, current["cards"])
+            total, _soft = hand_value(current["cards"])
+            if total > 21:
+                current["status"] = "bust"
+            elif total == 21:
+                current["status"] = "stand"
+            room["updated_at"] = time.time()
+            if current["status"] == "playing":
+                room["turn_deadline"] = (
+                    time.time() + CASINO_ROOM_TURN_SECONDS
+                )
+            else:
+                await self._casino_room_advance(room)
+            message = (
+                "Перебор." if total > 21 else "Вы взяли карту."
+            )
+        return await self._casino_room_response(
+            "room_hit", guild, user_id, room, message
+        )
+
+    async def _web_game_room_stand(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._casino_room_lock:
+            room = self._casino_room_for_user(guild.id, user_id)
+            if room is None:
+                raise ValueError("Вы не находитесь в комнате.")
+            if room["status"] != "playing":
+                raise ValueError("Сейчас нет активной раздачи.")
+            current = room["players"][int(room["turn_index"])]
+            if int(current["user_id"]) != user_id:
+                raise ValueError("Сейчас ход другого игрока.")
+            current["status"] = "stand"
+            room["updated_at"] = time.time()
+            await self._casino_room_advance(room)
+            message = "Вы остановились."
+        return await self._casino_room_response(
+            "room_stand", guild, user_id, room, message
+        )
+
+    async def _web_game_room_double(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._casino_room_lock:
+            room = self._casino_room_for_user(guild.id, user_id)
+            if room is None:
+                raise ValueError("Вы не находитесь в комнате.")
+            if room["status"] != "playing":
+                raise ValueError("Сейчас нет активной раздачи.")
+            current = room["players"][int(room["turn_index"])]
+            if int(current["user_id"]) != user_id:
+                raise ValueError("Сейчас ход другого игрока.")
+            if len(current["cards"]) != 2 or current["doubled"]:
+                raise ValueError(
+                    "Удвоение доступно только на первых двух картах."
+                )
+            coins, gems = await self._casino_balances(user_id)
+            balance = gems if room["currency"] == "gems" else coins
+            bet = int(current["bet"])
+            if balance < bet:
+                raise ValueError("Недостаточно средств для удвоения.")
+            column = "gems" if room["currency"] == "gems" else "coins"
+            async with db_transaction():
+                cursor = await self.db.execute(
+                    f"UPDATE players SET {column} = {column} - ? "
+                    f"WHERE user_id = ? AND {column} >= ?",
+                    (bet, user_id, bet),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Недостаточно средств для удвоения.")
+            current["doubled"] = True
+            current["stake"] = bet * 2
+            await self._casino_room_draw(room, current["cards"])
+            total, _soft = hand_value(current["cards"])
+            current["status"] = "bust" if total > 21 else "stand"
+            room["updated_at"] = time.time()
+            await self._casino_room_advance(room)
+            message = "Ставка удвоена."
+        return await self._casino_room_response(
+            "room_double", guild, user_id, room, message
+        )
+
+    async def _casino_room_finish(self, room: dict) -> None:
+        if room["status"] == "finished":
+            return
+        room["dealer_hidden"] = False
+        while dealer_should_hit(room["dealer"]):
+            await self._casino_room_draw(room, room["dealer"])
+        results = []
+        for player in room["players"]:
+            settle = settle_blackjack(
+                list(player["cards"]),
+                list(room["dealer"]),
+                int(player["stake"]),
+            )
+            player["outcome"] = settle["result"]
+            player["payout"] = int(settle["payout"])
+            player["net"] = int(settle["net"])
+            results.append((player, settle))
+        room["status"] = "finished"
+        room["finished_at"] = time.time()
+        room["turn_deadline"] = None
+        room["updated_at"] = time.time()
+        if not results:
+            return
+        async with db_transaction():
+            for player, settle in results:
+                column = (
+                    "gems" if room["currency"] == "gems" else "coins"
+                )
+                if settle["payout"]:
+                    await self.db.execute(
+                        f"UPDATE players SET {column} = {column} + ? "
+                        "WHERE user_id = ?",
+                        (int(settle["payout"]), player["user_id"]),
+                    )
+                stake_row_id = int(player.get("stake_row_id") or 0)
+                updated = 0
+                if stake_row_id:
+                    cursor = await self.db.execute(
+                        "UPDATE casino_blackjack_games SET status = 'done', "
+                        "player_cards = ?, dealer_cards = ?, "
+                        "doubled = ?, payout = ?, net = ?, "
+                        "updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ? AND status = 'room'",
+                        (
+                            json.dumps(player["cards"]),
+                            json.dumps(room["dealer"]),
+                            1 if player["doubled"] else 0,
+                            int(settle["payout"]),
+                            int(settle["net"]),
+                            stake_row_id,
+                        ),
+                    )
+                    updated = cursor.rowcount
+                if not updated:
+                    await self.db.execute(
+                        "INSERT INTO casino_blackjack_games "
+                        "(user_id, guild_id, bet, currency, status, "
+                        "player_cards, dealer_cards, shoe, doubled, "
+                        "payout, net) "
+                        "VALUES (?, ?, ?, ?, 'done', ?, ?, '[]', ?, ?, ?)",
+                        (
+                            int(player["user_id"]),
+                            int(room["guild_id"]),
+                            int(player["bet"]),
+                            str(room["currency"]),
+                            json.dumps(player["cards"]),
+                            json.dumps(room["dealer"]),
+                            1 if player["doubled"] else 0,
+                            int(settle["payout"]),
+                            int(settle["net"]),
+                        ),
+                    )
+
+    async def _casino_room_refund_waiting(
+        self, room: dict, reason: str
+    ) -> None:
+        column = "gems" if room["currency"] == "gems" else "coins"
+        refunded = 0
+        for player in room["players"]:
+            if int(player["bet"]) <= 0:
+                continue
+            try:
+                async with db_transaction():
+                    await self.db.execute(
+                        f"UPDATE players SET {column} = {column} + ? "
+                        "WHERE user_id = ?",
+                        (int(player["bet"]), player["user_id"]),
+                    )
+                    if player.get("stake_row_id"):
+                        await self.db.execute(
+                            "DELETE FROM casino_blackjack_games "
+                            "WHERE id = ? AND status = 'room'",
+                            (int(player["stake_row_id"]),),
+                        )
+                refunded += 1
+            except Exception:
+                log.exception(
+                    "CASINO_ROOM: не удалось вернуть ставку user=%s (%s)",
+                    player["user_id"],
+                    reason,
+                )
+        log.info(
+            "CASINO_ROOM: возврат ставок code=%s, игроков=%s (%s)",
+            room.get("code"),
+            refunded,
+            reason,
+        )
+
+    async def _casino_room_tick(self) -> None:
+        now = time.time()
+        async with self._casino_room_lock:
+            for key, room in list(self._casino_rooms.items()):
+                if (
+                    room["status"] == "waiting"
+                    and now - float(room["created_at"])
+                    > CASINO_ROOM_WAIT_SECONDS
+                ):
+                    await self._casino_room_refund_waiting(
+                        room, "Комната закрыта по таймауту."
+                    )
+                    self._casino_rooms.pop(key, None)
+                    continue
+                if (
+                    room["status"] == "playing"
+                    and room.get("turn_deadline")
+                    and now >= float(room["turn_deadline"])
+                ):
+                    index = int(room["turn_index"])
+                    if 0 <= index < len(room["players"]):
+                        player = room["players"][index]
+                        player["status"] = "stand"
+                        player["auto_stood"] = True
+                    await self._casino_room_advance(room)
+                    continue
+                if (
+                    room["status"] == "finished"
+                    and room.get("finished_at")
+                    and now - float(room["finished_at"])
+                    > CASINO_ROOM_FINISHED_SECONDS
+                ):
+                    self._casino_rooms.pop(key, None)
+
+    async def casino_room_task(self) -> None:
+        while not self.is_closed():
+            try:
+                await self._casino_room_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("CASINO_ROOM_TASK: ошибка обработки комнат")
+            await asyncio.sleep(1)
+
+    async def _casino_room_recover_stakes(self) -> None:
+        """Возвращает ставки комнат, потерянных при перезапуске бота."""
+        if self.db is None:
+            return
+        try:
+            async with self.db.execute(
+                "SELECT id, user_id, currency, bet "
+                "FROM casino_blackjack_games WHERE status = 'room'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            log.exception(
+                "CASINO_ROOM: не удалось проверить незавершённые комнаты"
+            )
+            return
+        if not rows:
+            return
+        restored = 0
+        for row_id, user_id, currency, bet in rows:
+            column = "gems" if str(currency) == "gems" else "coins"
+            try:
+                async with db_transaction():
+                    await self.db.execute(
+                        f"UPDATE players SET {column} = {column} + ? "
+                        "WHERE user_id = ?",
+                        (int(bet or 0), int(user_id)),
+                    )
+                    await self.db.execute(
+                        "DELETE FROM casino_blackjack_games "
+                        "WHERE id = ? AND status = 'room'",
+                        (int(row_id),),
+                    )
+                restored += 1
+            except Exception:
+                log.exception(
+                    "CASINO_ROOM: не удалось вернуть ставку user=%s",
+                    user_id,
+                )
+        log.warning(
+            "CASINO_ROOM: после перезапуска возвращены ставки: %s",
+            restored,
+        )
 
     async def _web_game_pets_state(self, user_id: int) -> dict:
         """Питомцы игрока: активный, коллекция, магазин и кулдауны."""
@@ -8633,6 +9499,22 @@ class CastleBot(commands.Bot):
             return await self._web_game_blackjack_double(
                 command, guild, member
             )
+        if action == "room_state":
+            return await self._web_game_room_state(command, guild, member)
+        if action == "room_create":
+            return await self._web_game_room_create(command, guild, member)
+        if action == "room_join":
+            return await self._web_game_room_join(command, guild, member)
+        if action == "room_leave":
+            return await self._web_game_room_leave(command, guild, member)
+        if action == "room_start":
+            return await self._web_game_room_start(command, guild, member)
+        if action == "room_hit":
+            return await self._web_game_room_hit(command, guild, member)
+        if action == "room_stand":
+            return await self._web_game_room_stand(command, guild, member)
+        if action == "room_double":
+            return await self._web_game_room_double(command, guild, member)
         if action == "pet_buy":
             return await self._web_game_pet_buy(command, guild, member)
         if action == "pet_activate":
