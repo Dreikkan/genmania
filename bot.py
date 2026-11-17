@@ -3615,6 +3615,15 @@ class CastleBot(commands.Bot):
                     "desc": case["desc"],
                     "currency": case["currency"],
                     "price": int(offer["price"]),
+                    "items": [
+                        {
+                            "item_id": str(entry["item_id"]),
+                            "name": str(entry["name"]),
+                            "emoji": str(entry["emoji"]),
+                            "rarity": str(entry["rarity"]),
+                        }
+                        for entry, _weight in offer["items"]
+                    ],
                     "odds": [
                         {
                             "rarity": rarity,

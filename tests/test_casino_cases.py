@@ -147,6 +147,11 @@ def test_casino_state_cases_and_odds():
             assert bronze["currency"] == "coins"
             assert bronze["price"] > 0
             assert bronze["odds"]
+            assert bronze["items"]
+            assert all(
+                item["item_id"].endswith("_gen")
+                for item in bronze["items"]
+            )
             assert abs(sum(item["chance"] for item in bronze["stars"]) - 100) < 0.2
             golden = casino["cases"][2]
             assert golden["currency"] == "gems"
