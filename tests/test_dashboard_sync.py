@@ -28,6 +28,9 @@ CREATE TABLE market_history (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT,
 CREATE TABLE market_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, side TEXT, item_id TEXT, price INTEGER, quantity INTEGER, filled INTEGER, status TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE bank_deposits (user_id INTEGER PRIMARY KEY, amount INTEGER);
 CREATE TABLE bank_loans (user_id INTEGER PRIMARY KEY, amount INTEGER, status TEXT DEFAULT 'active');
+CREATE TABLE casino_case_opens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, case_id TEXT NOT NULL, item_id TEXT NOT NULL, stars INTEGER DEFAULT 0, currency TEXT NOT NULL, price INTEGER NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE casino_roulette_spins (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, bet_type TEXT NOT NULL, bet_value TEXT NOT NULL, amount INTEGER NOT NULL, currency TEXT NOT NULL, number INTEGER NOT NULL, color TEXT NOT NULL, payout INTEGER NOT NULL, net INTEGER NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE casino_blackjack_games (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, bet INTEGER NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'player', player_cards TEXT NOT NULL DEFAULT '[]', dealer_cards TEXT NOT NULL DEFAULT '[]', shoe TEXT NOT NULL DEFAULT '[]', doubled INTEGER DEFAULT 0, payout INTEGER DEFAULT 0, net INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE tax_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount INTEGER, tax_type TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE admin_log (id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER, target_id INTEGER, guild_id INTEGER, action TEXT, details TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE onboarding_progress (user_id INTEGER, step TEXT, completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
@@ -245,6 +248,84 @@ def test_collect_empty_database(tmp_path):
             assert payload["logs"][0]["type"] == "system"
             assert payload["settings"]["start_coins"] == 8
             assert payload["economy"]["split"][0]["value"] == 100
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_collect_economy_supply_and_casino(tmp_path):
+    async def run():
+        db, bot = await make_bot(tmp_path)
+        try:
+            await db.execute(
+                "UPDATE bank_deposits SET amount = 1000 WHERE user_id = 1"
+            )
+            await db.execute(
+                "INSERT INTO bank_loans (user_id, amount, status) "
+                "VALUES (2, 400, 'active')"
+            )
+            await db.execute(
+                "INSERT INTO casino_case_opens "
+                "(user_id, guild_id, case_id, item_id, stars, currency, price) "
+                "VALUES (1, 1, 'bronze_case', 'gen_1', 0, 'coins', 300)"
+            )
+            await db.execute(
+                "INSERT INTO casino_case_opens "
+                "(user_id, guild_id, case_id, item_id, stars, currency, price) "
+                "VALUES (2, 1, 'gold_case', 'gen_1', 1, 'gems', 5)"
+            )
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (1, 1, 'color', 'red', 100, 'coins', 17, 'black', 0, -100)"
+            )
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (2, 1, 'color', 'black', 50, 'gems', 0, 'green', 0, -50)"
+            )
+            await db.execute(
+                "INSERT INTO casino_blackjack_games "
+                "(user_id, guild_id, bet, currency, status, player_cards, "
+                "dealer_cards, shoe, doubled, payout, net) "
+                "VALUES (1, 1, 200, 'coins', 'done', '[]', '[]', '[]', 0, 400, 200)"
+            )
+            await db.commit()
+
+            economy = await DashboardSync(bot)._collect_economy(
+                {"lifetime_production": 1000, "market_volume": 500},
+                {"labels": [], "values": []},
+            )
+            supply = economy["supply"]
+            assert supply["coins"] == 7500
+            assert supply["gems"] == 70
+            assert supply["deposits"] == 1000
+            assert supply["loans"] == 400
+            assert supply["clan_treasury"] == 12000
+            assert supply["total_coins"] == 20500
+            assert supply["total_gems"] == 70
+
+            casino = economy["casino"]
+            assert casino["cases"]["coins"] == {"opens": 1, "spend": 300}
+            assert casino["cases"]["gems"]["spend"] == 5
+            assert casino["roulette"]["coins"]["bets"] == 100
+            assert casino["roulette"]["coins"]["house"] == 100
+            assert casino["blackjack"]["coins"]["bets"] == 200
+            assert casino["blackjack"]["coins"]["net"] == 200
+            assert casino["total"]["coins"]["bets"] == 300
+            assert casino["total"]["coins"]["payouts"] == 400
+            assert casino["total"]["coins"]["house"] == -100
+            assert casino["total"]["coins"]["hold"] == -33.3
+            assert casino["total"]["coins"]["cases_spend"] == 300
+            assert casino["total"]["gems"]["cases_spend"] == 5
+            assert casino["days"]["labels"][-1]
+            assert casino["days"]["net_coins"][-1] == -100
+            assert casino["days"]["net_gems"][-1] == 50
+            assert casino["days"]["cases_coins"][-1] == 300
+            assert casino["days"]["cases_gems"][-1] == 5
         finally:
             await db.close()
 

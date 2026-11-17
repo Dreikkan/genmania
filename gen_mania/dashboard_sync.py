@@ -1027,12 +1027,158 @@ class DashboardSync:
         taxes_row = await self._fetchone(
             "SELECT COALESCE(SUM(amount), 0) FROM tax_log"
         )
+        players_row = await self._fetchone(
+            "SELECT COALESCE(SUM(coins), 0), COALESCE(SUM(gems), 0) "
+            "FROM players"
+        )
+        clans_row = await self._fetchone(
+            "SELECT COALESCE(SUM(treasury), 0) FROM clans"
+        )
+
+        case_rows = await self._fetchall(
+            "SELECT currency, COUNT(*), COALESCE(SUM(price), 0) "
+            "FROM casino_case_opens GROUP BY currency"
+        )
+        roulette_rows = await self._fetchall(
+            "SELECT currency, COALESCE(SUM(amount), 0), "
+            "COALESCE(SUM(payout), 0), COALESCE(SUM(net), 0) "
+            "FROM casino_roulette_spins WHERE color != 'pending' "
+            "GROUP BY currency"
+        )
+        blackjack_rows = await self._fetchall(
+            "SELECT currency, COALESCE(SUM(bet), 0), "
+            "COALESCE(SUM(payout), 0), COALESCE(SUM(net), 0) "
+            "FROM casino_blackjack_games WHERE status = 'done' "
+            "GROUP BY currency"
+        )
+
+        def metrics() -> dict:
+            return {"bets": 0, "payouts": 0, "net": 0, "house": 0, "hold": 0.0}
+
+        cases = {
+            "coins": {"opens": 0, "spend": 0},
+            "gems": {"opens": 0, "spend": 0},
+        }
+        roulette = {"coins": metrics(), "gems": metrics()}
+        blackjack = {"coins": metrics(), "gems": metrics()}
+        for currency, count, spend in case_rows:
+            key = "gems" if str(currency) == "gems" else "coins"
+            cases[key]["opens"] += int(count or 0)
+            cases[key]["spend"] += int(spend or 0)
+        for rows, target in (
+            (roulette_rows, roulette),
+            (blackjack_rows, blackjack),
+        ):
+            for currency, bets, payouts, net in rows:
+                key = "gems" if str(currency) == "gems" else "coins"
+                target[key]["bets"] += int(bets or 0)
+                target[key]["payouts"] += int(payouts or 0)
+                target[key]["net"] += int(net or 0)
+
+        for key in ("coins", "gems"):
+            for target in (roulette, blackjack):
+                bets = target[key]["bets"]
+                target[key]["house"] = -target[key]["net"]
+                target[key]["hold"] = (
+                    round(target[key]["house"] / bets * 100, 1)
+                    if bets
+                    else 0.0
+                )
+
+        casino_total: dict[str, dict] = {}
+        for key in ("coins", "gems"):
+            bets = roulette[key]["bets"] + blackjack[key]["bets"]
+            payouts = roulette[key]["payouts"] + blackjack[key]["payouts"]
+            net = roulette[key]["net"] + blackjack[key]["net"]
+            house = -net
+            casino_total[key] = {
+                "bets": bets,
+                "payouts": payouts,
+                "net": net,
+                "house": house,
+                "hold": round(house / bets * 100, 1) if bets else 0.0,
+                "cases_spend": cases[key]["spend"],
+            }
+
+        case_daily = await self._fetchall(
+            "SELECT date(created_at), currency, COALESCE(SUM(price), 0) "
+            "FROM casino_case_opens "
+            "WHERE date(created_at) >= date('now', '-29 days') "
+            "GROUP BY date(created_at), currency"
+        )
+        roulette_daily = await self._fetchall(
+            "SELECT date(created_at), currency, COALESCE(SUM(net), 0) "
+            "FROM casino_roulette_spins WHERE color != 'pending' "
+            "AND date(created_at) >= date('now', '-29 days') "
+            "GROUP BY date(created_at), currency"
+        )
+        blackjack_daily = await self._fetchall(
+            "SELECT date(created_at), currency, COALESCE(SUM(net), 0) "
+            "FROM casino_blackjack_games WHERE status = 'done' "
+            "AND date(created_at) >= date('now', '-29 days') "
+            "GROUP BY date(created_at), currency"
+        )
+
+        by_day: dict[str, dict[str, int]] = {}
+        for rows, field in (
+            (case_daily, "cases"),
+            (roulette_daily, "net"),
+            (blackjack_daily, "net"),
+        ):
+            for day, currency, value in rows:
+                entry = by_day.setdefault(
+                    str(day),
+                    {
+                        "cases_coins": 0,
+                        "cases_gems": 0,
+                        "net_coins": 0,
+                        "net_gems": 0,
+                    },
+                )
+                key = "gems" if str(currency) == "gems" else "coins"
+                entry[f"{field}_{key}"] += int(value or 0)
+
+        labels: list[str] = []
+        net_coins: list[int] = []
+        net_gems: list[int] = []
+        cases_coins: list[int] = []
+        cases_gems: list[int] = []
+        today = dt.datetime.now(UTC).date()
+        for offset in range(HISTORY_DAYS - 1, -1, -1):
+            current = today - dt.timedelta(days=offset)
+            entry = by_day.get(current.isoformat(), {})
+            labels.append(current.strftime("%d.%m"))
+            net_coins.append(-int(entry.get("net_coins", 0)))
+            net_gems.append(-int(entry.get("net_gems", 0)))
+            cases_coins.append(int(entry.get("cases_coins", 0)))
+            cases_gems.append(int(entry.get("cases_gems", 0)))
+
+        player_coins = (
+            int(players_row[0] or 0)
+            if players_row
+            else int(stats.get("coins", 0) or 0)
+        )
+        player_gems = (
+            int(players_row[1] or 0)
+            if players_row
+            else int(stats.get("gems", 0) or 0)
+        )
+        deposits = int(deposits_row[0] or 0) if deposits_row else 0
+        loans = int(loans_row[0] or 0) if loans_row else 0
+        treasury = int(clans_row[0] or 0) if clans_row else 0
+        supply = {
+            "coins": player_coins,
+            "gems": player_gems,
+            "deposits": deposits,
+            "loans": loans,
+            "clan_treasury": treasury,
+            "total_coins": player_coins + deposits + treasury,
+            "total_gems": player_gems,
+        }
 
         generators = max(0, int(stats.get("lifetime_production", 0) or 0))
         market = max(0, int(stats.get("market_volume", 0) or 0))
-        bank = max(0, int(deposits_row[0] or 0) if deposits_row else 0) + max(
-            0, int(loans_row[0] or 0) if loans_row else 0
-        )
+        bank = max(0, deposits) + max(0, loans)
         taxes = max(0, int(taxes_row[0] or 0) if taxes_row else 0)
         total = generators + market + bank + taxes
         if total <= 0:
@@ -1053,7 +1199,24 @@ class DashboardSync:
                 {"label": "Налоги", "value": values[3], "color": "#35e08b"},
             ]
 
-        return {"split": split, "weekly": weekly}
+        return {
+            "split": split,
+            "weekly": weekly,
+            "supply": supply,
+            "casino": {
+                "cases": cases,
+                "roulette": roulette,
+                "blackjack": blackjack,
+                "total": casino_total,
+                "days": {
+                    "labels": labels,
+                    "net_coins": net_coins,
+                    "net_gems": net_gems,
+                    "cases_coins": cases_coins,
+                    "cases_gems": cases_gems,
+                },
+            },
+        }
 
     # ------------------------------------------------------------------
     # History / growth
