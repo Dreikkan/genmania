@@ -53,7 +53,7 @@ class WebGameBridge:
         else:
             self.poll_url = ""
             self.result_url = ""
-        self.interval = _env_int("DASHBOARD_GAME_INTERVAL", 5, 2, 60)
+        self.interval = _env_int("DASHBOARD_GAME_INTERVAL", 10, 5, 60)
         self.enabled = bool(
             self.poll_url and self.result_url and self.token and self.handler
         )

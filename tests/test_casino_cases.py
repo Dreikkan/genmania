@@ -2112,3 +2112,79 @@ def test_casino_case_open_rejects_bad_input_and_limits():
             await db.close()
 
     asyncio.run(run())
+
+
+def test_pending_shared_table_bets_are_refunded():
+    async def run():
+        db = await _setup(coins=1000, gems=100)
+        try:
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (2, 42, 'color', 'red', 250, 'coins', -1, "
+                "'pending', 0, -250)"
+            )
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (2, 42, 'color', 'black', 5, 'gems', -1, "
+                "'pending', 0, -5)"
+            )
+            await db.commit()
+            await m.bot._casino_pending_table_bets_cleanup()
+            async with db.execute(
+                "SELECT coins, gems FROM players WHERE user_id = 2"
+            ) as cursor:
+                coins, gems = await cursor.fetchone()
+            assert coins == 1250
+            assert gems == 105
+            async with db.execute(
+                "SELECT COUNT(*) FROM casino_roulette_spins "
+                "WHERE color = 'pending'"
+            ) as cursor:
+                assert int((await cursor.fetchone())[0]) == 0
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_pending_cleanup_without_db():
+    old = m.bot.db
+    m.bot.db = None
+    try:
+        asyncio.run(m.bot._casino_pending_table_bets_cleanup())
+    finally:
+        m.bot.db = old
+
+
+def test_pending_cleanup_without_table_or_rows():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        m.bot.db = db
+        try:
+            await m.bot._casino_pending_table_bets_cleanup()
+        finally:
+            await db.close()
+        db = await _setup()
+        try:
+            await m.bot._casino_pending_table_bets_cleanup()
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_pending_cleanup_swallows_query_errors():
+    class BrokenDB:
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    old = m.bot.db
+    m.bot.db = BrokenDB()
+    try:
+        asyncio.run(m.bot._casino_pending_table_bets_cleanup())
+    finally:
+        m.bot.db = old

@@ -38,7 +38,7 @@ def test_bridge_derives_urls(monkeypatch):
     assert bridge.enabled is True
     assert bridge.poll_url.endswith("/api/game_poll.php")
     assert bridge.result_url.endswith("/api/game_result.php")
-    assert bridge.interval == 5
+    assert bridge.interval == 10
 
 
 def test_bridge_interval_env(monkeypatch):

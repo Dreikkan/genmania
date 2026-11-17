@@ -117,7 +117,7 @@ def test_setup_hook_initializes_runtime():
             assert bot.data_dir == pathlib.Path(data_dir)
             assert (bot.data_dir / "backups").exists()
             assert bot.db is not None
-            assert len(spawned) == 17
+            assert len(spawned) == 16
         finally:
             bot._release_instance_lock()
             if old is None:
