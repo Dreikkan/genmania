@@ -13,6 +13,7 @@ import os
 import socket
 import time
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -105,29 +106,48 @@ class WebGameBridge:
                     failures += 1
                     if failures <= 3 or failures % 12 == 0:
                         log.warning(
-                            "WEB_GAME: сеть недоступна (%s), повторов: %s",
+                            "WEB_GAME: сеть недоступна (%s), DNS %s, "
+                            "повторов: %s",
                             exception.__class__.__name__,
+                            await self._resolve_host(),
                             failures,
                         )
-                    delay = max(self.interval, min(30, self.interval * failures))
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(self._retry_delay(failures))
                     continue
                 except RuntimeError as exception:
                     failures += 1
                     if failures <= 3 or failures % 12 == 0:
                         log.warning("WEB_GAME: %s", exception)
-                    delay = max(self.interval, min(30, self.interval * failures))
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(self._retry_delay(failures))
                     continue
                 except Exception:
                     failures += 1
                     log.exception("WEB_GAME: ошибка опроса команд")
-                    delay = max(self.interval, min(30, self.interval * failures))
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(self._retry_delay(failures))
                     continue
 
                 elapsed = time.monotonic() - started
                 await asyncio.sleep(max(0.5, self.interval - elapsed))
+
+    def _retry_delay(self, failures: int) -> float:
+        exponent = min(max(failures - 1, 0), 5)
+        return float(min(300, self.interval * (2 ** exponent)))
+
+    async def _resolve_host(self) -> str:
+        host = urlsplit(self.poll_url).hostname
+        if not host:
+            return "unknown"
+        try:
+            infos = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(
+                    host, 443, type=socket.SOCK_STREAM
+                ),
+                timeout=5,
+            )
+        except (OSError, asyncio.TimeoutError):
+            return f"{host} -> ошибка DNS"
+        addresses = sorted({str(info[4][0]) for info in infos})
+        return f"{host} -> {', '.join(addresses) or 'нет адресов'}"
 
     async def _execute(
         self,

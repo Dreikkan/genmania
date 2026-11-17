@@ -470,13 +470,18 @@ def test_run_backs_off_on_network_error(tmp_path, monkeypatch, caplog):
     bot.is_closed = is_closed
     sync.collect = collect
     sync.push = push
+
+    async def resolve():
+        return "example.test -> 203.0.113.10"
+
+    sync._resolve_host = resolve
     monkeypatch.setattr(dashboard_sync.asyncio, "sleep", sleep)
 
     with caplog.at_level("WARNING", logger="gen_mania.dashboard"):
         asyncio.run(sync.run())
 
     assert calls["push"] == 4
-    assert [round(value) for value in sleeps[:3]] == [60, 120, 240]
+    assert [round(value) for value in sleeps[:3]] == [300, 600, 1200]
     assert sync._failures == 0
     assert sync._last_success is not None
     assert sync._last_error is not None
@@ -491,11 +496,20 @@ def test_run_backs_off_on_network_error(tmp_path, monkeypatch, caplog):
 
 def test_backoff_starts_small_and_caps(tmp_path):
     sync = DashboardSync(FakeBot(None, tmp_path))
-    assert sync._next_backoff() == 60
-    assert sync._next_backoff() == 120
+    assert sync._next_backoff() == 300
+    assert sync._next_backoff() == 600
     sync._failures = 99
-    assert sync._next_backoff() == 1800
+    assert sync._next_backoff() == 3600
     assert sync._failures == 100
+
+
+def test_resolve_host_reports_addresses(tmp_path, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_SYNC_URL", "https://localhost/api/ingest.php")
+    monkeypatch.setenv("DASHBOARD_SYNC_TOKEN", "0123456789abcdef")
+    sync = DashboardSync(FakeBot(None, tmp_path))
+    text = asyncio.run(sync._resolve_host())
+    assert "localhost" in text
+    assert "127.0.0.1" in text or "::1" in text
 
 
 def test_apply_pending_settings(tmp_path):
