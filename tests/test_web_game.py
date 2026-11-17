@@ -38,6 +38,21 @@ def test_bridge_derives_urls(monkeypatch):
     assert bridge.enabled is True
     assert bridge.poll_url.endswith("/api/game_poll.php")
     assert bridge.result_url.endswith("/api/game_result.php")
+    assert bridge.interval == 5
+
+
+def test_bridge_interval_env(monkeypatch):
+    monkeypatch.setenv(
+        "DASHBOARD_SYNC_URL", "https://example.test/api/ingest.php"
+    )
+    monkeypatch.setenv("DASHBOARD_SYNC_TOKEN", "0123456789abcdef")
+    monkeypatch.setenv("DASHBOARD_GAME_INTERVAL", "10")
+
+    async def handler(_command):
+        return {"ok": True}
+
+    bridge = WebGameBridge(FakeBot(), handler=handler)
+    assert bridge.interval == 10
 
 
 def test_decode():
