@@ -6,6 +6,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import aiohttp
 import aiosqlite
 import discord
 
@@ -440,6 +441,61 @@ def test_run_handles_collect_error(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard_sync.asyncio, "sleep", no_sleep)
     asyncio.run(sync.run())
     assert sync._last_error is not None
+
+
+def test_run_backs_off_on_network_error(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("DASHBOARD_SYNC_URL", "https://example.test/api/ingest.php")
+    monkeypatch.setenv("DASHBOARD_SYNC_TOKEN", "0123456789abcdef")
+    bot = FakeBot(None, tmp_path)
+    sync = DashboardSync(bot)
+    calls = {"closed": 0, "push": 0}
+    sleeps: list[float] = []
+
+    async def collect():
+        return {"stats": {}}
+
+    async def push(_payload):
+        calls["push"] += 1
+        if calls["push"] <= 3:
+            raise aiohttp.ClientConnectionError("Cannot connect")
+        return {}
+
+    def is_closed():
+        calls["closed"] += 1
+        return calls["closed"] > 4
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    bot.is_closed = is_closed
+    sync.collect = collect
+    sync.push = push
+    monkeypatch.setattr(dashboard_sync.asyncio, "sleep", sleep)
+
+    with caplog.at_level("WARNING", logger="gen_mania.dashboard"):
+        asyncio.run(sync.run())
+
+    assert calls["push"] == 4
+    assert [round(value) for value in sleeps[:3]] == [60, 120, 240]
+    assert sync._failures == 0
+    assert sync._last_success is not None
+    assert sync._last_error is not None
+    warnings = [
+        record
+        for record in caplog.records
+        if "сайт недоступен" in record.getMessage()
+    ]
+    assert len(warnings) == 3
+    assert all(record.exc_info is None for record in warnings)
+
+
+def test_backoff_starts_small_and_caps(tmp_path):
+    sync = DashboardSync(FakeBot(None, tmp_path))
+    assert sync._next_backoff() == 60
+    assert sync._next_backoff() == 120
+    sync._failures = 99
+    assert sync._next_backoff() == 1800
+    assert sync._failures == 100
 
 
 def test_apply_pending_settings(tmp_path):
