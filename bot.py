@@ -129,6 +129,20 @@ from gen_mania.services.notifications import (
     NotificationRuntime,
     make_notification_layer,
 )
+from gen_mania.services.casino_tables import (
+    ROULETTE_BET_TYPES,
+    can_double,
+    card_rank,
+    card_suit,
+    dealer_should_hit,
+    hand_value,
+    is_blackjack,
+    new_shoe,
+    roulette_color,
+    roulette_payout,
+    settle_blackjack,
+    spin_number,
+)
 from gen_mania.services.market import (
     MARKET_MAX_RATIO,  # noqa: F401 - re-export
     MARKET_MIN_RATIO,  # noqa: F401 - re-export
@@ -1242,6 +1256,11 @@ def pet_effective_level(level: int) -> float:
 
 CASE_POOL_SIZE = 15
 CASINO_DAY_LIMIT = 60
+CASINO_BET_BALANCE_SHARE = 0.10
+CASINO_TABLE_LIMITS = {
+    "coins": {"min": 100, "max": 1_000_000},
+    "gems": {"min": 1, "max": 500},
+}
 
 CASINO_CASES = (
     {
@@ -3672,6 +3691,7 @@ class CastleBot(commands.Bot):
             row = await cursor.fetchone()
         opened_today = int(row[0] or 0) if row else 0
 
+        coins, gems = await self._casino_balances(user_id)
         return {
             "week": {
                 "year": int(year),
@@ -3691,6 +3711,12 @@ class CastleBot(commands.Bot):
             "history": history,
             "opened_today": opened_today,
             "day_limit": int(CASINO_DAY_LIMIT),
+            "roulette": await self._web_game_roulette_state(
+                user_id, coins, gems
+            ),
+            "blackjack": await self._web_game_blackjack_state(
+                user_id, coins, gems
+            ),
         }
 
     async def _web_game_case_open(
@@ -3824,6 +3850,652 @@ class CastleBot(commands.Bot):
                 "rarity": str(chosen["rarity"]),
             },
             "state": state,
+        }
+
+    # ---------- Казино: рулетка и блэкджек ----------
+
+    @staticmethod
+    def _casino_bet_limits(balance: int, currency: str) -> dict:
+        limits = CASINO_TABLE_LIMITS.get(
+            currency, CASINO_TABLE_LIMITS["coins"]
+        )
+        minimum = int(limits["min"])
+        balance = max(0, int(balance or 0))
+        if balance < minimum:
+            maximum = 0
+        else:
+            maximum = min(
+                int(limits["max"]),
+                balance,
+                max(
+                    minimum,
+                    int(balance * CASINO_BET_BALANCE_SHARE),
+                ),
+            )
+        return {
+            "min": minimum,
+            "max": maximum,
+            "balance": balance,
+        }
+
+    @staticmethod
+    def _blackjack_cards(cards: list[str]) -> list[dict]:
+        return [
+            {
+                "code": card,
+                "rank": card_rank(card),
+                "suit": card_suit(card),
+            }
+            for card in cards
+        ]
+
+    @staticmethod
+    def _parse_cards(raw) -> list[str]:
+        try:
+            data = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(card) for card in data if isinstance(card, str)]
+
+    async def _casino_balances(self, user_id: int) -> tuple[int, int]:
+        async with self.db.execute(
+            "SELECT coins, gems FROM players WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return 0, 0
+        return int(row[0] or 0), int(row[1] or 0)
+
+    async def _web_game_roulette_state(
+        self, user_id: int, coins: int, gems: int
+    ) -> dict:
+        history = []
+        async with self.db.execute(
+            "SELECT number, color, amount, currency, payout, net, "
+            "created_at FROM casino_roulette_spins "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+            (user_id,),
+        ) as cursor:
+            for (
+                number,
+                color,
+                amount,
+                currency,
+                payout,
+                net,
+                created_at,
+            ) in await cursor.fetchall():
+                history.append(
+                    {
+                        "number": int(number or 0),
+                        "color": str(color or "green"),
+                        "amount": int(amount or 0),
+                        "currency": str(currency or "coins"),
+                        "payout": int(payout or 0),
+                        "net": int(net or 0),
+                        "at": str(created_at or ""),
+                    }
+                )
+        async with self.db.execute(
+            "SELECT COUNT(*), "
+            "COALESCE(SUM(CASE WHEN net > 0 THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(net), 0) FROM casino_roulette_spins "
+            "WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        spins, wins, net = (int(value or 0) for value in (row or (0, 0, 0)))
+        return {
+            "limits": {
+                "coins": self._casino_bet_limits(coins, "coins"),
+                "gems": self._casino_bet_limits(gems, "gems"),
+            },
+            "history": history,
+            "stats": {"spins": spins, "wins": wins, "net": net},
+        }
+
+    async def _blackjack_active(self, user_id: int) -> dict | None:
+        async with self.db.execute(
+            "SELECT id, bet, currency, player_cards, dealer_cards, shoe, "
+            "doubled FROM casino_blackjack_games "
+            "WHERE user_id = ? AND status = 'player' "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        game_id, bet, currency, player, dealer, shoe, doubled = row
+        return {
+            "id": int(game_id),
+            "bet": int(bet or 0),
+            "currency": str(currency or "coins"),
+            "player": self._parse_cards(player),
+            "dealer": self._parse_cards(dealer),
+            "shoe": self._parse_cards(shoe),
+            "doubled": bool(doubled),
+        }
+
+    def _blackjack_public(
+        self, player: list[str], dealer: list[str], hidden: bool
+    ) -> dict:
+        visible_dealer = dealer[:1] if hidden else dealer
+        player_total, _player_soft = hand_value(player)
+        dealer_total, _dealer_soft = hand_value(visible_dealer)
+        return {
+            "player_cards": self._blackjack_cards(player),
+            "dealer_cards": self._blackjack_cards(visible_dealer),
+            "dealer_hidden": bool(hidden),
+            "player_total": player_total,
+            "dealer_total": dealer_total,
+        }
+
+    async def _web_game_blackjack_state(
+        self, user_id: int, coins: int, gems: int
+    ) -> dict:
+        active = None
+        game = await self._blackjack_active(user_id)
+        if game:
+            balance = gems if game["currency"] == "gems" else coins
+            public = self._blackjack_public(
+                game["player"], game["dealer"], hidden=True
+            )
+            active = {
+                "id": str(game["id"]),
+                "bet": game["bet"],
+                "stake": game["bet"] * (2 if game["doubled"] else 1),
+                "currency": game["currency"],
+                "doubled": game["doubled"],
+                "can_hit": True,
+                "can_stand": True,
+                "can_double": (
+                    can_double(game["player"])
+                    and balance >= game["bet"]
+                ),
+                **public,
+            }
+        async with self.db.execute(
+            "SELECT COUNT(*), "
+            "COALESCE(SUM(CASE WHEN net > 0 THEN 1 ELSE 0 END), 0), "
+            "COALESCE(SUM(net), 0) FROM casino_blackjack_games "
+            "WHERE user_id = ? AND status = 'done'",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        played, won, net = (
+            int(value or 0) for value in (row or (0, 0, 0))
+        )
+        return {
+            "limits": {
+                "coins": self._casino_bet_limits(coins, "coins"),
+                "gems": self._casino_bet_limits(gems, "gems"),
+            },
+            "active": active,
+            "stats": {"played": played, "won": won, "net": net},
+        }
+
+    async def _web_game_roulette_spin(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        currency = str(payload.get("currency") or "coins").strip()
+        if currency not in CASINO_TABLE_LIMITS:
+            raise ValueError("Неверная валюта ставки.")
+        bet_type = str(payload.get("bet_type") or "").strip().lower()
+        bet_value = str(payload.get("bet_value") or "").strip().lower()
+        if bet_type not in ROULETTE_BET_TYPES:
+            raise ValueError("Неизвестный тип ставки.")
+        if bet_type == "number":
+            try:
+                number_bet = int(bet_value)
+            except (TypeError, ValueError):
+                raise ValueError("Выберите число от 0 до 36.")
+            if not 0 <= number_bet <= 36:
+                raise ValueError("Выберите число от 0 до 36.")
+            bet_value = str(number_bet)
+        elif bet_type == "color" and bet_value not in {"red", "black"}:
+            raise ValueError("Выберите красное или чёрное.")
+        elif bet_type == "parity" and bet_value not in {"even", "odd"}:
+            raise ValueError("Выберите чёт или нечет.")
+        elif bet_type == "range" and bet_value not in {"low", "high"}:
+            raise ValueError("Выберите диапазон 1–18 или 19–36.")
+        elif bet_type == "dozen" and bet_value not in {"1", "2", "3"}:
+            raise ValueError("Выберите дюжину.")
+
+        try:
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная ставка.")
+        user_id = int(member.id)
+        coins, gems = await self._casino_balances(user_id)
+        balance = gems if currency == "gems" else coins
+        limits = self._casino_bet_limits(balance, currency)
+        if limits["max"] <= 0:
+            raise ValueError("Недостаточно средств для ставки.")
+        if amount < limits["min"] or amount > limits["max"]:
+            raise ValueError(
+                f"Ставка должна быть от {limits['min']} до "
+                f"{limits['max']}."
+            )
+
+        number = spin_number()
+        color = roulette_color(number)
+        payout = roulette_payout(bet_type, bet_value, number, amount)
+        net = payout - amount
+        column = "coins" if currency == "coins" else "gems"
+        async with db_transaction():
+            cursor = await self.db.execute(
+                f"UPDATE players SET {column} = {column} - ? "
+                f"WHERE user_id = ? AND {column} >= ?",
+                (amount, user_id, amount),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Недостаточно средств для ставки.")
+            if payout:
+                await self.db.execute(
+                    f"UPDATE players SET {column} = {column} + ? "
+                    "WHERE user_id = ?",
+                    (payout, user_id),
+                )
+            await self.db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, "
+                "currency, number, color, payout, net) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    guild.id,
+                    bet_type,
+                    bet_value,
+                    amount,
+                    currency,
+                    number,
+                    color,
+                    payout,
+                    net,
+                ),
+            )
+        state = await self._web_game_state(user_id, guild.id)
+        color_label = {
+            "red": "красное",
+            "black": "чёрное",
+            "green": "зеро",
+        }.get(color, color)
+        if payout > 0:
+            message = (
+                f"Выпало {number} ({color_label}). "
+                f"Выплата {payout}."
+            )
+        else:
+            message = f"Выпало {number} ({color_label}). Ставка не сыграла."
+        return {
+            "ok": True,
+            "action": "roulette_spin",
+            "number": number,
+            "color": color,
+            "bet_type": bet_type,
+            "bet_value": bet_value,
+            "amount": amount,
+            "currency": currency,
+            "payout": payout,
+            "net": net,
+            "message": message,
+            "state": state,
+        }
+
+    async def _web_game_blackjack_start(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        currency = str(payload.get("currency") or "coins").strip()
+        if currency not in CASINO_TABLE_LIMITS:
+            raise ValueError("Неверная валюта ставки.")
+        try:
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная ставка.")
+        user_id = int(member.id)
+        if await self._blackjack_active(user_id):
+            raise ValueError(
+                "У вас уже есть незавершённая раздача. "
+                "Доиграйте её или нажмите «Стоп»."
+            )
+        coins, gems = await self._casino_balances(user_id)
+        balance = gems if currency == "gems" else coins
+        limits = self._casino_bet_limits(balance, currency)
+        if limits["max"] <= 0:
+            raise ValueError("Недостаточно средств для ставки.")
+        if amount < limits["min"] or amount > limits["max"]:
+            raise ValueError(
+                f"Ставка должна быть от {limits['min']} до "
+                f"{limits['max']}."
+            )
+
+        shoe = new_shoe()
+        player = [shoe.pop(), shoe.pop()]
+        dealer = [shoe.pop(), shoe.pop()]
+        settled = None
+        if is_blackjack(player) or is_blackjack(dealer):
+            settled = settle_blackjack(player, dealer, amount)
+        column = "coins" if currency == "coins" else "gems"
+        status = "done" if settled else "player"
+        payout = int(settled["payout"]) if settled else 0
+        net = int(settled["net"]) if settled else 0
+        async with db_transaction():
+            cursor = await self.db.execute(
+                f"UPDATE players SET {column} = {column} - ? "
+                f"WHERE user_id = ? AND {column} >= ?",
+                (amount, user_id, amount),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Недостаточно средств для ставки.")
+            await self.db.execute(
+                "INSERT INTO casino_blackjack_games "
+                "(user_id, guild_id, bet, currency, status, "
+                "player_cards, dealer_cards, shoe, doubled, payout, net) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                (
+                    user_id,
+                    guild.id,
+                    amount,
+                    currency,
+                    status,
+                    json.dumps(player),
+                    json.dumps(dealer),
+                    json.dumps(shoe),
+                    payout,
+                    net,
+                ),
+            )
+            if payout:
+                await self.db.execute(
+                    f"UPDATE players SET {column} = {column} + ? "
+                    "WHERE user_id = ?",
+                    (payout, user_id),
+                )
+        state = await self._web_game_state(user_id, guild.id)
+        public = self._blackjack_public(
+            player, dealer, hidden=not settled
+        )
+        if settled:
+            message = self._blackjack_message(
+                settled, currency, amount
+            )
+        else:
+            message = "Раздача начата. Хит, стоп или удвоение."
+        return {
+            "ok": True,
+            "action": "blackjack_start",
+            "status": status,
+            "currency": currency,
+            "bet": amount,
+            "payout": payout,
+            "net": net,
+            "outcome": settled["result"] if settled else None,
+            "message": message,
+            "state": state,
+            **public,
+        }
+
+    @staticmethod
+    def _blackjack_message(settle: dict, currency: str, bet: int) -> str:
+        labels = {
+            "win": "Вы выиграли",
+            "lose": "Вы проиграли",
+            "push": "Ничья",
+            "blackjack": "Блэкджек",
+            "bust": "Перебор",
+        }
+        label = labels.get(settle["result"], "Раздача завершена")
+        return (
+            f"{label}. Ставка {bet}, выплата {settle['payout']}, "
+            f"итог {settle['net']:+d}."
+        )
+
+    async def _web_game_blackjack_hit(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        game = await self._blackjack_active(user_id)
+        if not game:
+            raise ValueError("Нет активной раздачи.")
+        player = list(game["player"])
+        dealer = list(game["dealer"])
+        shoe = list(game["shoe"])
+        if not shoe:
+            shoe = new_shoe()
+        player.append(shoe.pop())
+        total, _soft = hand_value(player)
+        settled = None
+        if total >= 21:
+            if total == 21:
+                while dealer_should_hit(dealer):
+                    if not shoe:
+                        shoe = new_shoe()
+                    dealer.append(shoe.pop())
+            stake = game["bet"] * (2 if game["doubled"] else 1)
+            settled = settle_blackjack(player, dealer, stake)
+        async with db_transaction():
+            if settled:
+                cursor = await self.db.execute(
+                    "UPDATE casino_blackjack_games SET status = 'done', "
+                    "player_cards = ?, dealer_cards = ?, shoe = ?, "
+                    "payout = ?, net = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND status = 'player'",
+                    (
+                        json.dumps(player),
+                        json.dumps(dealer),
+                        json.dumps(shoe),
+                        settled["payout"],
+                        settled["net"],
+                        game["id"],
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Раздача уже завершена.")
+                if settled["payout"]:
+                    column = (
+                        "gems"
+                        if game["currency"] == "gems"
+                        else "coins"
+                    )
+                    await self.db.execute(
+                        f"UPDATE players SET {column} = {column} + ? "
+                        "WHERE user_id = ?",
+                        (settled["payout"], user_id),
+                    )
+            else:
+                cursor = await self.db.execute(
+                    "UPDATE casino_blackjack_games SET player_cards = ?, "
+                    "shoe = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND status = 'player'",
+                    (json.dumps(player), json.dumps(shoe), game["id"]),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Раздача уже завершена.")
+        return await self._blackjack_result(
+            user_id,
+            guild,
+            game,
+            player,
+            dealer,
+            settled,
+            "blackjack_hit",
+        )
+
+    async def _web_game_blackjack_stand(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        game = await self._blackjack_active(user_id)
+        if not game:
+            raise ValueError("Нет активной раздачи.")
+        player = list(game["player"])
+        dealer = list(game["dealer"])
+        shoe = list(game["shoe"]) or new_shoe()
+        while dealer_should_hit(dealer):
+            if not shoe:
+                shoe = new_shoe()
+            dealer.append(shoe.pop())
+        stake = game["bet"] * (2 if game["doubled"] else 1)
+        settled = settle_blackjack(player, dealer, stake)
+        async with db_transaction():
+            cursor = await self.db.execute(
+                "UPDATE casino_blackjack_games SET status = 'done', "
+                "player_cards = ?, dealer_cards = ?, shoe = ?, "
+                "payout = ?, net = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'player'",
+                (
+                    json.dumps(player),
+                    json.dumps(dealer),
+                    json.dumps(shoe),
+                    settled["payout"],
+                    settled["net"],
+                    game["id"],
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Раздача уже завершена.")
+            if settled["payout"]:
+                column = "gems" if game["currency"] == "gems" else "coins"
+                await self.db.execute(
+                    f"UPDATE players SET {column} = {column} + ? "
+                    "WHERE user_id = ?",
+                    (settled["payout"], user_id),
+                )
+        return await self._blackjack_result(
+            user_id,
+            guild,
+            game,
+            player,
+            dealer,
+            settled,
+            "blackjack_stand",
+        )
+
+    async def _web_game_blackjack_double(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        game = await self._blackjack_active(user_id)
+        if not game:
+            raise ValueError("Нет активной раздачи.")
+        if not can_double(game["player"]) or game["doubled"]:
+            raise ValueError("Удвоение доступно только на первых двух картах.")
+        coins, gems = await self._casino_balances(user_id)
+        balance = gems if game["currency"] == "gems" else coins
+        bet = game["bet"]
+        if balance < bet:
+            raise ValueError("Недостаточно средств для удвоения.")
+        player = list(game["player"])
+        dealer = list(game["dealer"])
+        shoe = list(game["shoe"])
+        if not shoe:
+            shoe = new_shoe()
+        player.append(shoe.pop())
+        stake = bet * 2
+        if hand_value(player)[0] <= 21:
+            while dealer_should_hit(dealer):
+                if not shoe:
+                    shoe = new_shoe()
+                dealer.append(shoe.pop())
+        settled = settle_blackjack(player, dealer, stake)
+        column = "gems" if game["currency"] == "gems" else "coins"
+        async with db_transaction():
+            cursor = await self.db.execute(
+                f"UPDATE players SET {column} = {column} - ? "
+                f"WHERE user_id = ? AND {column} >= ?",
+                (bet, user_id, bet),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Недостаточно средств для удвоения.")
+            cursor = await self.db.execute(
+                "UPDATE casino_blackjack_games SET status = 'done', "
+                "player_cards = ?, dealer_cards = ?, shoe = ?, "
+                "doubled = 1, payout = ?, net = ?, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'player'",
+                (
+                    json.dumps(player),
+                    json.dumps(dealer),
+                    json.dumps(shoe),
+                    settled["payout"],
+                    settled["net"],
+                    game["id"],
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Раздача уже завершена.")
+            if settled["payout"]:
+                await self.db.execute(
+                    f"UPDATE players SET {column} = {column} + ? "
+                    "WHERE user_id = ?",
+                    (settled["payout"], user_id),
+                )
+        return await self._blackjack_result(
+            user_id,
+            guild,
+            game,
+            player,
+            dealer,
+            settled,
+            "blackjack_double",
+        )
+
+    async def _blackjack_result(
+        self,
+        user_id: int,
+        guild: discord.Guild,
+        game: dict,
+        player: list[str],
+        dealer: list[str],
+        settled: dict | None,
+        action: str,
+    ) -> dict:
+        state = await self._web_game_state(user_id, guild.id)
+        public = self._blackjack_public(
+            player, dealer, hidden=settled is None
+        )
+        if settled:
+            message = self._blackjack_message(
+                settled, game["currency"], game["bet"]
+            )
+        else:
+            message = "Ваш ход: хит, стоп или удвоение."
+        return {
+            "ok": True,
+            "action": action,
+            "status": "done" if settled else "player",
+            "currency": game["currency"],
+            "bet": game["bet"],
+            "payout": int(settled["payout"]) if settled else 0,
+            "net": int(settled["net"]) if settled else 0,
+            "outcome": settled["result"] if settled else None,
+            "message": message,
+            "state": state,
+            **public,
         }
 
     async def _web_game_pets_state(self, user_id: int) -> dict:
@@ -7934,6 +8606,24 @@ class CastleBot(commands.Bot):
             )
         if action == "case_open":
             return await self._web_game_case_open(command, guild, member)
+        if action == "roulette_spin":
+            return await self._web_game_roulette_spin(command, guild, member)
+        if action == "blackjack_start":
+            return await self._web_game_blackjack_start(
+                command, guild, member
+            )
+        if action == "blackjack_hit":
+            return await self._web_game_blackjack_hit(
+                command, guild, member
+            )
+        if action == "blackjack_stand":
+            return await self._web_game_blackjack_stand(
+                command, guild, member
+            )
+        if action == "blackjack_double":
+            return await self._web_game_blackjack_double(
+                command, guild, member
+            )
         if action == "pet_buy":
             return await self._web_game_pet_buy(command, guild, member)
         if action == "pet_activate":
@@ -8553,6 +9243,42 @@ class CastleBot(commands.Bot):
                 currency TEXT NOT NULL,
                 price INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_roulette_spins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER,
+                bet_type TEXT NOT NULL,
+                bet_value TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                number INTEGER NOT NULL,
+                color TEXT NOT NULL,
+                payout INTEGER NOT NULL,
+                net INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await self.db.execute("""
+            CREATE TABLE IF NOT EXISTS casino_blackjack_games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER,
+                bet INTEGER NOT NULL,
+                currency TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'player',
+                player_cards TEXT NOT NULL DEFAULT '[]',
+                dealer_cards TEXT NOT NULL DEFAULT '[]',
+                shoe TEXT NOT NULL DEFAULT '[]',
+                doubled INTEGER DEFAULT 0,
+                payout INTEGER DEFAULT 0,
+                net INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -9869,6 +10595,8 @@ class CastleBot(commands.Bot):
             "CREATE INDEX IF NOT EXISTS idx_user_notifications_user ON user_notifications(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_mailbox_user ON mailbox(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_casino_opens_user ON casino_case_opens(user_id, id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_roulette_user ON casino_roulette_spins(user_id, id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_blackjack_user ON casino_blackjack_games(user_id, status)",
             "CREATE INDEX IF NOT EXISTS idx_players_coins ON players(coins)",
             "CREATE INDEX IF NOT EXISTS idx_players_gems ON players(gems)",
             "CREATE INDEX IF NOT EXISTS idx_players_last_collected ON players(last_collected)",
