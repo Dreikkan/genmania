@@ -108,3 +108,35 @@ def test_run_disabled():
     bridge = WebGameBridge(FakeBot())
     asyncio.run(bridge.run())
     assert bridge.enabled is False
+
+
+def test_retry_delay_grows_and_caps(monkeypatch):
+    monkeypatch.setenv(
+        "DASHBOARD_SYNC_URL", "https://example.test/api/ingest.php"
+    )
+    monkeypatch.setenv("DASHBOARD_SYNC_TOKEN", "0123456789abcdef")
+
+    async def handler(_command):
+        return {"ok": True}
+
+    bridge = WebGameBridge(FakeBot(), handler=handler)
+    assert bridge.interval == 10
+    assert bridge._retry_delay(1) == 10
+    assert bridge._retry_delay(2) == 20
+    assert bridge._retry_delay(3) == 40
+    assert bridge._retry_delay(10) == 300
+
+
+def test_resolve_host_reports_addresses(monkeypatch):
+    monkeypatch.setenv(
+        "DASHBOARD_SYNC_URL", "https://localhost/api/ingest.php"
+    )
+    monkeypatch.setenv("DASHBOARD_SYNC_TOKEN", "0123456789abcdef")
+
+    async def handler(_command):
+        return {"ok": True}
+
+    bridge = WebGameBridge(FakeBot(), handler=handler)
+    text = asyncio.run(bridge._resolve_host())
+    assert "localhost" in text
+    assert "127.0.0.1" in text or "::1" in text

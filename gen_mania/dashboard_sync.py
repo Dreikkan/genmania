@@ -26,6 +26,7 @@ import socket
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -38,7 +39,7 @@ log = logging.getLogger("gen_mania.dashboard")
 
 TOP_PLAYERS_LIMIT = 200
 TOP_SERVERS_LIMIT = 12
-SYNC_BACKOFF_SECONDS = (60, 120, 240, 480, 960, 1800)
+SYNC_BACKOFF_SECONDS = (300, 600, 1200, 1800, 3600)
 TOP_CLANS_LIMIT = 5
 HISTORY_DAYS = 30
 
@@ -162,10 +163,11 @@ class DashboardSync:
                 self._last_error = dt.datetime.now(UTC)
                 retry_delay = self._next_backoff()
                 log.warning(
-                    "DASHBOARD_SYNC: сайт недоступен (%s: %s), "
+                    "DASHBOARD_SYNC: сайт недоступен (%s: %s), DNS %s, "
                     "повтор через %s с",
                     type(exc).__name__,
                     str(exc) or "таймаут",
+                    await self._resolve_host(),
                     int(retry_delay),
                 )
             except Exception:
@@ -180,6 +182,22 @@ class DashboardSync:
         index = min(self._failures, len(SYNC_BACKOFF_SECONDS) - 1)
         self._failures += 1
         return float(SYNC_BACKOFF_SECONDS[index])
+
+    async def _resolve_host(self) -> str:
+        host = urlsplit(self.url).hostname
+        if not host:
+            return "unknown"
+        try:
+            infos = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(
+                    host, 443, type=socket.SOCK_STREAM
+                ),
+                timeout=5,
+            )
+        except (OSError, asyncio.TimeoutError):
+            return f"{host} -> ошибка DNS"
+        addresses = sorted({str(info[4][0]) for info in infos})
+        return f"{host} -> {', '.join(addresses) or 'нет адресов'}"
 
     # ------------------------------------------------------------------
     # DB helpers
