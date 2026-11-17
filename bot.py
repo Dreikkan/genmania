@@ -3524,7 +3524,7 @@ class CastleBot(commands.Bot):
         return str(emoji or "📦")
 
     async def _casino_pool(self) -> list[dict]:
-        """Недельный пул из 15 генераторов; порядок меняется каждую неделю."""
+        """Недельный пул из 15 генераторов: от простого к лучшему."""
         async with self.db.execute(
             "SELECT id, name, rarity, price, emoji, "
             "COALESCE(emoji_by_star, '{}') FROM items "
@@ -3535,11 +3535,8 @@ class CastleBot(commands.Bot):
         total = len(rows)
         if not total:
             return []
-        year, week, starts, ends = self._casino_week_bounds()
-        order = list(range(total))
-        random.Random(year * 100 + week).shuffle(order)
         pool = []
-        for position, index in enumerate(order):
+        for position, row in enumerate(rows):
             (
                 item_id,
                 name,
@@ -3547,7 +3544,7 @@ class CastleBot(commands.Bot):
                 price,
                 emoji,
                 emoji_by_star,
-            ) = rows[index]
+            ) = row
             pool.append(
                 {
                     "position": position + 1,

@@ -89,7 +89,7 @@ async def _setup(coins: int = 0, gems: int = 0):
     return db
 
 
-def test_casino_pool_is_weekly_and_unique():
+def test_casino_pool_is_sorted_from_weak_to_strong():
     async def run():
         db = await _setup()
         try:
@@ -102,30 +102,12 @@ def test_casino_pool_is_weekly_and_unique():
             assert len(set(ids)) == 15
             assert all(entry["item_id"].endswith("_gen") for entry in pool)
             assert all("_emoji_by_star" in entry for entry in pool)
-
-            start = m.datetime.datetime(
-                2026, 11, 16, tzinfo=m.datetime.timezone.utc
-            )
-            end = start + m.datetime.timedelta(days=7)
-            with mock.patch.object(
-                m.CastleBot,
-                "_casino_week_bounds",
-                return_value=(2026, 47, start, end),
-            ):
-                week47 = [
-                    entry["item_id"] for entry in await m.bot._casino_pool()
-                ]
-            with mock.patch.object(
-                m.CastleBot,
-                "_casino_week_bounds",
-                return_value=(2026, 48, end, end),
-            ):
-                week48 = [
-                    entry["item_id"] for entry in await m.bot._casino_pool()
-                ]
-            assert week47 != week48
-            assert set(week47) == set(week48)
-            assert len(set(week47)) == 15
+            prices = [entry["price"] for entry in pool]
+            assert prices == sorted(prices)
+            assert prices[0] == min(prices)
+            assert prices[-1] == max(prices)
+            assert pool[0]["position"] == 1
+            assert pool[-1]["position"] == 15
         finally:
             await db.close()
 
