@@ -1921,6 +1921,147 @@ def test_blackjack_double_race_guard():
     asyncio.run(run())
 
 
+def test_casino_daily_nets_and_loss_limit():
+    async def run():
+        db = await _setup(coins=100_000, gems=100)
+        try:
+            await db.execute(
+                "INSERT INTO casino_case_opens "
+                "(user_id, guild_id, case_id, item_id, stars, currency, price) "
+                "VALUES (2, 42, 'bronze_case', 'basic_gen', 0, 'coins', 1000)"
+            )
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (2, 42, 'color', 'black', 500, 'coins', 17, 'black', 0, -500)"
+            )
+            await db.execute(
+                "INSERT INTO casino_blackjack_games "
+                "(user_id, guild_id, bet, currency, status, player_cards, "
+                "dealer_cards, shoe, doubled, payout, net) "
+                "VALUES (2, 42, 100, 'coins', 'done', '[]', '[]', '[]', 0, 300, 200)"
+            )
+            await db.commit()
+            nets = await m.bot._casino_daily_nets(2)
+            assert nets["coins"] == -1300
+            responsible = m.bot._casino_responsible(nets)
+            assert responsible["lost"]["coins"] == 1300
+            assert responsible["remaining"]["coins"] == 98_700
+            assert responsible["blocked"]["coins"] is False
+
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (2, 42, 'color', 'red', 100000, 'coins', 0, 'green', 0, -100000)"
+            )
+            await db.commit()
+            with pytest.raises(ValueError, match="Дневной лимит"):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "case-limit-2",
+                        "action": "case_open",
+                        "user_id": "2",
+                        "guild_id": "42",
+                        "payload": {"case_id": "bronze_case"},
+                    }
+                )
+            with pytest.raises(ValueError, match="Дневной лимит"):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "roulette-limit-2",
+                        "action": "roulette_spin",
+                        "user_id": "2",
+                        "guild_id": "42",
+                        "payload": {
+                            "currency": "coins",
+                            "bet_type": "color",
+                            "bet_value": "red",
+                            "amount": 100,
+                        },
+                    }
+                )
+            with pytest.raises(ValueError, match="Дневной лимит"):
+                await m.bot.handle_web_game_command(
+                    {
+                        "id": "bj-limit-2",
+                        "action": "blackjack_start",
+                        "user_id": "2",
+                        "guild_id": "42",
+                        "payload": {"currency": "coins", "amount": 100},
+                    }
+                )
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_casino_top_and_badges():
+    async def run():
+        db = await _setup(coins=1000, gems=100)
+        try:
+            await db.execute(
+                "INSERT INTO casino_case_opens "
+                "(user_id, guild_id, case_id, item_id, stars, currency, price) "
+                "VALUES (2, 42, 'bronze_case', 'basic_gen', 0, 'coins', 1000)"
+            )
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (2, 42, 'color', 'black', 100, 'coins', 0, 'green', 0, 100)"
+            )
+            await db.execute(
+                "INSERT INTO casino_roulette_spins "
+                "(user_id, guild_id, bet_type, bet_value, amount, currency, "
+                "number, color, payout, net) "
+                "VALUES (3, 42, 'color', 'black', 100, 'coins', 17, 'black', 200, 100)"
+            )
+            await db.execute(
+                "INSERT INTO casino_blackjack_games "
+                "(user_id, guild_id, bet, currency, status, player_cards, "
+                "dealer_cards, shoe, doubled, payout, net) "
+                "VALUES (2, 42, 100, 'coins', 'done', '[]', '[]', '[]', 0, 300, 200)"
+            )
+            await db.commit()
+            top = await m.bot._casino_top(42)
+            assert len(top) == 2
+            assert top[0]["user_id"] == "3"
+            assert top[0]["net"] == 100
+            assert top[1]["user_id"] == "2"
+            assert top[1]["net"] == -700
+            assert top[0]["name"] == "Guest"
+
+            badges = await m.bot._casino_badges(
+                2, {"wins": 10}, {"won": 5}
+            )
+            unlocked = {badge["id"] for badge in badges if badge["unlocked"]}
+            assert {
+                "first_case",
+                "zero",
+                "roulette_10",
+                "blackjack_win",
+                "blackjack_5",
+            } <= unlocked
+            assert "case_50" not in unlocked
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_casino_responsible_defaults():
+    responsible = m.bot._casino_responsible({})
+    assert responsible["lost"] == {"coins": 0, "gems": 0}
+    assert responsible["remaining"] == {
+        "coins": 100_000,
+        "gems": 500,
+    }
+    assert responsible["blocked"] == {"coins": False, "gems": False}
+
+
 def test_casino_case_open_rejects_bad_input_and_limits():
     async def run():
         db = await _setup(coins=0, gems=0)

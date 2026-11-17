@@ -1269,6 +1269,10 @@ CASINO_ROOM_FINISHED_SECONDS = 2 * 60
 ROULETTE_TABLE_BET_SECONDS = 30
 ROULETTE_TABLE_RESULT_SECONDS = 6
 ROULETTE_TABLE_HISTORY = 10
+CASINO_DAILY_LOSS_LIMIT = {
+    "coins": 100_000,
+    "gems": 500,
+}
 
 CASINO_CASES = (
     {
@@ -3606,7 +3610,9 @@ class CastleBot(commands.Bot):
             price = max(int(case["min_price"]), coins_price)
         return {"items": weighted, "price": int(price)}
 
-    async def _web_game_casino_state(self, user_id: int) -> dict:
+    async def _web_game_casino_state(
+        self, user_id: int, guild_id: int = 0
+    ) -> dict:
         year, week, starts, ends = self._casino_week_bounds()
         pool = await self._casino_pool()
 
@@ -3716,6 +3722,13 @@ class CastleBot(commands.Bot):
         opened_today = int(row[0] or 0) if row else 0
 
         coins, gems = await self._casino_balances(user_id)
+        roulette_state = await self._web_game_roulette_state(
+            user_id, coins, gems
+        )
+        blackjack_state = await self._web_game_blackjack_state(
+            user_id, coins, gems
+        )
+        nets = await self._casino_daily_nets(user_id)
         return {
             "week": {
                 "year": int(year),
@@ -3735,11 +3748,14 @@ class CastleBot(commands.Bot):
             "history": history,
             "opened_today": opened_today,
             "day_limit": int(CASINO_DAY_LIMIT),
-            "roulette": await self._web_game_roulette_state(
-                user_id, coins, gems
-            ),
-            "blackjack": await self._web_game_blackjack_state(
-                user_id, coins, gems
+            "roulette": roulette_state,
+            "blackjack": blackjack_state,
+            "responsible": self._casino_responsible(nets),
+            "top": await self._casino_top(guild_id),
+            "badges": await self._casino_badges(
+                user_id,
+                roulette_state.get("stats") or {},
+                blackjack_state.get("stats") or {},
             ),
         }
 
@@ -3775,6 +3791,7 @@ class CastleBot(commands.Bot):
             )
 
         currency = str(case["currency"])
+        await self._casino_check_loss_limit(user_id, currency)
         column = "coins" if currency == "coins" else "gems"
         offer = self._casino_case_offer(case, pool)
         price = int(offer["price"])
@@ -3932,6 +3949,166 @@ class CastleBot(commands.Bot):
         if not row:
             return 0, 0
         return int(row[0] or 0), int(row[1] or 0)
+
+    async def _casino_daily_nets(self, user_id: int) -> dict[str, int]:
+        """Чистый результат казино за сегодня по каждой валюте."""
+        async with self.db.execute(
+            "SELECT currency, COALESCE(SUM(net), 0) FROM ("
+            "SELECT currency, net FROM casino_roulette_spins "
+            "WHERE user_id = ? AND color != 'pending' "
+            "AND date(created_at) = date('now') "
+            "UNION ALL "
+            "SELECT currency, net FROM casino_blackjack_games "
+            "WHERE user_id = ? AND status = 'done' "
+            "AND date(created_at) = date('now') "
+            "UNION ALL "
+            "SELECT currency, -price AS net FROM casino_case_opens "
+            "WHERE user_id = ? AND date(created_at) = date('now')"
+            ") GROUP BY currency",
+            (user_id, user_id, user_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {
+            str(currency): int(total or 0) for currency, total in rows
+        }
+
+    async def _casino_check_loss_limit(
+        self, user_id: int, currency: str
+    ) -> None:
+        nets = await self._casino_daily_nets(user_id)
+        limit = int(CASINO_DAILY_LOSS_LIMIT.get(currency, 0) or 0)
+        if limit <= 0:
+            return
+        if -int(nets.get(currency, 0)) >= limit:
+            raise ValueError(
+                "Дневной лимит проигрыша достигнут. "
+                "Возвращайтесь завтра."
+            )
+
+    @staticmethod
+    def _casino_responsible(nets: dict[str, int]) -> dict:
+        limits = {
+            currency: int(value)
+            for currency, value in CASINO_DAILY_LOSS_LIMIT.items()
+        }
+        lost = {
+            currency: max(0, -int(nets.get(currency, 0)))
+            for currency in limits
+        }
+        remaining = {
+            currency: max(0, limits[currency] - lost[currency])
+            for currency in limits
+        }
+        return {
+            "limits": limits,
+            "lost": lost,
+            "remaining": remaining,
+            "blocked": {
+                currency: lost[currency] >= limits[currency]
+                for currency in limits
+            },
+        }
+
+    async def _casino_top(self, guild_id: int) -> list[dict]:
+        if not guild_id:
+            return []
+        async with self.db.execute(
+            "SELECT user_id, SUM(net) AS total FROM ("
+            "SELECT user_id, net FROM casino_roulette_spins "
+            "WHERE guild_id = ? AND color != 'pending' "
+            "UNION ALL "
+            "SELECT user_id, net FROM casino_blackjack_games "
+            "WHERE guild_id = ? AND status = 'done' "
+            "UNION ALL "
+            "SELECT user_id, -price AS net FROM casino_case_opens "
+            "WHERE guild_id = ?"
+            ") GROUP BY user_id ORDER BY total DESC LIMIT 10",
+            (guild_id, guild_id, guild_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        guild = self.get_guild(guild_id) if guild_id else None
+        result = []
+        for user_id, total in rows:
+            member = guild.get_member(int(user_id)) if guild else None
+            name = (
+                getattr(member, "display_name", None)
+                or getattr(member, "name", None)
+                or f"ID {user_id}"
+            )
+            avatar = (
+                str(getattr(member.display_avatar, "url", "") or "")
+                if member is not None
+                else ""
+            )
+            result.append(
+                {
+                    "user_id": str(user_id),
+                    "name": str(name),
+                    "avatar": avatar,
+                    "net": int(total or 0),
+                }
+            )
+        return result
+
+    async def _casino_badges(
+        self,
+        user_id: int,
+        roulette_stats: dict,
+        blackjack_stats: dict,
+    ) -> list[dict]:
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM casino_case_opens WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            cases_row = await cursor.fetchone()
+        cases = int(cases_row[0] or 0) if cases_row else 0
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM casino_roulette_spins "
+            "WHERE user_id = ? AND number = 0 AND color != 'pending'",
+            (user_id,),
+        ) as cursor:
+            zero_row = await cursor.fetchone()
+        zero_hits = int(zero_row[0] or 0) if zero_row else 0
+        roulette_wins = int((roulette_stats or {}).get("wins", 0) or 0)
+        blackjack_wins = int((blackjack_stats or {}).get("won", 0) or 0)
+        return [
+            {
+                "id": "first_case",
+                "label": "Первый кейс",
+                "desc": "Открыть один кейс",
+                "unlocked": cases >= 1,
+            },
+            {
+                "id": "case_50",
+                "label": "Коллекционер",
+                "desc": "Открыть 50 кейсов",
+                "unlocked": cases >= 50,
+            },
+            {
+                "id": "zero",
+                "label": "Зеро",
+                "desc": "Поймать зеро в рулетке",
+                "unlocked": zero_hits >= 1,
+            },
+            {
+                "id": "roulette_10",
+                "label": "Любимчик колеса",
+                "desc": "Выиграть 10 ставок в рулетку",
+                "unlocked": roulette_wins >= 10,
+            },
+            {
+                "id": "blackjack_win",
+                "label": "Блэкджек",
+                "desc": "Выиграть первую раздачу",
+                "unlocked": blackjack_wins >= 1,
+            },
+            {
+                "id": "blackjack_5",
+                "label": "Дилер в шоке",
+                "desc": "Выиграть 5 раздач в блэкджек",
+                "unlocked": blackjack_wins >= 5,
+            },
+        ]
 
     async def _web_game_roulette_state(
         self, user_id: int, coins: int, gems: int
@@ -4110,6 +4287,7 @@ class CastleBot(commands.Bot):
                 f"{limits['max']}."
             )
 
+        await self._casino_check_loss_limit(user_id, currency)
         number = spin_number()
         color = roulette_color(number)
         payout = roulette_payout(bet_type, bet_value, number, amount)
@@ -4208,6 +4386,7 @@ class CastleBot(commands.Bot):
                 f"{limits['max']}."
             )
 
+        await self._casino_check_loss_limit(user_id, currency)
         shoe = new_shoe()
         player = [shoe.pop(), shoe.pop()]
         dealer = [shoe.pop(), shoe.pop()]
@@ -4433,6 +4612,9 @@ class CastleBot(commands.Bot):
         bet = game["bet"]
         if balance < bet:
             raise ValueError("Недостаточно средств для удвоения.")
+        await self._casino_check_loss_limit(
+            user_id, str(game["currency"])
+        )
         player = list(game["player"])
         dealer = list(game["dealer"])
         shoe = list(game["shoe"])
@@ -4740,6 +4922,7 @@ class CastleBot(commands.Bot):
                 f"{limits['max']}."
             )
         column = "coins" if currency == "coins" else "gems"
+        await self._casino_check_loss_limit(user_id, currency)
         async with self._casino_room_lock:
             if self._casino_room_for_user(guild.id, user_id):
                 raise ValueError("Вы уже находитесь в комнате.")
@@ -4839,6 +5022,7 @@ class CastleBot(commands.Bot):
                 f"{limits['max']}."
             )
         column = "coins" if currency == "coins" else "gems"
+        await self._casino_check_loss_limit(user_id, currency)
         async with self._casino_room_lock:
             room = self._casino_room_find(guild.id, code)
             if room is None:
@@ -5163,6 +5347,9 @@ class CastleBot(commands.Bot):
             bet = int(current["bet"])
             if balance < bet:
                 raise ValueError("Недостаточно средств для удвоения.")
+            await self._casino_check_loss_limit(
+                user_id, str(room["currency"])
+            )
             column = "gems" if room["currency"] == "gems" else "coins"
             async with db_transaction():
                 cursor = await self.db.execute(
@@ -5495,6 +5682,7 @@ class CastleBot(commands.Bot):
                 f"{limits['max']}."
             )
 
+        await self._casino_check_loss_limit(user_id, currency)
         async with self._roulette_table_lock:
             table = self._roulette_table_get(guild.id)
             if (
@@ -7179,7 +7367,9 @@ class CastleBot(commands.Bot):
             log.exception("WEB_GAME: не удалось получить улучшения")
             upgrades_state = None
         try:
-            casino_state = await self._web_game_casino_state(user_id)
+            casino_state = await self._web_game_casino_state(
+                user_id, guild.id
+            )
         except Exception:
             log.exception("WEB_GAME: не удалось получить казино")
             casino_state = None
