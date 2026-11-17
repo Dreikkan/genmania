@@ -1266,6 +1266,9 @@ CASINO_ROOM_MIN_PLAYERS = 2
 CASINO_ROOM_TURN_SECONDS = 40
 CASINO_ROOM_WAIT_SECONDS = 15 * 60
 CASINO_ROOM_FINISHED_SECONDS = 2 * 60
+ROULETTE_TABLE_BET_SECONDS = 30
+ROULETTE_TABLE_RESULT_SECONDS = 6
+ROULETTE_TABLE_HISTORY = 10
 
 CASINO_CASES = (
     {
@@ -1686,6 +1689,8 @@ class CastleBot(commands.Bot):
         self._last_disconnect_at: str | None = None
         self._casino_rooms: dict[str, dict] = {}
         self._casino_room_lock = asyncio.Lock()
+        self._roulette_tables: dict[int, dict] = {}
+        self._roulette_table_lock = asyncio.Lock()
 
     async def setup_hook(self):
         # 1. Создаём папку data
@@ -1734,6 +1739,7 @@ class CastleBot(commands.Bot):
         await self.backup_database("startup")
         await self.init_db()
         await self._casino_room_recover_stakes()
+        await self._roulette_table_recover_bets()
         await self.tree.sync()
 
         await self.load_application_emojis()
@@ -1763,6 +1769,9 @@ class CastleBot(commands.Bot):
             ),
             self._spawn_background("retention_task", self.retention_task),
             self._spawn_background("casino_room_task", self.casino_room_task),
+            self._spawn_background(
+                "roulette_table_task", self.roulette_table_task
+            ),
             self._spawn_background("diagnostics_task", self.diagnostics_task),
             self._spawn_background("health_writer", self.health_writer),
         ]
@@ -5367,6 +5376,333 @@ class CastleBot(commands.Bot):
                 )
         log.warning(
             "CASINO_ROOM: после перезапуска возвращены ставки: %s",
+            restored,
+        )
+
+    # ---------- Казино: общий стол рулетки ----------
+
+    def _roulette_table_get(self, guild_id: int) -> dict:
+        table = self._roulette_tables.get(int(guild_id))
+        now = time.time()
+        if table is None:
+            table = {
+                "guild_id": int(guild_id),
+                "round": 1,
+                "status": "betting",
+                "deadline": now + ROULETTE_TABLE_BET_SECONDS,
+                "bets": [],
+                "history": [],
+                "last": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._roulette_tables[int(guild_id)] = table
+        return table
+
+    def _roulette_table_snapshot(
+        self, table: dict, viewer_id: int
+    ) -> dict:
+        bets = []
+        my_bet = None
+        for bet in table["bets"]:
+            entry = {
+                "user_id": str(bet["user_id"]),
+                "name": str(bet["name"]),
+                "avatar": str(bet.get("avatar") or ""),
+                "bet_type": str(bet["bet_type"]),
+                "bet_value": str(bet["bet_value"]),
+                "amount": int(bet["amount"]),
+                "currency": str(bet["currency"]),
+            }
+            bets.append(entry)
+            if int(bet["user_id"]) == int(viewer_id):
+                my_bet = entry
+        return {
+            "round": int(table["round"]),
+            "status": str(table["status"]),
+            "deadline": float(table["deadline"]),
+            "bet_seconds": int(ROULETTE_TABLE_BET_SECONDS),
+            "result_seconds": int(ROULETTE_TABLE_RESULT_SECONDS),
+            "bets": bets,
+            "players": len({bet["user_id"] for bet in table["bets"]}),
+            "my_bet": my_bet,
+            "last": table.get("last"),
+            "history": list(table["history"]),
+        }
+
+    async def _web_game_roulette_table_state(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        user_id = int(member.id)
+        async with self._roulette_table_lock:
+            table = self._roulette_table_get(guild.id)
+            snapshot = self._roulette_table_snapshot(table, user_id)
+        return {
+            "ok": True,
+            "action": "roulette_table_state",
+            "table": snapshot,
+        }
+
+    async def _web_game_roulette_table_bet(
+        self,
+        command: dict,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> dict:
+        payload = command.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        currency = str(payload.get("currency") or "coins").strip()
+        if currency not in CASINO_TABLE_LIMITS:
+            raise ValueError("Неверная валюта ставки.")
+        bet_type = str(payload.get("bet_type") or "").strip().lower()
+        bet_value = str(payload.get("bet_value") or "").strip().lower()
+        if bet_type not in ROULETTE_BET_TYPES:
+            raise ValueError("Неизвестный тип ставки.")
+        if bet_type == "number":
+            try:
+                number_bet = int(bet_value)
+            except (TypeError, ValueError):
+                raise ValueError("Выберите число от 0 до 36.")
+            if not 0 <= number_bet <= 36:
+                raise ValueError("Выберите число от 0 до 36.")
+            bet_value = str(number_bet)
+        elif bet_type == "color" and bet_value not in {"red", "black"}:
+            raise ValueError("Выберите красное или чёрное.")
+        elif bet_type == "parity" and bet_value not in {"even", "odd"}:
+            raise ValueError("Выберите чёт или нечет.")
+        elif bet_type == "range" and bet_value not in {"low", "high"}:
+            raise ValueError("Выберите диапазон 1–18 или 19–36.")
+        elif bet_type == "dozen" and bet_value not in {"1", "2", "3"}:
+            raise ValueError("Выберите дюжину.")
+
+        try:
+            amount = int(payload.get("amount") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Некорректная ставка.")
+        user_id = int(member.id)
+        coins, gems = await self._casino_balances(user_id)
+        balance = gems if currency == "gems" else coins
+        limits = self._casino_bet_limits(balance, currency)
+        if limits["max"] <= 0:
+            raise ValueError("Недостаточно средств для ставки.")
+        if amount < limits["min"] or amount > limits["max"]:
+            raise ValueError(
+                f"Ставка должна быть от {limits['min']} до "
+                f"{limits['max']}."
+            )
+
+        async with self._roulette_table_lock:
+            table = self._roulette_table_get(guild.id)
+            if (
+                table["status"] != "betting"
+                or float(table["deadline"]) <= time.time()
+            ):
+                raise ValueError(
+                    "Приём ставок закрыт. Дождитесь следующего раунда."
+                )
+            if any(
+                int(bet["user_id"]) == user_id for bet in table["bets"]
+            ):
+                raise ValueError(
+                    "Вы уже сделали ставку в этом раунде."
+                )
+            column = "coins" if currency == "coins" else "gems"
+            async with db_transaction():
+                cursor = await self.db.execute(
+                    f"UPDATE players SET {column} = {column} - ? "
+                    f"WHERE user_id = ? AND {column} >= ?",
+                    (amount, user_id, amount),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("Недостаточно средств для ставки.")
+                inserted = await self.db.execute(
+                    "INSERT INTO casino_roulette_spins "
+                    "(user_id, guild_id, bet_type, bet_value, amount, "
+                    "currency, number, color, payout, net) "
+                    "VALUES (?, ?, ?, ?, ?, ?, -1, 'pending', 0, ?)",
+                    (
+                        user_id,
+                        guild.id,
+                        bet_type,
+                        bet_value,
+                        amount,
+                        currency,
+                        -amount,
+                    ),
+                )
+                row_id = int(inserted.lastrowid or 0)
+            table["bets"].append(
+                {
+                    "user_id": user_id,
+                    "name": str(member.display_name),
+                    "avatar": str(
+                        getattr(member.display_avatar, "url", "") or ""
+                    ),
+                    "bet_type": bet_type,
+                    "bet_value": bet_value,
+                    "amount": amount,
+                    "currency": currency,
+                    "row_id": row_id,
+                }
+            )
+            table["updated_at"] = time.time()
+            snapshot = self._roulette_table_snapshot(table, user_id)
+        state = await self._web_game_state(user_id, guild.id)
+        return {
+            "ok": True,
+            "action": "roulette_table_bet",
+            "table": snapshot,
+            "message": "Ставка принята. Ждём общий спин.",
+            "state": state,
+        }
+
+    async def _roulette_table_tick(self) -> None:
+        now = time.time()
+        async with self._roulette_table_lock:
+            for table in list(self._roulette_tables.values()):
+                if (
+                    table["status"] == "betting"
+                    and now >= float(table["deadline"])
+                ):
+                    if not table["bets"]:
+                        table["deadline"] = (
+                            now + ROULETTE_TABLE_BET_SECONDS
+                        )
+                        table["updated_at"] = now
+                        continue
+                    number = spin_number()
+                    color = roulette_color(number)
+                    bets = list(table["bets"])
+                    results = []
+                    async with db_transaction():
+                        for bet in bets:
+                            amount = int(bet["amount"])
+                            payout = roulette_payout(
+                                str(bet["bet_type"]),
+                                str(bet["bet_value"]),
+                                number,
+                                amount,
+                            )
+                            net = payout - amount
+                            if bet.get("row_id"):
+                                await self.db.execute(
+                                    "UPDATE casino_roulette_spins "
+                                    "SET number = ?, color = ?, "
+                                    "payout = ?, net = ? "
+                                    "WHERE id = ? AND color = 'pending'",
+                                    (
+                                        number,
+                                        color,
+                                        payout,
+                                        net,
+                                        int(bet["row_id"]),
+                                    ),
+                                )
+                            if payout:
+                                column = (
+                                    "gems"
+                                    if bet["currency"] == "gems"
+                                    else "coins"
+                                )
+                                await self.db.execute(
+                                    f"UPDATE players SET {column} = "
+                                    f"{column} + ? WHERE user_id = ?",
+                                    (payout, int(bet["user_id"])),
+                                )
+                            results.append(
+                                {
+                                    "user_id": str(bet["user_id"]),
+                                    "name": str(bet["name"]),
+                                    "bet_type": str(bet["bet_type"]),
+                                    "bet_value": str(bet["bet_value"]),
+                                    "amount": amount,
+                                    "currency": str(bet["currency"]),
+                                    "payout": payout,
+                                    "net": net,
+                                }
+                            )
+                    table["last"] = {
+                        "number": number,
+                        "color": color,
+                        "at": now,
+                        "results": results,
+                    }
+                    table["history"].append(number)
+                    table["history"] = table["history"][
+                        -ROULETTE_TABLE_HISTORY:
+                    ]
+                    table["bets"] = []
+                    table["status"] = "result"
+                    table["deadline"] = (
+                        now + ROULETTE_TABLE_RESULT_SECONDS
+                    )
+                    table["updated_at"] = now
+                elif (
+                    table["status"] == "result"
+                    and now >= float(table["deadline"])
+                ):
+                    table["status"] = "betting"
+                    table["round"] = int(table["round"]) + 1
+                    table["deadline"] = (
+                        now + ROULETTE_TABLE_BET_SECONDS
+                    )
+                    table["updated_at"] = now
+
+    async def roulette_table_task(self) -> None:
+        while not self.is_closed():
+            try:
+                await self._roulette_table_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "ROULETTE_TABLE_TASK: ошибка общего стола"
+                )
+            await asyncio.sleep(1)
+
+    async def _roulette_table_recover_bets(self) -> None:
+        if self.db is None:
+            return
+        try:
+            async with self.db.execute(
+                "SELECT id, user_id, currency, amount "
+                "FROM casino_roulette_spins WHERE color = 'pending'"
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            log.exception(
+                "ROULETTE_TABLE: не удалось проверить ставки стола"
+            )
+            return
+        if not rows:
+            return
+        restored = 0
+        for row_id, user_id, currency, amount in rows:
+            column = "gems" if str(currency) == "gems" else "coins"
+            try:
+                async with db_transaction():
+                    await self.db.execute(
+                        f"UPDATE players SET {column} = {column} + ? "
+                        "WHERE user_id = ?",
+                        (int(amount or 0), int(user_id)),
+                    )
+                    await self.db.execute(
+                        "DELETE FROM casino_roulette_spins "
+                        "WHERE id = ? AND color = 'pending'",
+                        (int(row_id),),
+                    )
+                restored += 1
+            except Exception:
+                log.exception(
+                    "ROULETTE_TABLE: не удалось вернуть ставку user=%s",
+                    user_id,
+                )
+        log.warning(
+            "ROULETTE_TABLE: после перезапуска возвращены ставки: %s",
             restored,
         )
 
@@ -9512,6 +9848,14 @@ class CastleBot(commands.Bot):
             return await self._web_game_room_stand(command, guild, member)
         if action == "room_double":
             return await self._web_game_room_double(command, guild, member)
+        if action == "roulette_table_state":
+            return await self._web_game_roulette_table_state(
+                command, guild, member
+            )
+        if action == "roulette_table_bet":
+            return await self._web_game_roulette_table_bet(
+                command, guild, member
+            )
         if action == "pet_buy":
             return await self._web_game_pet_buy(command, guild, member)
         if action == "pet_activate":
