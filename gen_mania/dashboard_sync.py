@@ -38,6 +38,7 @@ log = logging.getLogger("gen_mania.dashboard")
 
 TOP_PLAYERS_LIMIT = 200
 TOP_SERVERS_LIMIT = 12
+SYNC_BACKOFF_SECONDS = (60, 120, 240, 480, 960, 1800)
 TOP_CLANS_LIMIT = 5
 HISTORY_DAYS = 30
 
@@ -124,6 +125,7 @@ class DashboardSync:
             self._applied_settings_revision = ""
         self._last_success: dt.datetime | None = None
         self._last_error: dt.datetime | None = None
+        self._failures = 0
 
         if not self.url or not self.token:
             log.info(
@@ -142,11 +144,13 @@ class DashboardSync:
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
             started = time.monotonic()
+            retry_delay = 0.0
             try:
                 payload = await self.collect()
                 response = await self.push(payload)
                 await self._apply_pending_settings(response)
                 self._last_success = dt.datetime.now(UTC)
+                self._failures = 0
                 log.info(
                     "DASHBOARD_SYNC: отправлено (players=%s, guilds=%s)",
                     payload["stats"].get("players"),
@@ -154,12 +158,28 @@ class DashboardSync:
                 )
             except asyncio.CancelledError:
                 raise
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                self._last_error = dt.datetime.now(UTC)
+                retry_delay = self._next_backoff()
+                log.warning(
+                    "DASHBOARD_SYNC: сайт недоступен (%s: %s), "
+                    "повтор через %s с",
+                    type(exc).__name__,
+                    str(exc) or "таймаут",
+                    int(retry_delay),
+                )
             except Exception:
                 self._last_error = dt.datetime.now(UTC)
                 log.exception("DASHBOARD_SYNC: не удалось отправить статистику")
 
+            delay = retry_delay or self.interval
             elapsed = time.monotonic() - started
-            await asyncio.sleep(max(10.0, self.interval - elapsed))
+            await asyncio.sleep(max(10.0, delay - elapsed))
+
+    def _next_backoff(self) -> float:
+        index = min(self._failures, len(SYNC_BACKOFF_SECONDS) - 1)
+        self._failures += 1
+        return float(SYNC_BACKOFF_SECONDS[index])
 
     # ------------------------------------------------------------------
     # DB helpers
